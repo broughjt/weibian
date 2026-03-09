@@ -1,9 +1,9 @@
-use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use clap::builder::{BoolishValueParser, ValueParser};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, ValueHint};
+use std::fmt::{self, Display, Formatter};
 
 /// The character typically used to separate path components
 /// in environment variables.
@@ -29,7 +29,7 @@ const AFTER_HELP: &str = color_print::cstr!("\
 #[derive(Debug, Clone, Parser)]
 #[clap(
     name = "wb",
-    version = crate::weibian_version(),
+    version = env!("CARGO_PKG_VERSION"),
     author,
     help_template = HELP_TEMPLATE,
     after_help = AFTER_HELP,
@@ -60,99 +60,29 @@ pub struct GlobalArgs {
 
 /// What to do.
 #[derive(Debug, Clone, Subcommand)]
-#[command()]
 pub enum Command {
-    /// Compiles input file(s) to designated output format(s).
+    /// Compiles the input directory to HTML.
     #[command(visible_alias = "c")]
     Compile(CompileCommand),
-    // /// Watches an input file and recompiles on changes.
-    // #[command(visible_alias = "w")]
-    // Watch(WatchCommand),
 
-    // /// Opens a preview server.
-    // #[command(visible_alias = "s")]
-    // Serve(ServeCommand),
-    // /// Initializes a new project from a template.
-    // Init(InitCommand),
-
-    // /// Self update the Weibian CLI.
-    // #[cfg_attr(not(feature = "self-update"), clap(hide = true))]
-    // Update(UpdateCommand),
+    /// Watches the input directory and recompiles on changes.
+    #[command(visible_alias = "w")]
+    Watch(WatchCommand),
 }
 
-/// Compiles input file(s) to designated output format(s).
+/// Compiles the input directory to HTML.
 #[derive(Debug, Clone, Parser)]
 pub struct CompileCommand {
-    /// Arguments for compilation.
     #[clap(flatten)]
     pub args: CompileArgs,
 }
 
-// Compiles an input file into a supported output format.
-// #[derive(Debug, Clone, Parser)]
-// pub struct WatchCommand {
-//     /// Arguments for compilation.
-//     #[clap(flatten)]
-//     pub args: CompileArgs,
-
-//     /// Arguments for the HTTP server.
-//     #[cfg(feature = "http-server")]
-//     #[clap(flatten)]
-//     pub server: ServerArgs,
-// }
-
-// Opens a preview server.
-// #[derive(Debug, Clone, Parser)]
-// pub struct ServeCommand {
-//     /// Arguments for the HTTP server.
-//     #[clap(flatten)]
-//     pub server: ServerArgs,
-// }
-
-// Initializes a new project from a template.
-// #[derive(Debug, Clone, Parser)]
-// pub struct InitCommand {
-//     /// The template to use, e.g. `@preview/charged-ieee`.
-//     ///
-//     /// You can specify the version by appending e.g. `:0.1.0`. If no version is
-//     /// specified, Typst will default to the latest version.
-//     ///
-//     /// Supports both local and published templates.
-//     pub template: String,
-
-//     /// The project directory, defaults to the template's name.
-//     pub dir: Option<String>,
-
-//     /// Arguments related to storage of packages in the system.
-//     #[clap(flatten)]
-//     pub package: PackageArgs,
-// }
-
-// /// Update the CLI using a pre-compiled binary from a Typst GitHub release.
-// #[derive(Debug, Clone, Parser)]
-// pub struct UpdateCommand {
-//     /// Which version to update to (defaults to latest).
-//     pub version: Option<Version>,
-
-//     /// Forces a downgrade to an older version (required for downgrading).
-//     #[clap(long, default_value_t = false)]
-//     pub force: bool,
-
-//     /// Reverts to the version from before the last update (only possible if
-//     /// `typst update` has previously ran).
-//     #[clap(
-//         long,
-//         default_value_t = false,
-//         conflicts_with = "version",
-//         conflicts_with = "force"
-//     )]
-//     pub revert: bool,
-
-//     /// Custom path to the backup file created on update and used by `--revert`,
-//     /// defaults to system-dependent location
-//     #[clap(long = "backup-path", env = "TYPST_UPDATE_BACKUP_PATH", value_name = "FILE")]
-//     pub backup_path: Option<PathBuf>,
-// }
+/// Watches the input directory and recompiles on changes.
+#[derive(Debug, Clone, Parser)]
+pub struct WatchCommand {
+    #[clap(flatten)]
+    pub args: CompileArgs,
+}
 
 /// Arguments for compilation and watching.
 #[derive(Debug, Clone, Args)]
@@ -166,18 +96,13 @@ pub struct CompileArgs {
     pub public: Option<PathBuf>,
 
     /// Path to output directory (defaults to config or "dist").
-    #[clap(
-         value_hint = ValueHint::DirPath,
-     )]
+    #[clap(value_hint = ValueHint::DirPath)]
     pub output: Option<PathBuf>,
 
     /// Site configuration.
     #[clap(flatten)]
     pub site: SiteArgs,
 
-    // /// The format of the output file, inferred from the extension by default.
-    // #[arg(long = "format", short = 'f', default_value = "all")]
-    // pub format: OutputFormat,
     /// World arguments.
     #[clap(flatten)]
     pub world: WorldArgs,
@@ -186,10 +111,6 @@ pub struct CompileArgs {
     /// conformance with.
     #[arg(long = "pdf-standard", value_delimiter = ',')]
     pub pdf_standard: Vec<PdfStandard>,
-
-    /// Processing arguments.
-    #[clap(flatten)]
-    pub process: ProcessArgs,
 }
 
 /// Site configuration overrides.
@@ -212,8 +133,7 @@ pub struct SiteArgs {
     pub trailing_slash: Option<bool>,
 }
 
-/// Arguments for the construction of a world. Shared by compile, watch, and
-/// query.
+/// Arguments for the Typst world.
 #[derive(Debug, Clone, Args)]
 pub struct WorldArgs {
     /// Configures the project root (for absolute paths).
@@ -249,19 +169,6 @@ pub struct WorldArgs {
     pub creation_timestamp: Option<DateTime<Utc>>,
 }
 
-/// Arguments for configuration the process of compilaton itself.
-#[derive(Debug, Clone, Args)]
-pub struct ProcessArgs {
-    /// Number of parallel jobs spawned during compilation. Defaults to number
-    /// of CPUs. Setting it to 1 disables parallelism.
-    #[clap(long, short)]
-    pub jobs: Option<usize>,
-
-    /// The format to emit diagnostics in.
-    #[clap(long, default_value_t)]
-    pub diagnostic_format: DiagnosticFormat,
-}
-
 /// Arguments related to where packages are stored in the system.
 #[derive(Debug, Clone, Args)]
 pub struct PackageArgs {
@@ -279,7 +186,7 @@ pub struct PackageArgs {
 }
 
 /// Common arguments to customize available fonts.
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Args)]
 pub struct FontArgs {
     /// Adds additional directories that are recursively searched for fonts.
     ///
@@ -299,26 +206,6 @@ pub struct FontArgs {
     pub ignore_system_fonts: bool,
 }
 
-// Arguments for the HTTP server.
-// #[cfg(feature = "http-server")]
-// #[derive(Debug, Clone, Parser)]
-// pub struct ServerArgs {
-//     /// Disables the built-in HTTP server for HTML export.
-//     // #[clap(long)]
-//     // pub no_serve: bool,
-
-//     /// Disables the injected live reload script for HTML export. The HTML that
-//     /// is written to disk isn't affected either way.
-//     // #[clap(long)]
-//     // pub no_reload: bool,
-
-//     /// The port where HTML is served.
-//     ///
-//     /// Defaults to the first free port in the range 3000-3005.
-//     #[clap(long)]
-//     pub port: Option<u16>,
-// }
-
 macro_rules! display_possible_values {
     ($ty:ty) => {
         impl Display for $ty {
@@ -331,26 +218,6 @@ macro_rules! display_possible_values {
         }
     };
 }
-
-/// Which format to use for the generated output file.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, ValueEnum)]
-pub enum OutputFormat {
-    Pdf,
-    Html,
-    All,
-}
-
-display_possible_values!(OutputFormat);
-
-/// Which format to use for diagnostics.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, ValueEnum)]
-pub enum DiagnosticFormat {
-    #[default]
-    Human,
-    Short,
-}
-
-display_possible_values!(DiagnosticFormat);
 
 /// A PDF standard that Typst can enforce conformance with.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]

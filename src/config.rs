@@ -8,8 +8,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::args::{CompileArgs, ProcessArgs, WorldArgs};
-use crate::error::StrResult;
+use typst::diag::StrResult;
+
+use crate::args::{CompileArgs, WorldArgs};
 
 const DEFAULT_CONFIG_PATH: &str = ".wb/config.toml";
 
@@ -90,7 +91,6 @@ pub struct BuildConfig {
     pub output_directory: PathBuf,
     pub site: SiteSettings,
     pub world: WorldArgs,
-    pub process: ProcessArgs,
 }
 
 pub fn load_config(config_path: Option<&Path>) -> StrResult<WeibianConfig> {
@@ -154,7 +154,6 @@ impl BuildConfig {
                 trailing_slash,
             },
             world: args.world.clone(),
-            process: args.process.clone(),
         })
     }
 }
