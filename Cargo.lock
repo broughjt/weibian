@@ -2777,6 +2777,7 @@ dependencies = [
  "globset",
  "serde",
  "typst",
+ "walkdir",
 ]
 
 [[package]]

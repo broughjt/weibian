@@ -87,10 +87,6 @@ pub struct WatchCommand {
 /// Arguments for compilation and watching.
 #[derive(Debug, Clone, Args)]
 pub struct CompileArgs {
-    /// Path to input directory (defaults to config or "typ").
-    #[clap(value_hint = ValueHint::DirPath)]
-    pub input: Option<PathBuf>,
-
     /// Path to public assets directory (defaults to config or "public").
     #[clap(long = "public-dir", value_hint = ValueHint::DirPath)]
     pub public: Option<PathBuf>,

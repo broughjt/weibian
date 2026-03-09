@@ -15,4 +15,5 @@ ecow = "0.2.5"
 typst = "0.14.2"
 figment = { version = "0.10.8", features = ["toml"] }
 globset = "0.4.16"
+walkdir = "2.5.0"
 serde = { version = "1.0.210", features = ["derive"] }

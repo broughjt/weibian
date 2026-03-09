@@ -26,15 +26,15 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(args: CliArguments) -> StrResult<()> {
-    let config = config::load_config(args.global.config_file.as_deref())?;
-
-    let compile_args = match &args.command {
-        Command::Compile(cmd) => &cmd.args,
-        Command::Watch(cmd) => &cmd.args,
-    };
-
-    let build_config = config::BuildConfig::from(compile_args, &config)?;
+    let build_config = config::BuildConfig::try_load(args)?;
     println!("{build_config:#?}");
+
+    for result in build_config.iter_typst_sources() {
+        match result {
+            Ok(path) => println!("{}", path.display()),
+            Err(e) => eprintln!("walk error: {e}"),
+        }
+    }
 
     Ok(())
 }
