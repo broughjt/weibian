@@ -118,7 +118,7 @@ pub struct SiteArgs {
 
     /// Root directory of the site (for example, "/notes/").
     #[arg(long = "site-root-dir", value_name = "DIR")]
-    pub root_dir: Option<String>,
+    pub root_directory: Option<String>,
 
     /// Whether note URLs should end with a trailing slash.
     #[arg(

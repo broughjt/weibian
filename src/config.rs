@@ -26,8 +26,8 @@ pub struct WeibianConfig {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct FilesConfig {
-    pub output_dir: Option<PathBuf>,
-    pub public_dir: Option<PathBuf>,
+    pub output_directory: Option<PathBuf>,
+    pub public_directory: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_globset")]
     pub include: GlobSet,
     #[serde(default, deserialize_with = "deserialize_globset")]
@@ -37,13 +37,14 @@ pub struct FilesConfig {
 #[derive(Debug, Default, Deserialize)]
 pub struct SiteConfig {
     pub domain: Option<String>,
-    pub root_dir: Option<String>,
+    pub root_directory: Option<String>,
     pub trailing_slash: Option<bool>,
 }
+
 #[derive(Debug, Clone)]
 pub struct SiteSettings {
     pub domain: Option<String>,
-    pub root_dir: String,
+    pub root_directory: String,
     pub trailing_slash: bool,
 }
 
@@ -96,20 +97,20 @@ impl BuildConfig {
         };
         let include = config.files.include;
         let exclude = config.files.exclude;
-        let public_directory = resolve_dir(
+        let public_directory = resolve_directory(
             compile_args.public.as_ref(),
-            config.files.public_dir.as_ref(),
+            config.files.public_directory.as_ref(),
             "public",
         );
-        let output_directory = resolve_dir(
+        let output_directory = resolve_directory(
             compile_args.output.as_ref(),
-            config.files.output_dir.as_ref(),
+            config.files.output_directory.as_ref(),
             "dist",
         );
 
         let domain = compile_args.site.domain.or(config.site.domain);
-        let root_dir = normalize_root_dir(
-            compile_args.site.root_dir.as_deref().or(config.site.root_dir.as_deref()),
+        let root_directory = normalize_root_directory(
+            compile_args.site.root_directory.as_deref().or(config.site.root_directory.as_deref()),
         );
         let trailing_slash = compile_args
             .site
@@ -124,7 +125,7 @@ impl BuildConfig {
             output_directory,
             site: SiteSettings {
                 domain,
-                root_dir,
+                root_directory,
                 trailing_slash,
             },
             world,
@@ -154,18 +155,17 @@ impl BuildConfig {
     }
 }
 
-
 fn find_project_root() -> StrResult<PathBuf> {
     let cwd = std::env::current_dir()
         .map_err(|err| eco_format!("failed to get current directory: {err}"))?;
 
-    let mut dir = cwd.as_path();
+    let mut directory = cwd.as_path();
     loop {
-        if dir.join(".wb").is_dir() {
-            return Ok(dir.to_path_buf());
+        if directory.join(".wb").is_dir() {
+            return Ok(directory.to_path_buf());
         }
-        match dir.parent() {
-            Some(parent) => dir = parent,
+        match directory.parent() {
+            Some(parent) => directory = parent,
             None => {
                 return Err(eco_format!(
                     "could not find a .wb/ directory in {} or any parent directory",
@@ -220,13 +220,13 @@ where
     deserializer.deserialize_any(GlobSetVisitor)
 }
 
-fn resolve_dir(cli: Option<&PathBuf>, config: Option<&PathBuf>, default: &str) -> PathBuf {
+fn resolve_directory(cli: Option<&PathBuf>, config: Option<&PathBuf>, default: &str) -> PathBuf {
     cli.cloned()
         .or_else(|| config.cloned())
         .unwrap_or_else(|| PathBuf::from(default))
 }
 
-fn normalize_root_dir(raw: Option<&str>) -> String {
+fn normalize_root_directory(raw: Option<&str>) -> String {
     let mut root = raw.unwrap_or("/").trim().to_string();
     if root.is_empty() {
         root = "/".to_string();
