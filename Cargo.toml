@@ -10,7 +10,10 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5.40", features = ["derive", "env"] }
 ecow = "0.2.5"
-typst = "0.14.2"
+typst = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19" }
+typst-kit = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19", features = ["system-files", "scan-fonts", "embedded-fonts", "emit-diagnostics", "system-downloader", "vendor-openssl"] }
+typst-syntax = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 figment = { version = "0.10.8", features = ["toml"] }
 globset = "0.4.16"
 walkdir = "2.5.0"

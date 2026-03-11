@@ -1,4 +1,5 @@
 mod config;
+mod world;
 
 use std::process::ExitCode;
 
@@ -25,7 +26,10 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(arguments: Arguments) -> StrResult<()> {
-    let Arguments { config_file, command } = arguments;
+    let Arguments {
+        config_file,
+        command,
+    } = arguments;
     let config = config::BuildConfig::try_load(config_file)?;
 
     match command {
