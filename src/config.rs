@@ -131,6 +131,9 @@ impl BuildConfig {
 fn load_config(config_file: Option<PathBuf>) -> StrResult<(PathBuf, WeibianConfig)> {
     match config_file {
         Some(path) => {
+            if !path.exists() {
+                return Err(eco_format!("config file {} does not exist", path.display()));
+            }
             let root = path
                 .parent()
                 .ok_or_else(|| eco_format!("config path {} has no parent", path.display()))?
