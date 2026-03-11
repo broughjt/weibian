@@ -1,4 +1,5 @@
 mod config;
+mod files;
 mod world;
 
 use std::process::ExitCode;
