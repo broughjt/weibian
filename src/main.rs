@@ -1,18 +1,20 @@
 mod build;
+mod compile;
 mod config;
 mod file_store;
 mod import_graph;
+mod watch;
 mod world;
 
 use std::process::ExitCode;
 
+use anyhow::anyhow;
 use clap::Parser;
 use config::{Arguments, Command};
-use ecow::eco_format;
 use termcolor::{ColorChoice, StandardStream};
-use typst::diag::StrResult;
 
 use crate::build::BuildState;
+use crate::watch::WatchState;
 
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
@@ -32,7 +34,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(arguments: Arguments) -> StrResult<()> {
+fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
     let Arguments {
         config_file,
         command,
@@ -42,20 +44,23 @@ fn dispatch(arguments: Arguments) -> StrResult<()> {
     match command {
         Command::Build => {
             let build_state = BuildState::new(config);
-            let diagnostics = build_state.build().map_err(|e| eco_format!("{e}"))?;
-            let stderr = StandardStream::stderr(ColorChoice::Auto);
-            let any_errors = build_state
-                .emit_diagnostics(&mut stderr, &diagnostics)
-                .map_err(|e| eco_format!("{e}"))?;
+            let diagnostics = build_state.build()?;
+            let mut stderr = StandardStream::stderr(ColorChoice::Auto);
 
-            if any_errors {
-                return Err(eco_format!("build completed with errors"));
+            let has_errors = build_state.emit_diagnostics(&mut stderr, &diagnostics)?;
+
+            if has_errors {
+                return Err(anyhow!("build completed with errors"));
             }
 
             Ok(())
         }
         Command::Watch => {
-            todo!("watch")
+            let mut watch_state = WatchState::new(config);
+
+            watch_state.watch()?;
+
+            Ok(())
         }
     }
 }

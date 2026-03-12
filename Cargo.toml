@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
+comemo = "0.5.1"
+notify-debouncer-full = "0.6.0"
 clap = { version = "4.5.40", features = ["derive", "env"] }
 ecow = "0.2.5"
 figment = { version = "0.10.8", features = ["toml"] }

@@ -5,7 +5,6 @@ use anyhow::anyhow;
 use ecow::EcoVec;
 use termcolor::StandardStream;
 use typst::diag::{SourceDiagnostic, Warned};
-use typst_html::HtmlDocument;
 use typst_kit::{
     diagnostics::{emit, DiagnosticFormat},
     downloader::SystemDownloader,
@@ -16,13 +15,13 @@ use typst_syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use walkdir::WalkDir;
 
 use crate::{
+    compile::compile,
     config::BuildConfig,
     file_store::FileStore,
     world::{Resources, SystemWorld},
 };
 
 const USER_AGENT: &str = "weibian";
-const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
 pub struct BuildState {
     file_store: FileStore<SystemFiles>,
@@ -85,22 +84,16 @@ impl BuildState {
             let Warned {
                 output: result,
                 warnings,
-            } = typst::compile::<HtmlDocument>(&world);
+            } = compile(&world);
 
             match result {
-                Ok(document) => match typst_html::html(&document) {
-                    Ok(html) => {
-                        let output_path =
-                            self.config.output_directory.join(format!("{counter}.html"));
-                        fs::write(&output_path, html)?;
-                        if !warnings.is_empty() {
-                            diagnostics.insert(id, (warnings, EcoVec::new()));
-                        }
+                Ok((_document, content)) => {
+                    let output_path = self.config.output_directory.join(format!("{counter}.html"));
+                    fs::write(&output_path, content)?;
+                    if !warnings.is_empty() {
+                        diagnostics.insert(id, (warnings, EcoVec::new()));
                     }
-                    Err(errors) => {
-                        diagnostics.insert(id, (warnings, errors));
-                    }
-                },
+                }
                 Err(errors) => {
                     diagnostics.insert(id, (warnings, errors));
                 }
@@ -121,16 +114,12 @@ impl BuildState {
         let mut has_error = false;
 
         for (&id, (warnings, errors)) in diagnostics {
-            let keep = |d: &&SourceDiagnostic| d.message == HTML_MESSAGE;
-            let diagnostics = warnings
-                .iter()
-                .filter(keep)
-                .chain(errors.iter().filter(keep));
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
+            let diagnostics = warnings.iter().chain(errors.iter());
 
             emit(stream, &world, diagnostics, DiagnosticFormat::Human)?;
 
-            if !warnings.is_empty() || !errors.is_empty() {
+            if !errors.is_empty() {
                 has_error = true;
             }
         }

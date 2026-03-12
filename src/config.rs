@@ -1,15 +1,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand, ValueHint};
-use ecow::eco_format;
 use figment::providers::{Format, Toml};
 use figment::Figment;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-
-use typst::diag::StrResult;
 
 const DEFAULT_CONFIG_NAME: &str = "weibian.toml";
 
@@ -81,14 +79,11 @@ pub struct BuildConfig {
 }
 
 impl BuildConfig {
-    pub fn try_load(config_file: Option<PathBuf>) -> StrResult<Self> {
+    pub fn try_load(config_file: Option<PathBuf>) -> anyhow::Result<Self> {
         let (root, config) = load_config(config_file)?;
 
         let include = if config.include.is_empty() {
-            GlobSetBuilder::new()
-                .add(Glob::new("**/*.typ").map_err(|e| eco_format!("{e}"))?)
-                .build()
-                .map_err(|e| eco_format!("{e}"))?
+            GlobSetBuilder::new().add(Glob::new("**/*.typ")?).build()?
         } else {
             config.include
         };
@@ -132,15 +127,15 @@ impl BuildConfig {
     // }
 }
 
-fn load_config(config_file: Option<PathBuf>) -> StrResult<(PathBuf, WeibianConfig)> {
+fn load_config(config_file: Option<PathBuf>) -> anyhow::Result<(PathBuf, WeibianConfig)> {
     let (root, config_path) = match config_file {
         Some(path) => {
             if !path.exists() {
-                return Err(eco_format!("config file {} does not exist", path.display()));
+                return Err(anyhow!("config file {} does not exist", path.display()));
             }
             let root = path
                 .parent()
-                .ok_or_else(|| eco_format!("config path {} has no parent", path.display()))?
+                .ok_or_else(|| anyhow!("config path {} has no parent", path.display()))?
                 .to_path_buf();
 
             (root, path)
@@ -156,14 +151,14 @@ fn load_config(config_file: Option<PathBuf>) -> StrResult<(PathBuf, WeibianConfi
     let config = Figment::new()
         .merge(Toml::file(&config_path))
         .extract::<WeibianConfig>()
-        .map_err(|err| eco_format!("failed to load config {}: {err}", config_path.display()))?;
+        .map_err(|err| anyhow!("failed to load config {}: {err}", config_path.display()))?;
 
     Ok((root, config))
 }
 
-fn find_project_root() -> StrResult<PathBuf> {
+fn find_project_root() -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()
-        .map_err(|err| eco_format!("failed to get current directory: {err}"))?;
+        .map_err(|error| anyhow::Error::from(error).context("Failed to get current directory"))?;
 
     let mut directory = cwd.as_path();
     loop {
@@ -173,7 +168,7 @@ fn find_project_root() -> StrResult<PathBuf> {
         match directory.parent() {
             Some(parent) => directory = parent,
             None => {
-                return Err(eco_format!(
+                return Err(anyhow!(
                     "could not find {} in {} or any parent directory",
                     DEFAULT_CONFIG_NAME,
                     cwd.display()
