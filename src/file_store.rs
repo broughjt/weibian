@@ -31,9 +31,10 @@ where
         }
     }
 
-    pub fn loader(&self) -> &L {
-        &self.loader
-    }
+    // TODO: Remove?
+    // pub fn loader(&self) -> &L {
+    //     &self.loader
+    // }
 
     /// Retrieves the given file as a Typst source.
     pub fn source(&self, id: FileId) -> FileResult<Source> {

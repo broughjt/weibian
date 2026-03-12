@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use ecow::eco_format;
@@ -8,7 +8,6 @@ use figment::Figment;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use walkdir::WalkDir;
 
 use typst::diag::StrResult;
 
@@ -51,11 +50,11 @@ pub struct Arguments {
 /// What to do.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Compiles the source files to HTML.
-    #[command(visible_alias = "c")]
-    Compile,
+    /// Builds the static site.
+    #[command(visible_alias = "b")]
+    Build,
 
-    /// Watches the source files and recompiles on changes.
+    /// Watches source files and recompiles on changes.
     #[command(visible_alias = "w")]
     Watch,
 }
@@ -94,9 +93,7 @@ impl BuildConfig {
             config.include
         };
 
-        let output_directory = config
-            .output_directory
-            .unwrap_or_else(|| PathBuf::from("dist"));
+        let output_directory = config.output_directory.unwrap_or_else(|| root.join("dist"));
 
         Ok(Self {
             root,
@@ -106,30 +103,37 @@ impl BuildConfig {
         })
     }
 
-    pub fn iter_typst_sources(&self) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
-        WalkDir::new(&self.root)
-            .into_iter()
-            .filter_map(|result| match result {
-                Ok(entry) => {
-                    let path = entry.path();
-                    let relative = path.strip_prefix(&self.root).ok()?;
-
-                    if entry.file_type().is_file()
-                        && self.include.is_match(relative)
-                        && !self.exclude.is_match(relative)
-                    {
-                        Some(Ok(entry.into_path()))
-                    } else {
-                        None
-                    }
-                }
-                Err(e) => Some(Err(e)),
-            })
+    pub fn is_match(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root).ok().is_some_and(|relative| {
+            self.include.is_match(relative) && !self.exclude.is_match(relative)
+        })
     }
+
+    // TODO: Remove
+    // pub fn iter_typst_sources(&self) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
+    //     WalkDir::new(&self.root)
+    //         .into_iter()
+    //         .filter_map(|result| match result {
+    //             Ok(entry) => {
+    //                 let path = entry.path();
+    //                 let relative = path.strip_prefix(&self.root).ok()?;
+
+    //                 if entry.file_type().is_file()
+    //                     && self.include.is_match(relative)
+    //                     && !self.exclude.is_match(relative)
+    //                 {
+    //                     Some(Ok(entry.into_path()))
+    //                 } else {
+    //                     None
+    //                 }
+    //             }
+    //             Err(e) => Some(Err(e)),
+    //         })
+    // }
 }
 
 fn load_config(config_file: Option<PathBuf>) -> StrResult<(PathBuf, WeibianConfig)> {
-    match config_file {
+    let (root, config_path) = match config_file {
         Some(path) => {
             if !path.exists() {
                 return Err(eco_format!("config file {} does not exist", path.display()));
@@ -138,26 +142,23 @@ fn load_config(config_file: Option<PathBuf>) -> StrResult<(PathBuf, WeibianConfi
                 .parent()
                 .ok_or_else(|| eco_format!("config path {} has no parent", path.display()))?
                 .to_path_buf();
-            let config = Figment::new()
-                .merge(Toml::file(&path))
-                .extract::<WeibianConfig>()
-                .map_err(|err| eco_format!("failed to load config {}: {err}", path.display()))?;
 
-            Ok((root, config))
+            (root, path)
         }
         None => {
             let root = find_project_root()?;
             let config_path = root.join(DEFAULT_CONFIG_NAME);
-            let config = Figment::new()
-                .merge(Toml::file(&config_path))
-                .extract::<WeibianConfig>()
-                .map_err(|err| {
-                    eco_format!("failed to load config {}: {err}", config_path.display())
-                })?;
 
-            Ok((root, config))
+            (root, config_path)
         }
-    }
+    };
+
+    let config = Figment::new()
+        .merge(Toml::file(&config_path))
+        .extract::<WeibianConfig>()
+        .map_err(|err| eco_format!("failed to load config {}: {err}", config_path.display()))?;
+
+    Ok((root, config))
 }
 
 fn find_project_root() -> StrResult<PathBuf> {

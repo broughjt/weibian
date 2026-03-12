@@ -11,9 +11,9 @@ use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt, World};
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::files::SystemFiles;
-
-use crate::files::FileStore;
 use typst_kit::fonts::FontStore;
+
+use crate::file_store::FileStore;
 
 /// Holds the Typst standard library and a font store.
 pub struct Resources {
@@ -21,8 +21,8 @@ pub struct Resources {
     pub fonts: FontStore,
 }
 
-impl Resources {
-    pub fn new() -> Self {
+impl Default for Resources {
+    fn default() -> Self {
         let mut fonts = FontStore::new();
         fonts.extend(typst_kit::fonts::embedded());
         fonts.extend(typst_kit::fonts::system());
@@ -45,18 +45,22 @@ impl Resources {
 pub struct SystemWorld<'a> {
     main: FileId,
     resources: &'a Resources,
-    files: &'a FileStore<SystemFiles>,
+    file_store: &'a FileStore<SystemFiles>,
     now: Timestamp,
     dependencies: Mutex<HashSet<FileId>>,
 }
 
 impl<'a> SystemWorld<'a> {
     /// Construct a new [`SystemWorld`].
-    pub fn new(main: FileId, resources: &'a Resources, files: &'a FileStore<SystemFiles>) -> Self {
+    pub fn new(
+        main: FileId,
+        resources: &'a Resources,
+        file_store: &'a FileStore<SystemFiles>,
+    ) -> Self {
         Self {
             main,
             resources,
-            files,
+            file_store,
             now: Timestamp::now(),
             dependencies: Mutex::new(HashSet::new()),
         }
@@ -86,14 +90,14 @@ impl World for SystemWorld<'_> {
         if id != self.main {
             self.dependencies.lock().unwrap().insert(id);
         }
-        self.files.source(id)
+        self.file_store.source(id)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         if id != self.main {
             self.dependencies.lock().unwrap().insert(id);
         }
-        self.files.file(id)
+        self.file_store.file(id)
     }
 
     fn font(&self, index: usize) -> Option<Font> {

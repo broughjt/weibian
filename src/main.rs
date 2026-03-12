@@ -1,5 +1,7 @@
+mod build;
 mod config;
-mod files;
+mod file_store;
+mod import_graph;
 mod world;
 
 use std::process::ExitCode;
@@ -7,6 +9,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use config::{Arguments, Command};
 use typst::diag::StrResult;
+
+use crate::build::BuildState;
 
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
@@ -34,13 +38,11 @@ fn dispatch(arguments: Arguments) -> StrResult<()> {
     let config = config::BuildConfig::try_load(config_file)?;
 
     match command {
-        Command::Compile => {
-            for result in config.iter_typst_sources() {
-                match result {
-                    Ok(path) => println!("{}", path.display()),
-                    Err(error) => eprintln!("walk error: {error}"),
-                }
-            }
+        Command::Build => {
+            let build_state = BuildState::new(config);
+
+            build_state.build();
+
             Ok(())
         }
         Command::Watch => {
