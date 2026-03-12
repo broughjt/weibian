@@ -3194,6 +3194,7 @@ dependencies = [
  "globset",
  "jiff",
  "serde",
+ "termcolor",
  "typst",
  "typst-html",
  "typst-kit",

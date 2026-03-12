@@ -43,11 +43,10 @@ impl Default for Resources {
 /// Borrows persistent state (`Resources`, `FileStore`) and accumulates the set
 /// of `FileId`s accessed during compilation.
 pub struct SystemWorld<'a> {
-    main: FileId,
-    resources: &'a Resources,
     file_store: &'a FileStore<SystemFiles>,
+    resources: &'a Resources,
+    main: FileId,
     now: Timestamp,
-    dependencies: Mutex<HashSet<FileId>>,
 }
 
 impl<'a> SystemWorld<'a> {
@@ -62,14 +61,7 @@ impl<'a> SystemWorld<'a> {
             resources,
             file_store,
             now: Timestamp::now(),
-            dependencies: Mutex::new(HashSet::new()),
         }
-    }
-
-    /// Consumes the world and returns all `FileId`s accessed during this
-    /// compilation, excluding the main file itself.
-    pub fn into_dependencies(self) -> HashSet<FileId> {
-        self.dependencies.into_inner().unwrap()
     }
 }
 
@@ -87,16 +79,10 @@ impl World for SystemWorld<'_> {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        if id != self.main {
-            self.dependencies.lock().unwrap().insert(id);
-        }
         self.file_store.source(id)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        if id != self.main {
-            self.dependencies.lock().unwrap().insert(id);
-        }
         self.file_store.file(id)
     }
 
@@ -136,5 +122,62 @@ impl DiagnosticWorld for SystemWorld<'_> {
             VirtualRoot::Project => id.vpath().get_without_slash().into(),
             VirtualRoot::Package(spec) => format!("{spec}{}", id.vpath().get_with_slash()),
         }
+    }
+}
+
+pub struct DependenciesWorld<W> {
+    world: W,
+    dependencies: Mutex<HashSet<FileId>>,
+}
+
+impl<W> DependenciesWorld<W> {
+    /// Construct a new [`DependenciesWorld`].
+    pub fn new(world: W) -> Self {
+        Self {
+            world,
+            dependencies: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Consume the world and return all `FileId`s accessed during this
+    /// compilation, excluding the main file itself.
+    pub fn into_inner(self) -> (W, HashSet<FileId>) {
+        (self.world, self.dependencies.into_inner().unwrap())
+    }
+}
+
+impl<W: World> World for DependenciesWorld<W> {
+    fn library(&self) -> &LazyHash<Library> {
+        self.world.library()
+    }
+
+    fn book(&self) -> &LazyHash<FontBook> {
+        self.world.book()
+    }
+
+    fn main(&self) -> FileId {
+        self.world.main()
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if id != self.world.main() {
+            self.dependencies.lock().unwrap().insert(id);
+        }
+        self.world.source(id)
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        if id != self.world.main() {
+            self.dependencies.lock().unwrap().insert(id);
+        }
+        self.world.file(id)
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        self.world.font(index)
+    }
+
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        self.world.today(offset)
     }
 }

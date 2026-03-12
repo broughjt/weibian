@@ -8,6 +8,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use config::{Arguments, Command};
+use ecow::eco_format;
+use termcolor::{ColorChoice, StandardStream};
 use typst::diag::StrResult;
 
 use crate::build::BuildState;
@@ -40,8 +42,15 @@ fn dispatch(arguments: Arguments) -> StrResult<()> {
     match command {
         Command::Build => {
             let build_state = BuildState::new(config);
+            let diagnostics = build_state.build().map_err(|e| eco_format!("{e}"))?;
+            let stderr = StandardStream::stderr(ColorChoice::Auto);
+            let any_errors = build_state
+                .emit_diagnostics(&mut stderr, &diagnostics)
+                .map_err(|e| eco_format!("{e}"))?;
 
-            build_state.build();
+            if any_errors {
+                return Err(eco_format!("build completed with errors"));
+            }
 
             Ok(())
         }
