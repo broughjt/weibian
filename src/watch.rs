@@ -96,6 +96,21 @@ impl WatchState {
             Err(errors) => {
                 self.outputs.remove(&id);
                 self.diagnostics.insert(id, (warnings, errors));
+                let output_path = self
+                    .config
+                    .output_directory
+                    .join(id.vpath().get_without_slash())
+                    .with_extension("html");
+
+                // TODO: Be more certain about whether the html should exist and die if there's a bug
+                match fs::remove_file(&output_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(anyhow::Error::from(e)
+                            .context("failed to remove output after compile error"))
+                    }
+                }
             }
         }
 
@@ -144,16 +159,9 @@ impl WatchState {
             match fs::remove_file(&output_path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    let had_errors = self
-                        .diagnostics
-                        .get(&id)
-                        .is_some_and(|(_, errors)| !errors.is_empty());
-                    if !had_errors {
-                        return Err(anyhow!(
-                            "bug: output missing for successfully compiled {}",
-                            path.display()
-                        ));
-                    }
+                    // TODO:
+                    // Either the file had compile errors (no HTML was written/HTML was
+                    // already deleted by build()), or it was never compiled. Both are fine.
                 }
                 Err(e) => {
                     return Err(anyhow::Error::from(e)
@@ -174,23 +182,12 @@ impl WatchState {
         }
         fs::create_dir(&self.config.output_directory)?;
 
-        // TODO: No reason to make this a vec
-        let paths: Vec<_> = WalkDir::new(&self.config.root)
-            .into_iter()
-            .filter_map(|result| match result {
-                Ok(entry) => {
-                    if entry.file_type().is_file() && self.config.is_match(entry.path()) {
-                        Some(Ok(entry.into_path()))
-                    } else {
-                        None
-                    }
-                }
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<_, _>>()?;
-
-        for path in paths {
-            let virtual_path = VirtualPath::virtualize(&self.config.root, &path)
+        for result in WalkDir::new(&self.config.root) {
+            let entry = result?;
+            if !entry.file_type().is_file() || !self.config.is_match(entry.path()) {
+                continue;
+            }
+            let virtual_path = VirtualPath::virtualize(&self.config.root, entry.path())
                 .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
             let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
             self.build(id)?;
