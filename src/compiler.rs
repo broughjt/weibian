@@ -3,18 +3,10 @@ use std::path::Path;
 
 use dom_query::Document;
 use ecow::EcoVec;
-use termcolor::StandardStream;
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::syntax::FileId;
 use typst_html::HtmlDocument;
-use typst_kit::diagnostics::{DiagnosticFormat, emit};
-use typst_kit::files::SystemFiles;
-
-use crate::{
-    file_store::FileStore,
-    world::{Resources, SystemWorld},
-};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
@@ -138,6 +130,12 @@ impl Compiler {
         self.file_diagnostics.remove(&id);
     }
 
+    pub fn file_diagnostics(
+        &self,
+    ) -> &HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)> {
+        &self.file_diagnostics
+    }
+
     /// Writes all nodes to `output_dir/<node-id>.html`.
     ///
     /// Fatal I/O errors are returned as `Err`.
@@ -149,30 +147,4 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emits all collected diagnostics to `stream`.
-    ///
-    /// Returns `true` if any errors were present.
-    pub fn emit_diagnostics(
-        &self,
-        stream: &mut StandardStream,
-        file_store: &FileStore<SystemFiles>,
-        resources: &Resources,
-    ) -> anyhow::Result<bool> {
-        let mut has_errors = false;
-
-        for (&id, (warnings, errors)) in &self.file_diagnostics {
-            let world = SystemWorld::new(id, resources, file_store);
-            emit(
-                stream,
-                &world,
-                warnings.iter().chain(errors.iter()),
-                DiagnosticFormat::Human,
-            )?;
-            if !errors.is_empty() {
-                has_errors = true;
-            }
-        }
-
-        Ok(has_errors)
-    }
 }

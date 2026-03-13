@@ -5,10 +5,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use notify_debouncer_full::notify::{EventKind, RecursiveMode, event::ModifyKind};
+use notify_debouncer_full::notify::{
+    EventKind as NotifyEventKind, RecursiveMode, event::ModifyKind,
+};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use termcolor::{ColorChoice, StandardStream};
 use typst_kit::{
+    diagnostics::{DiagnosticFormat, emit},
     downloader::SystemDownloader,
     files::{FsRoot, SystemFiles},
     packages::SystemPackages,
@@ -53,22 +56,149 @@ impl WatchState {
         }
     }
 
-    /// Compiles a single source file, updating the import graph and compiler
-    /// state (node store and diagnostics).
-    ///
-    /// Fatal errors (I/O failures) are returned as `Err`. Compilation warnings
-    /// and errors are recorded in the compiler and do not cause early
-    /// termination.
-    pub fn build(&mut self, id: FileId) -> anyhow::Result<()> {
-        let world = DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
+    pub fn watch(&mut self) -> anyhow::Result<()> {
+        if self.config.output_directory.exists() {
+            fs::remove_dir_all(&self.config.output_directory)?;
+        }
+        fs::create_dir(&self.config.output_directory)?;
 
-        self.compiler.compile(&world, id)?;
+        for result in WalkDir::new(&self.config.root) {
+            let entry = result?;
 
-        let (_, dependencies) = world.into_inner();
+            if !entry.file_type().is_file() || !self.config.is_match(entry.path()) {
+                continue;
+            }
+            let virtual_path = VirtualPath::virtualize(&self.config.root, entry.path())
+                .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
+            let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
 
-        self.import_graph.update(id, dependencies);
+            let world =
+                DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
+
+            self.compiler.compile(&world, id)?;
+
+            let (_, dependencies) = world.into_inner();
+
+            self.import_graph.update(id, dependencies);
+        }
+
+        self.compiler.process(&self.config.output_directory)?;
+        self.emit_diagnostics()?;
+
+        let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
+        let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, sender)?;
+
+        debouncer.watch(&self.config.root, RecursiveMode::Recursive)?;
+
+        let mut recompile: HashSet<FileId> = HashSet::new();
+
+        for result in receiver {
+            for event in self.parse_events(result)? {
+                let dependents = self.import_graph.dependents(event.id);
+
+                self.file_store
+                    .reset(std::iter::once(event.id).chain(dependents.iter().copied()));
+
+                match event.kind {
+                    EventKind::Update => {
+                        if event.is_source {
+                            recompile.insert(event.id);
+                        }
+                    }
+                    EventKind::Remove => {
+                        self.import_graph.remove(event.id);
+                        if event.is_source {
+                            self.compiler.remove(event.id);
+                        }
+                    }
+                }
+
+                recompile.extend(dependents);
+            }
+
+            for id in recompile.drain() {
+                let world =
+                    DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
+
+                self.compiler.compile(&world, id)?;
+
+                let (_, dependencies) = world.into_inner();
+
+                self.import_graph.update(id, dependencies);
+            }
+
+            if self.config.output_directory.exists() {
+                fs::remove_dir_all(&self.config.output_directory)?;
+            }
+            fs::create_dir(&self.config.output_directory)?;
+
+            self.compiler.process(&self.config.output_directory)?;
+            self.emit_diagnostics()?;
+
+            comemo::evict(10);
+        }
 
         Ok(())
+    }
+
+    /// Parses a batch of raw debouncer events into [`Event`]s.
+    ///
+    /// Filters out noise (access/metadata events), skips paths inside the
+    /// output directory, virtualizes paths to [`FileId`]s, and collapses
+    /// Create/Modify into [`EventKind::Update`].
+    ///
+    /// Returns `Err` if the debouncer reported errors or if any path fails
+    /// to virtualize.
+    fn parse_events(&self, result: DebounceEventResult) -> anyhow::Result<Vec<Event>> {
+        // TODO: Maybe handle the vec of errors better
+        let raw_events = result.map_err(|errors| {
+            anyhow!(
+                "watch errors: {}",
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+
+        let mut events = Vec::new();
+
+        for raw_event in raw_events {
+            let kind = match raw_event.kind {
+                NotifyEventKind::Create(_) | NotifyEventKind::Modify(_)
+                    if !matches!(
+                        raw_event.kind,
+                        NotifyEventKind::Modify(ModifyKind::Metadata(_))
+                            | NotifyEventKind::Modify(ModifyKind::Other)
+                    ) =>
+                {
+                    EventKind::Update
+                }
+                NotifyEventKind::Remove(_) => EventKind::Remove,
+                _ => continue,
+            };
+
+            for path in &raw_event.paths {
+                if path.starts_with(&self.config.output_directory) {
+                    continue;
+                }
+
+                let virtual_path = VirtualPath::virtualize(&self.config.root, path)
+                    .map_err(|e| anyhow!("failed to virtualize {}: {e:?}", path.display()))?;
+
+                let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
+                let is_source = self.config.is_match(path);
+
+                events.push(Event {
+                    id,
+                    kind,
+                    is_source,
+                });
+            }
+        }
+
+        Ok(events)
     }
 
     fn emit_diagnostics(&self) -> anyhow::Result<()> {
@@ -79,141 +209,28 @@ impl WatchState {
             stderr.flush()?;
         }
 
-        self.compiler
-            .emit_diagnostics(&mut stderr, &self.file_store, &self.resources)?;
-
-        Ok(())
-    }
-
-    pub fn watch(&mut self) -> anyhow::Result<()> {
-        if self.config.output_directory.exists() {
-            fs::remove_dir_all(&self.config.output_directory)?;
-        }
-        fs::create_dir(&self.config.output_directory)?;
-
-        for result in WalkDir::new(&self.config.root) {
-            let entry = result?;
-            if !entry.file_type().is_file() || !self.config.is_match(entry.path()) {
-                continue;
-            }
-            let virtual_path = VirtualPath::virtualize(&self.config.root, entry.path())
-                .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
-            let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
-            self.build(id)?;
-        }
-        self.compiler.process(&self.config.output_directory)?;
-        self.emit_diagnostics()?;
-
-        let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
-
-        let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, sender)
-            .map_err(|e| anyhow::Error::from(e).context("Failed to create file watcher"))?;
-
-        debouncer
-            .watch(&self.config.root, RecursiveMode::Recursive)
-            .map_err(|e| anyhow::anyhow!("failed to watch {}: {e}", self.config.root.display()))?;
-
-        let mut recompile: HashSet<FileId> = HashSet::new();
-
-        for result in receiver {
-            match result {
-                Ok(events) => {
-                    for event in events {
-                        if matches!(
-                            event.kind,
-                            EventKind::Access(_)
-                                | EventKind::Other
-                                | EventKind::Modify(ModifyKind::Metadata(_))
-                                | EventKind::Modify(ModifyKind::Other)
-                        ) {
-                            continue;
-                        }
-
-                        for path in &event.paths {
-                            if path.starts_with(&self.config.output_directory) {
-                                continue;
-                            }
-
-                            let virtual_path =
-                                match VirtualPath::virtualize(&self.config.root, path) {
-                                    Ok(virtual_path) => virtual_path,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "watch: failed to virtualize {}: {e:?}",
-                                            path.display()
-                                        );
-                                        continue;
-                                    }
-                                };
-                            let id =
-                                FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
-
-                            match event.kind {
-                                EventKind::Create(_) | EventKind::Modify(_) => {
-                                    // If a source file or one of its dependencies has been updated:
-                                    //
-                                    // - Compute dependencies of this file
-                                    // - Reset all of them
-                                    // - Add them to the set of files to be recompiled
-                                    // - If file itself is a source file, add it to the set of files to be recompiled
-                                    let dependents = self.import_graph.dependents(id);
-
-                                    self.file_store.reset(
-                                        std::iter::once(id).chain(dependents.iter().copied()),
-                                    );
-
-                                    if self.config.is_match(path) {
-                                        recompile.insert(id);
-                                    }
-
-                                    recompile.extend(dependents);
-                                }
-                                EventKind::Remove(_) => {
-                                    // If a source file or one of its dependencies has been removed:
-                                    //
-                                    // - Compute dependencies
-                                    // - Reset all of them
-                                    //
-                                    let dependents = self.import_graph.dependents(id);
-
-                                    self.file_store.reset(
-                                        std::iter::once(id).chain(dependents.iter().copied()),
-                                    );
-
-                                    self.import_graph.remove(id);
-                                    if self.config.is_match(path) {
-                                        self.compiler.remove(id);
-                                    }
-
-                                    recompile.extend(dependents);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    for id in recompile.drain() {
-                        self.build(id)?;
-                    }
-
-                    if self.config.output_directory.exists() {
-                        fs::remove_dir_all(&self.config.output_directory)?;
-                    }
-                    fs::create_dir(&self.config.output_directory)?;
-
-                    self.compiler.process(&self.config.output_directory)?;
-                    self.emit_diagnostics()?;
-
-                    comemo::evict(10);
-                }
-                Err(errors) => {
-                    for error in errors {
-                        eprintln!("watch error: {error}");
-                    }
-                }
-            }
+        for (&id, (warnings, errors)) in self.compiler.file_diagnostics() {
+            let world = SystemWorld::new(id, &self.resources, &self.file_store);
+            emit(
+                &mut stderr,
+                &world,
+                warnings.iter().chain(errors.iter()),
+                DiagnosticFormat::Human,
+            )?;
         }
 
         Ok(())
     }
+}
+
+#[derive(Copy, Clone)]
+pub enum EventKind {
+    Update,
+    Remove,
+}
+
+pub struct Event {
+    pub id: FileId,
+    pub kind: EventKind,
+    pub is_source: bool,
 }

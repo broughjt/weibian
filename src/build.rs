@@ -17,6 +17,8 @@ use crate::{
     world::{Resources, SystemWorld},
 };
 
+use typst_kit::diagnostics::{DiagnosticFormat, emit};
+
 const USER_AGENT: &str = "weibian";
 
 pub struct Builder {
@@ -78,8 +80,25 @@ impl Builder {
         compiler.process(&self.config.output_directory)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-        let has_errors =
-            compiler.emit_diagnostics(&mut stderr, &self.file_store, &self.resources)?;
+        let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;
+
+        Ok(has_errors)
+    }
+
+    fn emit_diagnostics(
+        &self,
+        stream: &mut StandardStream,
+        compiler: &Compiler,
+    ) -> anyhow::Result<bool> {
+        let mut has_errors = false;
+
+        for (&id, (warnings, errors)) in compiler.file_diagnostics() {
+            let world = SystemWorld::new(id, &self.resources, &self.file_store);
+            emit(stream, &world, warnings.iter().chain(errors.iter()), DiagnosticFormat::Human)?;
+            if !errors.is_empty() {
+                has_errors = true;
+            }
+        }
 
         Ok(has_errors)
     }
