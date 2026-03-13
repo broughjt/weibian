@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use dom_query::Document;
-use ecow::EcoVec;
+use ecow::{EcoVec, eco_format};
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
@@ -77,12 +77,25 @@ impl Compiler {
                             continue;
                         };
                         let identifier = identifier.to_string();
-                        let transclude = subnode
-                            .attr("transclude")
-                            .map(|v| v.as_ref() == "true")
-                            .unwrap_or(true);
+                        let span = spans
+                            .get(&identifier)
+                            .copied()
+                            .expect("bug: no span found for node identifier");
+                        let transclude =
+                            match subnode.attr("transclude").as_deref().unwrap_or("true") {
+                                "true" => true,
+                                "false" => false,
+                                other => {
+                                    errors.push(SourceDiagnostic::error(
+                                        span,
+                                        eco_format!(
+                                            "wb-subnode has invalid transclude value: {other:?}"
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                            };
 
-                        let span = spans.get(&identifier).copied().expect("bug: no span found for node identifier");
                         nodes.insert(identifier.clone(), (subnode.html().to_string(), span));
 
                         if transclude {
@@ -95,16 +108,46 @@ impl Compiler {
                     }
 
                     // Extract the wb-node after subnodes have been replaced/removed.
-                    if let Some(wb_node) = document.select("wb-node").iter().next() {
-                        if let Some(identifier) = wb_node.attr("identifier") {
-                            let identifier = identifier.to_string();
-                            let span = spans.get(&identifier).copied().expect("bug: no span found for node identifier");
-                            nodes.insert(identifier.clone(), (wb_node.html().to_string(), span));
-                        } else {
+                    let mut node_iter = document.select("wb-node").iter();
+                    match node_iter.next() {
+                        None => {
                             errors.push(SourceDiagnostic::error(
                                 Span::detached(),
-                                "wb-node is missing an identifier",
+                                "source file produced no wb-node",
                             ));
+                        }
+                        Some(wb_node) => {
+                            if let Some(identifier) = wb_node.attr("identifier") {
+                                let identifier = identifier.to_string();
+                                let span = spans
+                                    .get(&identifier)
+                                    .copied()
+                                    .expect("bug: no span found for node identifier");
+
+                                nodes.insert(identifier, (wb_node.html().to_string(), span));
+                            } else {
+                                errors.push(SourceDiagnostic::error(
+                                    Span::detached(),
+                                    "wb-node is missing an identifier",
+                                ));
+                            }
+
+                            errors.extend(node_iter.map(|extra| {
+                                let span = extra
+                                    .attr("identifier")
+                                    .map(|id| {
+                                        spans
+                                            .get(id.as_ref())
+                                            .copied()
+                                            .expect("bug: no span found for wb-node identifier")
+                                    })
+                                    .unwrap_or(Span::detached());
+
+                                SourceDiagnostic::error(
+                                    span,
+                                    "source file produced multiple wb-node elements",
+                                )
+                            }));
                         }
                     }
 
