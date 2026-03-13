@@ -63,12 +63,17 @@ impl Compiler {
                 Ok(content) => {
                     let spans = query_node_spans(&html_document);
                     let document = Document::from(content.as_str());
-                    let mut node_ids = Vec::new();
+                    let mut nodes: HashMap<NodeId, (String, Span)> = HashMap::new();
+                    let mut errors: EcoVec<SourceDiagnostic> = EcoVec::new();
 
                     // Process subnodes deepest-first: reversed pre-order ensures a
                     // nested subnode is always processed before its parent subnode.
                     for subnode in document.select("wb-subnode").iter().rev() {
                         let Some(identifier) = subnode.attr("identifier") else {
+                            errors.push(SourceDiagnostic::error(
+                                Span::detached(),
+                                "wb-subnode is missing an identifier",
+                            ));
                             continue;
                         };
                         let identifier = identifier.to_string();
@@ -78,9 +83,7 @@ impl Compiler {
                             .unwrap_or(true);
 
                         let span = spans.get(&identifier).copied().expect("bug: no span found for node identifier");
-                        self.nodes
-                            .insert(identifier.clone(), (subnode.html().to_string(), span));
-                        node_ids.push(identifier.clone());
+                        nodes.insert(identifier.clone(), (subnode.html().to_string(), span));
 
                         if transclude {
                             subnode.replace_with_html(format!(
@@ -92,22 +95,29 @@ impl Compiler {
                     }
 
                     // Extract the wb-node after subnodes have been replaced/removed.
-                    if let Some(wb_node) = document.select("wb-node").iter().next()
-                        && let Some(identifier) = wb_node.attr("identifier")
-                    {
-                        let identifier = identifier.to_string();
-                        let span = spans.get(&identifier).copied().expect("bug: no span found for node identifier");
-                        self.nodes
-                            .insert(identifier.clone(), (wb_node.html().to_string(), span));
-                        node_ids.push(identifier);
+                    if let Some(wb_node) = document.select("wb-node").iter().next() {
+                        if let Some(identifier) = wb_node.attr("identifier") {
+                            let identifier = identifier.to_string();
+                            let span = spans.get(&identifier).copied().expect("bug: no span found for node identifier");
+                            nodes.insert(identifier.clone(), (wb_node.html().to_string(), span));
+                        } else {
+                            errors.push(SourceDiagnostic::error(
+                                Span::detached(),
+                                "wb-node is missing an identifier",
+                            ));
+                        }
                     }
 
-                    self.files.insert(id, node_ids);
-
-                    if warnings.is_empty() {
-                        self.file_diagnostics.remove(&id);
+                    if errors.is_empty() {
+                        self.files.insert(id, nodes.keys().cloned().collect());
+                        self.nodes.extend(nodes);
+                        if warnings.is_empty() {
+                            self.file_diagnostics.remove(&id);
+                        } else {
+                            self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
+                        }
                     } else {
-                        self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
+                        self.file_diagnostics.insert(id, (warnings, errors));
                     }
                 }
                 Err(mut errors) => {
