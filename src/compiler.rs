@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::Path;
 
 use dom_query::Document;
@@ -52,124 +53,38 @@ impl Compiler {
             mut warnings,
         } = typst::compile::<HtmlDocument>(world);
 
-        let keep = |d: &mut SourceDiagnostic| {
+        // Discard warnings about html being an unstable feature, html is kind
+        // of the whole game here
+        warnings.retain(|d: &mut SourceDiagnostic| {
             !(d.severity == Severity::Warning && d.message == HTML_MESSAGE)
-        };
-
-        warnings.retain(keep);
+        });
 
         match result {
             Ok(html_document) => match typst_html::html(&html_document) {
                 Ok(content) => {
-                    let spans = query_node_spans(&html_document);
-                    let document = Document::from(content.as_str());
-                    let mut nodes: HashMap<NodeId, (String, Span)> = HashMap::new();
-                    let mut errors: EcoVec<SourceDiagnostic> = EcoVec::new();
+                    let document = Document::from(content);
 
-                    // Process subnodes deepest-first: reversed pre-order ensures a
-                    // nested subnode is always processed before its parent subnode.
-                    for subnode in document.select("wb-subnode").iter().rev() {
-                        let Some(identifier) = subnode.attr("identifier") else {
-                            errors.push(SourceDiagnostic::error(
-                                Span::detached(),
-                                "wb-subnode is missing an identifier",
-                            ));
-                            continue;
-                        };
-                        let identifier = identifier.to_string();
-                        let span = spans
-                            .get(&identifier)
-                            .copied()
-                            .expect("bug: no span found for node identifier");
-                        let transclude =
-                            match subnode.attr("transclude").as_deref().unwrap_or("true") {
-                                "true" => true,
-                                "false" => false,
-                                other => {
-                                    errors.push(SourceDiagnostic::error(
-                                        span,
-                                        eco_format!(
-                                            "wb-subnode has invalid transclude value: {other:?}"
-                                        ),
-                                    ));
-                                    continue;
-                                }
-                            };
+                    match extract(&html_document, document, |id| self.nodes.contains_key(id)) {
+                        Ok(nodes) => {
+                            self.files.insert(id, nodes.keys().cloned().collect());
+                            self.nodes.extend(nodes);
 
-                        nodes.insert(identifier.clone(), (subnode.html().to_string(), span));
-
-                        if transclude {
-                            subnode.replace_with_html(format!(
-                                r#"<wb-transclude identifier="{identifier}"></wb-transclude>"#
-                            ));
-                        } else {
-                            subnode.remove();
-                        }
-                    }
-
-                    // Extract the wb-node after subnodes have been replaced/removed.
-                    let mut node_iter = document.select("wb-node").iter();
-                    match node_iter.next() {
-                        None => {
-                            errors.push(SourceDiagnostic::error(
-                                Span::detached(),
-                                "source file produced no wb-node",
-                            ));
-                        }
-                        Some(wb_node) => {
-                            if let Some(identifier) = wb_node.attr("identifier") {
-                                let identifier = identifier.to_string();
-                                let span = spans
-                                    .get(&identifier)
-                                    .copied()
-                                    .expect("bug: no span found for node identifier");
-
-                                nodes.insert(identifier, (wb_node.html().to_string(), span));
+                            if warnings.is_empty() {
+                                self.file_diagnostics.remove(&id);
                             } else {
-                                errors.push(SourceDiagnostic::error(
-                                    Span::detached(),
-                                    "wb-node is missing an identifier",
-                                ));
+                                self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
                             }
-
-                            errors.extend(node_iter.map(|extra| {
-                                let span = extra
-                                    .attr("identifier")
-                                    .map(|id| {
-                                        spans
-                                            .get(id.as_ref())
-                                            .copied()
-                                            .expect("bug: no span found for wb-node identifier")
-                                    })
-                                    .unwrap_or(Span::detached());
-
-                                SourceDiagnostic::error(
-                                    span,
-                                    "source file produced multiple wb-node elements",
-                                )
-                            }));
                         }
-                    }
-
-                    if errors.is_empty() {
-                        self.files.insert(id, nodes.keys().cloned().collect());
-                        self.nodes.extend(nodes);
-                        if warnings.is_empty() {
-                            self.file_diagnostics.remove(&id);
-                        } else {
-                            self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
+                        Err(errors) => {
+                            self.file_diagnostics.insert(id, (warnings, errors));
                         }
-                    } else {
-                        self.file_diagnostics.insert(id, (warnings, errors));
                     }
                 }
-                Err(mut errors) => {
-                    errors.retain(keep);
+                Err(errors) => {
                     self.file_diagnostics.insert(id, (warnings, errors));
                 }
             },
-            Err(mut errors) => {
-                errors.retain(keep);
+            Err(errors) => {
                 self.file_diagnostics.insert(id, (warnings, errors));
             }
         }
@@ -211,22 +126,155 @@ impl Compiler {
     }
 }
 
-/// Walks `document`'s element tree once (iterative DFS) and returns a map
-/// from each node identifier to the span of its `wb-node` or `wb-subnode`
-/// element.
-fn query_node_spans(document: &HtmlDocument) -> HashMap<String, Span> {
+/// Parses `document` into a map of node IDs to (HTML, span) pairs.
+///
+/// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
+/// side effect of extraction. `node_exists` is called to detect cross-file
+/// duplicate identifiers.
+///
+/// Returns `Err` with all collected diagnostics if any validation errors occur,
+/// or `Ok` with the node map on success.
+fn extract(
+    html_document: &HtmlDocument,
+    document: Document,
+    node_exists: impl Fn(&str) -> bool,
+) -> Result<HashMap<NodeId, (String, Span)>, EcoVec<SourceDiagnostic>> {
+    let (spans, mut errors) = collect_node_spans(html_document);
+
+    // Check for global duplicate identifiers before processing.
+    errors.extend(
+        spans
+            .iter()
+            .filter(|(id, _)| node_exists(id))
+            .map(|(id, &span)| {
+                SourceDiagnostic::error(span, eco_format!("duplicate node identifier: {id:?}"))
+            }),
+    );
+
+    let mut nodes: HashMap<NodeId, (String, Span)> = HashMap::new();
+
+    // Process subnodes deepest-first: reversed pre-order ensures a
+    // nested subnode is always processed before its parent subnode.
+    for subnode in document.select("wb-subnode").iter().rev() {
+        let Some(identifier) = subnode.attr("identifier") else {
+            errors.push(SourceDiagnostic::error(
+                Span::detached(),
+                "wb-subnode is missing an identifier",
+            ));
+            continue;
+        };
+        let identifier = identifier.to_string();
+        let span = spans
+            .get(&identifier)
+            .copied()
+            .expect("bug: no span found for node identifier");
+        let transclude = match subnode.attr("transclude").as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            Some(other) => {
+                errors.push(SourceDiagnostic::error(
+                    span,
+                    eco_format!("wb-subnode has invalid transclude value: {other:?}"),
+                ));
+                continue;
+            }
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    span,
+                    "wb-subnode is missing the transclude attribute",
+                ));
+                continue;
+            }
+        };
+
+        let html = subnode.html().to_string();
+
+        if transclude {
+            subnode.replace_with_html(format!(
+                r#"<wb-transclude identifier="{identifier}"></wb-transclude>"#
+            ));
+        } else {
+            subnode.remove();
+        }
+
+        nodes.insert(identifier, (html, span));
+    }
+
+    // Extract the wb-node after subnodes have been replaced/removed.
+    let mut node_iter = document.select("wb-node").iter();
+    match node_iter.next() {
+        None => {
+            errors.push(SourceDiagnostic::error(
+                Span::detached(),
+                "source file produced no wb-node",
+            ));
+        }
+        Some(wb_node) => {
+            if let Some(identifier) = wb_node.attr("identifier") {
+                let identifier = identifier.to_string();
+                let span = spans
+                    .get(&identifier)
+                    .copied()
+                    .expect("bug: no span found for node identifier");
+                nodes.insert(identifier, (wb_node.html().to_string(), span));
+            } else {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-node is missing an identifier",
+                ));
+            }
+
+            errors.extend(node_iter.map(|extra| {
+                let span = extra
+                    .attr("identifier")
+                    .map(|id| {
+                        spans
+                            .get(id.as_ref())
+                            .copied()
+                            .expect("bug: no span found for wb-node identifier")
+                    })
+                    .unwrap_or(Span::detached());
+                SourceDiagnostic::error(span, "source file produced multiple wb-node elements")
+            }));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(nodes)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Walks `document`'s element tree once (iterative DFS), returning a map from
+/// each node identifier to the span of its `wb-node` or `wb-subnode` element,
+/// plus errors for any duplicate identifiers found within the document.
+fn collect_node_spans(
+    document: &HtmlDocument,
+) -> (HashMap<NodeId, Span>, EcoVec<SourceDiagnostic>) {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
     let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
     let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
 
     let mut spans = HashMap::new();
+    let mut errors = EcoVec::new();
     let mut stack = vec![document.root()];
 
     while let Some(element) = stack.pop() {
         if (element.tag == wb_node || element.tag == wb_subnode)
             && let Some(id) = element.attrs.get(identifier)
         {
-            spans.insert(id.to_string(), element.span);
+            match spans.entry(id.to_string()) {
+                Entry::Occupied(_) => {
+                    errors.push(SourceDiagnostic::error(
+                        element.span,
+                        eco_format!("duplicate node identifier: {id:?}"),
+                    ));
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(element.span);
+                }
+            }
         }
         for child in element.children.iter().rev() {
             if let HtmlNode::Element(child_elem) = child {
@@ -235,5 +283,5 @@ fn query_node_spans(document: &HtmlDocument) -> HashMap<String, Span> {
         }
     }
 
-    spans
+    (spans, errors)
 }
