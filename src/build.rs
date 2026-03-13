@@ -28,6 +28,7 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Creates a `Builder` from a build configuration.
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
         let packages = SystemPackages::new(downloader);
@@ -54,24 +55,25 @@ impl Builder {
 
         let mut compiler = Compiler::new();
 
-        let paths = WalkDir::new(&self.config.root)
+        let ids = WalkDir::new(&self.config.root)
             .into_iter()
             .filter_map(|result| match result {
                 Ok(entry) => {
                     if entry.file_type().is_file() && self.config.is_match(entry.path()) {
-                        Some(Ok(entry.into_path()))
+                        let path = entry.into_path();
+                        let result = VirtualPath::virtualize(&self.config.root, &path)
+                            .map(|vpath| FileId::new(RootedPath::new(VirtualRoot::Project, vpath)))
+                            .map_err(|error| anyhow!("failed to virtualize path: {error:?}"));
+                        Some(result)
                     } else {
                         None
                     }
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(e.into())),
             });
 
-        for result in paths {
-            let path = result?;
-            let virtual_path = VirtualPath::virtualize(&self.config.root, &path)
-                .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
-            let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
+        for result in ids {
+            let id = result?;
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
 
             compiler.compile(&world, id)?;
@@ -85,6 +87,9 @@ impl Builder {
         Ok(has_errors)
     }
 
+    /// Emits all diagnostics from `compiler` to `stream`.
+    ///
+    /// Returns `true` if any errors were present.
     fn emit_diagnostics(
         &self,
         stream: &mut StandardStream,
@@ -94,7 +99,12 @@ impl Builder {
 
         for (&id, (warnings, errors)) in compiler.file_diagnostics() {
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
-            emit(stream, &world, warnings.iter().chain(errors.iter()), DiagnosticFormat::Human)?;
+            emit(
+                stream,
+                &world,
+                warnings.iter().chain(errors.iter()),
+                DiagnosticFormat::Human,
+            )?;
             if !errors.is_empty() {
                 has_errors = true;
             }

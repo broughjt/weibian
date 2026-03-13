@@ -12,6 +12,8 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 
 pub type NodeId = String;
 
+/// Compiles Typst source files into nodes and maintains the in-memory node
+/// store and per-file diagnostics across incremental rebuilds.
 pub struct Compiler {
     files: HashMap<FileId, Vec<NodeId>>,
     nodes: HashMap<NodeId, String>,
@@ -21,6 +23,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    /// Creates an empty `Compiler`.
     pub fn new() -> Self {
         Self {
             files: HashMap::new(),
@@ -130,6 +133,9 @@ impl Compiler {
         self.file_diagnostics.remove(&id);
     }
 
+    /// Returns all collected file diagnostics, keyed by source [`FileId`].
+    ///
+    /// Each entry is a `(warnings, errors)` pair of [`SourceDiagnostic`] vecs.
     pub fn file_diagnostics(
         &self,
     ) -> &HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)> {

@@ -41,6 +41,7 @@ pub struct WatchState {
 }
 
 impl WatchState {
+    /// Creates a `WatchState` from a build configuration.
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
         let packages = SystemPackages::new(downloader);
@@ -56,22 +57,35 @@ impl WatchState {
         }
     }
 
+    /// Performs the initial build then enters the watch loop, recompiling on
+    /// file system changes until the process is terminated.
+    ///
+    /// Fatal errors (I/O failures, watcher errors, virtualization failures)
+    /// are returned as `Err`.
     pub fn watch(&mut self) -> anyhow::Result<()> {
         if self.config.output_directory.exists() {
             fs::remove_dir_all(&self.config.output_directory)?;
         }
         fs::create_dir(&self.config.output_directory)?;
 
-        for result in WalkDir::new(&self.config.root) {
-            let entry = result?;
+        let ids = WalkDir::new(&self.config.root)
+            .into_iter()
+            .filter_map(|result| match result {
+                Ok(entry) => {
+                    if entry.file_type().is_file() && self.config.is_match(entry.path()) {
+                        let result = VirtualPath::virtualize(&self.config.root, entry.path())
+                            .map(|vpath| FileId::new(RootedPath::new(VirtualRoot::Project, vpath)))
+                            .map_err(|error| anyhow!("failed to virtualize path: {error:?}"));
+                        Some(result)
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => Some(Err(e.into())),
+            });
 
-            if !entry.file_type().is_file() || !self.config.is_match(entry.path()) {
-                continue;
-            }
-            let virtual_path = VirtualPath::virtualize(&self.config.root, entry.path())
-                .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
-            let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
-
+        for result in ids {
+            let id = result?;
             let world =
                 DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
@@ -201,6 +215,7 @@ impl WatchState {
         Ok(events)
     }
 
+    /// Clears the screen (if stderr is a terminal) and emits all diagnostics.
     fn emit_diagnostics(&self) -> anyhow::Result<()> {
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
 
@@ -223,12 +238,15 @@ impl WatchState {
     }
 }
 
+/// Whether a file was updated (created or modified) or removed.
 #[derive(Copy, Clone)]
 pub enum EventKind {
     Update,
     Remove,
 }
 
+/// A parsed file system event with its [`FileId`] and whether it is a
+/// compiled source file (as opposed to a library dependency).
 pub struct Event {
     pub id: FileId,
     pub kind: EventKind,
