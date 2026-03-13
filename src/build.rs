@@ -1,12 +1,8 @@
-use std::collections::HashMap;
 use std::fs;
 
 use anyhow::anyhow;
-use ecow::EcoVec;
-use termcolor::StandardStream;
-use typst::diag::{SourceDiagnostic, Warned};
+use termcolor::{ColorChoice, StandardStream};
 use typst_kit::{
-    diagnostics::{emit, DiagnosticFormat},
     downloader::SystemDownloader,
     files::{FsRoot, SystemFiles},
     packages::SystemPackages,
@@ -15,7 +11,7 @@ use typst_syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use walkdir::WalkDir;
 
 use crate::{
-    compile::compile,
+    compiler::Compiler,
     config::BuildConfig,
     file_store::FileStore,
     world::{Resources, SystemWorld},
@@ -23,13 +19,13 @@ use crate::{
 
 const USER_AGENT: &str = "weibian";
 
-pub struct BuildState {
+pub struct Builder {
     file_store: FileStore<SystemFiles>,
     resources: Resources,
     config: BuildConfig,
 }
 
-impl BuildState {
+impl Builder {
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
         let packages = SystemPackages::new(downloader);
@@ -44,22 +40,17 @@ impl BuildState {
         }
     }
 
-    /// Compiles all source files and returns per-file diagnostics.
+    /// Compiles all source files, writes node HTML, and emits diagnostics to stderr.
     ///
     /// Fatal errors (I/O failures, bad configuration) are returned as `Err`.
-    /// Compilation warnings and errors are collected into the returned map and
-    /// do not cause early termination. HTML is written for every file that
-    /// compiles successfully, regardless of whether other files fail.
-    pub fn build(
-        &self,
-    ) -> anyhow::Result<HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>> {
+    /// Returns `true` if any compilation errors were present.
+    pub fn build(&self) -> anyhow::Result<bool> {
         if self.config.output_directory.exists() {
             fs::remove_dir_all(&self.config.output_directory)?;
         }
         fs::create_dir(&self.config.output_directory)?;
 
-        let mut diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)> =
-            HashMap::new();
+        let mut compiler = Compiler::new();
 
         let paths = WalkDir::new(&self.config.root)
             .into_iter()
@@ -74,56 +65,22 @@ impl BuildState {
                 Err(e) => Some(Err(e)),
             });
 
-        for (counter, result) in (0_u32..).zip(paths) {
+        for result in paths {
             let path = result?;
             let virtual_path = VirtualPath::virtualize(&self.config.root, &path)
                 .map_err(|e| anyhow!("failed to virtualize path: {e:?}"))?;
             let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
 
-            let Warned {
-                output: result,
-                warnings,
-            } = compile(&world);
-
-            match result {
-                Ok((_document, content)) => {
-                    let output_path = self.config.output_directory.join(format!("{counter}.html"));
-                    fs::write(&output_path, content)?;
-                    if !warnings.is_empty() {
-                        diagnostics.insert(id, (warnings, EcoVec::new()));
-                    }
-                }
-                Err(errors) => {
-                    diagnostics.insert(id, (warnings, errors));
-                }
-            }
+            compiler.compile(&world, id)?;
         }
 
-        Ok(diagnostics)
-    }
+        compiler.process(&self.config.output_directory)?;
 
-    /// Emits all collected diagnostics to stderr using typst-kit's formatter.
-    ///
-    /// Returns `true` if any errors were present.
-    pub fn emit_diagnostics(
-        &self,
-        stream: &mut StandardStream,
-        diagnostics: &HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
-    ) -> anyhow::Result<bool> {
-        let mut has_error = false;
+        let mut stderr = StandardStream::stderr(ColorChoice::Auto);
+        let has_errors =
+            compiler.emit_diagnostics(&mut stderr, &self.file_store, &self.resources)?;
 
-        for (&id, (warnings, errors)) in diagnostics {
-            let world = SystemWorld::new(id, &self.resources, &self.file_store);
-            let diagnostics = warnings.iter().chain(errors.iter());
-
-            emit(stream, &world, diagnostics, DiagnosticFormat::Human)?;
-
-            if !errors.is_empty() {
-                has_error = true;
-            }
-        }
-
-        Ok(has_error)
+        Ok(has_errors)
     }
 }

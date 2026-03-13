@@ -1,5 +1,5 @@
 mod build;
-mod compile;
+mod compiler;
 mod config;
 mod file_store;
 mod import_graph;
@@ -8,13 +8,11 @@ mod world;
 
 use std::process::ExitCode;
 
+use crate::build::Builder;
+use crate::watch::WatchState;
 use anyhow::anyhow;
 use clap::Parser;
 use config::{Arguments, Command};
-use termcolor::{ColorChoice, StandardStream};
-
-use crate::build::BuildState;
-use crate::watch::WatchState;
 
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
@@ -43,11 +41,8 @@ fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
 
     match command {
         Command::Build => {
-            let build_state = BuildState::new(config);
-            let diagnostics = build_state.build()?;
-            let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-
-            let has_errors = build_state.emit_diagnostics(&mut stderr, &diagnostics)?;
+            let builder = Builder::new(config);
+            let has_errors = builder.build()?;
 
             if has_errors {
                 return Err(anyhow!("build completed with errors"));

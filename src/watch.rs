@@ -1,17 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use ecow::EcoVec;
-use notify_debouncer_full::notify::{event::ModifyKind, EventKind, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use notify_debouncer_full::notify::{EventKind, RecursiveMode, event::ModifyKind};
+use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use termcolor::{ColorChoice, StandardStream};
-use typst::diag::{SourceDiagnostic, Warned};
 use typst_kit::{
-    diagnostics::{emit, DiagnosticFormat},
     downloader::SystemDownloader,
     files::{FsRoot, SystemFiles},
     packages::SystemPackages,
@@ -20,7 +17,7 @@ use typst_syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use walkdir::WalkDir;
 
 use crate::{
-    compile::compile,
+    compiler::Compiler,
     config::BuildConfig,
     file_store::FileStore,
     import_graph::ImportGraph,
@@ -36,8 +33,7 @@ pub struct WatchState {
     file_store: FileStore<SystemFiles>,
     resources: Resources,
     import_graph: ImportGraph,
-    outputs: HashMap<FileId, String>,
-    diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
+    compiler: Compiler,
     config: BuildConfig,
 }
 
@@ -52,67 +48,25 @@ impl WatchState {
             file_store,
             resources: Resources::default(),
             import_graph: ImportGraph::default(),
-            outputs: HashMap::new(),
-            diagnostics: HashMap::new(),
+            compiler: Compiler::new(),
             config,
         }
     }
 
-    /// Compiles a single source file, updating the import graph, outputs, and
-    /// diagnostics maps.
+    /// Compiles a single source file, updating the import graph and compiler
+    /// state (node store and diagnostics).
     ///
     /// Fatal errors (I/O failures) are returned as `Err`. Compilation warnings
-    /// and errors are recorded in `self.diagnostics` and do not cause early
+    /// and errors are recorded in the compiler and do not cause early
     /// termination.
     pub fn build(&mut self, id: FileId) -> anyhow::Result<()> {
         let world = DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-        let Warned {
-            output: result,
-            warnings,
-        } = compile(&world);
+        self.compiler.compile(&world, id)?;
 
         let (_, dependencies) = world.into_inner();
+
         self.import_graph.update(id, dependencies);
-
-        match result {
-            Ok((_, html)) => {
-                let output_path = self
-                    .config
-                    .output_directory
-                    .join(id.vpath().get_without_slash())
-                    .with_extension("html");
-                if let Some(parent) = output_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&output_path, &html)?;
-                self.outputs.insert(id, html);
-                if !warnings.is_empty() {
-                    self.diagnostics.insert(id, (warnings, EcoVec::new()));
-                } else {
-                    self.diagnostics.remove(&id);
-                }
-            }
-            Err(errors) => {
-                self.outputs.remove(&id);
-                self.diagnostics.insert(id, (warnings, errors));
-                let output_path = self
-                    .config
-                    .output_directory
-                    .join(id.vpath().get_without_slash())
-                    .with_extension("html");
-
-                // TODO: Be more certain about whether the html should exist and die if there's a bug
-                match fs::remove_file(&output_path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(anyhow::Error::from(e)
-                            .context("failed to remove output after compile error"))
-                    }
-                }
-            }
-        }
 
         Ok(())
     }
@@ -125,54 +79,9 @@ impl WatchState {
             stderr.flush()?;
         }
 
-        for (&id, (warnings, errors)) in &self.diagnostics {
-            let world = SystemWorld::new(id, &self.resources, &self.file_store);
-            emit(
-                &mut stderr,
-                &world,
-                warnings.iter().chain(errors.iter()),
-                DiagnosticFormat::Human,
-            )?;
-        }
+        self.compiler
+            .emit_diagnostics(&mut stderr, &self.file_store, &self.resources)?;
 
-        Ok(())
-    }
-
-    fn handle_remove(
-        &mut self,
-        path: &std::path::Path,
-        id: FileId,
-        recompile: &mut HashSet<FileId>,
-    ) -> anyhow::Result<()> {
-        let dependents = self.import_graph.dependents(id);
-        self.file_store
-            .reset(std::iter::once(id).chain(dependents.iter().copied()));
-        self.import_graph.remove(id);
-
-        // TODO: This will probably get easier when we store html state in memory for Stage 3
-        if self.config.is_match(path) {
-            let output_path = self
-                .config
-                .output_directory
-                .join(id.vpath().get_without_slash())
-                .with_extension("html");
-            match fs::remove_file(&output_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // TODO:
-                    // Either the file had compile errors (no HTML was written/HTML was
-                    // already deleted by build()), or it was never compiled. Both are fine.
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::from(e)
-                        .context(format!("failed to remove output for {}", path.display())));
-                }
-            }
-            self.outputs.remove(&id);
-            self.diagnostics.remove(&id);
-        }
-
-        recompile.extend(dependents);
         Ok(())
     }
 
@@ -192,6 +101,7 @@ impl WatchState {
             let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
             self.build(id)?;
         }
+        self.compiler.process(&self.config.output_directory)?;
         self.emit_diagnostics()?;
 
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
@@ -218,6 +128,7 @@ impl WatchState {
                         ) {
                             continue;
                         }
+
                         for path in &event.paths {
                             if path.starts_with(&self.config.output_directory) {
                                 continue;
@@ -239,17 +150,42 @@ impl WatchState {
 
                             match event.kind {
                                 EventKind::Create(_) | EventKind::Modify(_) => {
+                                    // If a source file or one of its dependencies has been updated:
+                                    //
+                                    // - Compute dependencies of this file
+                                    // - Reset all of them
+                                    // - Add them to the set of files to be recompiled
+                                    // - If file itself is a source file, add it to the set of files to be recompiled
                                     let dependents = self.import_graph.dependents(id);
+
                                     self.file_store.reset(
                                         std::iter::once(id).chain(dependents.iter().copied()),
                                     );
+
                                     if self.config.is_match(path) {
                                         recompile.insert(id);
                                     }
+
                                     recompile.extend(dependents);
                                 }
                                 EventKind::Remove(_) => {
-                                    self.handle_remove(path, id, &mut recompile)?;
+                                    // If a source file or one of its dependencies has been removed:
+                                    //
+                                    // - Compute dependencies
+                                    // - Reset all of them
+                                    //
+                                    let dependents = self.import_graph.dependents(id);
+
+                                    self.file_store.reset(
+                                        std::iter::once(id).chain(dependents.iter().copied()),
+                                    );
+
+                                    self.import_graph.remove(id);
+                                    if self.config.is_match(path) {
+                                        self.compiler.remove(id);
+                                    }
+
+                                    recompile.extend(dependents);
                                 }
                                 _ => {}
                             }
@@ -259,7 +195,15 @@ impl WatchState {
                     for id in recompile.drain() {
                         self.build(id)?;
                     }
+
+                    if self.config.output_directory.exists() {
+                        fs::remove_dir_all(&self.config.output_directory)?;
+                    }
+                    fs::create_dir(&self.config.output_directory)?;
+
+                    self.compiler.process(&self.config.output_directory)?;
                     self.emit_diagnostics()?;
+
                     comemo::evict(10);
                 }
                 Err(errors) => {

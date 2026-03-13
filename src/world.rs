@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use jiff::tz::{Offset, TimeZone};
 use jiff::Timestamp;
+use jiff::tz::{Offset, TimeZone};
 use typst::diag::FileResult;
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, Source, VirtualRoot};

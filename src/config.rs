@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand, ValueHint};
-use figment::providers::{Format, Toml};
 use figment::Figment;
+use figment::providers::{Format, Toml};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
