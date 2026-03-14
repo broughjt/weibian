@@ -60,6 +60,7 @@ pub enum Command {
 /// The raw deserialized contents of `weibian.toml`.
 #[derive(Debug, Default, Deserialize)]
 pub struct WeibianConfig {
+    pub input_directory: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
 
     #[serde(default, deserialize_with = "deserialize_globset")]
@@ -72,7 +73,10 @@ pub struct WeibianConfig {
 /// The fully resolved build configuration.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
+    /// The directory of the `weibian.toml` file.
     pub root: PathBuf,
+    /// The Typst project root and file scan root. Defaults to `root`.
+    pub input_directory: PathBuf,
     pub output_directory: PathBuf,
     pub include: GlobSet,
     pub exclude: GlobSet,
@@ -81,6 +85,11 @@ pub struct BuildConfig {
 impl BuildConfig {
     pub fn try_load(config_file: Option<PathBuf>) -> anyhow::Result<Self> {
         let (root, config) = load_config(config_file)?;
+
+        let input_directory = config
+            .input_directory
+            .map(|p| if p.is_absolute() { p } else { root.join(p) })
+            .unwrap_or_else(|| root.clone());
 
         let include = if config.include.is_empty() {
             GlobSetBuilder::new().add(Glob::new("**/*.typ")?).build()?
@@ -92,6 +101,7 @@ impl BuildConfig {
 
         Ok(Self {
             root,
+            input_directory,
             output_directory,
             include,
             exclude: config.exclude,
@@ -99,32 +109,12 @@ impl BuildConfig {
     }
 
     pub fn is_match(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.root).ok().is_some_and(|relative| {
-            self.include.is_match(relative) && !self.exclude.is_match(relative)
-        })
+        path.strip_prefix(&self.input_directory)
+            .ok()
+            .is_some_and(|relative| {
+                self.include.is_match(relative) && !self.exclude.is_match(relative)
+            })
     }
-
-    // TODO: Remove
-    // pub fn iter_typst_sources(&self) -> impl Iterator<Item = Result<PathBuf, walkdir::Error>> {
-    //     WalkDir::new(&self.root)
-    //         .into_iter()
-    //         .filter_map(|result| match result {
-    //             Ok(entry) => {
-    //                 let path = entry.path();
-    //                 let relative = path.strip_prefix(&self.root).ok()?;
-
-    //                 if entry.file_type().is_file()
-    //                     && self.include.is_match(relative)
-    //                     && !self.exclude.is_match(relative)
-    //                 {
-    //                     Some(Ok(entry.into_path()))
-    //                 } else {
-    //                     None
-    //                 }
-    //             }
-    //             Err(e) => Some(Err(e)),
-    //         })
-    // }
 }
 
 fn load_config(config_file: Option<PathBuf>) -> anyhow::Result<(PathBuf, WeibianConfig)> {

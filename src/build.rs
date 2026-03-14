@@ -32,7 +32,7 @@ impl Builder {
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
         let packages = SystemPackages::new(downloader);
-        let file_loader = SystemFiles::new(FsRoot::new(config.root.clone()), packages);
+        let file_loader = SystemFiles::new(FsRoot::new(config.input_directory.clone()), packages);
         let file_store = FileStore::new(file_loader);
         let resources = Resources::default();
 
@@ -55,13 +55,13 @@ impl Builder {
 
         let mut compiler = Compiler::default();
 
-        let ids = WalkDir::new(&self.config.root)
+        let ids = WalkDir::new(&self.config.input_directory)
             .into_iter()
             .filter_map(|result| match result {
                 Ok(entry) => {
                     if entry.file_type().is_file() && self.config.is_match(entry.path()) {
                         let path = entry.into_path();
-                        let result = VirtualPath::virtualize(&self.config.root, &path)
+                        let result = VirtualPath::virtualize(&self.config.input_directory, &path)
                             .map(|virtual_path| {
                                 FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path))
                             })

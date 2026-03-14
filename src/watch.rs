@@ -47,7 +47,7 @@ impl Watcher {
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
         let packages = SystemPackages::new(downloader);
-        let file_loader = SystemFiles::new(FsRoot::new(config.root.clone()), packages);
+        let file_loader = SystemFiles::new(FsRoot::new(config.input_directory.clone()), packages);
         let file_store = FileStore::new(file_loader);
 
         Self {
@@ -70,14 +70,17 @@ impl Watcher {
         }
         fs::create_dir(&self.config.output_directory)?;
 
-        let ids = WalkDir::new(&self.config.root)
+        let ids = WalkDir::new(&self.config.input_directory)
             .into_iter()
             .filter_map(|result| match result {
                 Ok(entry) => {
                     if entry.file_type().is_file() && self.config.is_match(entry.path()) {
-                        let result = VirtualPath::virtualize(&self.config.root, entry.path())
-                            .map(|vpath| FileId::new(RootedPath::new(VirtualRoot::Project, vpath)))
-                            .map_err(|error| anyhow!("failed to virtualize path: {error:?}"));
+                        let result =
+                            VirtualPath::virtualize(&self.config.input_directory, entry.path())
+                                .map(|vpath| {
+                                    FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
+                                })
+                                .map_err(|error| anyhow!("failed to virtualize path: {error:?}"));
                         Some(result)
                     } else {
                         None
@@ -106,7 +109,7 @@ impl Watcher {
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
         let mut debouncer = new_debouncer(DEBOUNCE_TIMEOUT, None, sender)?;
 
-        debouncer.watch(&self.config.root, RecursiveMode::Recursive)?;
+        debouncer.watch(&self.config.input_directory, RecursiveMode::Recursive)?;
 
         let mut recompile: HashSet<FileId> = HashSet::new();
 
@@ -210,9 +213,8 @@ impl Watcher {
                     continue;
                 }
 
-                let virtual_path = VirtualPath::virtualize(&self.config.root, path)
+                let virtual_path = VirtualPath::virtualize(&self.config.input_directory, path)
                     .map_err(|e| anyhow!("failed to virtualize {}: {e:?}", path.display()))?;
-
                 let id = FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path));
                 let is_source = self.config.is_match(path);
 
