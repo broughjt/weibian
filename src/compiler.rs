@@ -201,6 +201,22 @@ fn extract(
         };
 
         let html = subnode.html().to_string();
+        let transclusions: Vec<NodeId> = subnode
+            .select("wb-transclude")
+            .iter()
+            .filter_map(|element| element.attr("identifier").map(|id| id.to_string()))
+            .collect();
+        let links: Vec<NodeId> = subnode
+            .select("a")
+            .iter()
+            .filter_map(|element| {
+                element
+                    .attr("href")
+                    .as_deref()
+                    .and_then(|href| href.strip_prefix("wb:"))
+                    .map(|id| id.to_string())
+            })
+            .collect();
 
         if transclude {
             subnode.replace_with_html(format!(
@@ -214,6 +230,8 @@ fn extract(
             identifier,
             NodeEntry {
                 raw_html: html,
+                transclusions,
+                links,
                 ..Default::default()
             },
         );
@@ -232,11 +250,28 @@ fn extract(
         Some(wb_node) => {
             if let Some(identifier) = wb_node.attr("identifier") {
                 let identifier = identifier.to_string();
+                let transclusions: Vec<NodeId> = wb_node
+                    .select("wb-transclude")
+                    .iter()
+                    .filter_map(|el| el.attr("identifier").map(|id| id.to_string()))
+                    .collect();
+                let links: Vec<NodeId> = wb_node
+                    .select("a")
+                    .iter()
+                    .filter_map(|el| {
+                        el.attr("href")
+                            .as_deref()
+                            .and_then(|href| href.strip_prefix("wb:"))
+                            .map(|id| id.to_string())
+                    })
+                    .collect();
 
                 nodes.insert(
                     identifier,
                     NodeEntry {
                         raw_html: wb_node.html().to_string(),
+                        transclusions,
+                        links,
                         ..Default::default()
                     },
                 );
