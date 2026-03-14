@@ -1,18 +1,10 @@
-mod build;
-mod compiler;
-mod config;
-mod file_store;
-mod import_graph;
-mod watch;
-mod world;
-
 use std::process::ExitCode;
 
-use crate::build::Builder;
-use crate::watch::WatchState;
 use anyhow::anyhow;
 use clap::Parser;
-use config::{Arguments, Command};
+use weibian::build::Builder;
+use weibian::config::{Arguments, BuildConfig, Command};
+use weibian::watch::WatchState;
 
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
@@ -37,7 +29,7 @@ fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
         config_file,
         command,
     } = arguments;
-    let config = config::BuildConfig::try_load(config_file)?;
+    let config = BuildConfig::try_load(config_file)?;
 
     match command {
         Command::Build => {

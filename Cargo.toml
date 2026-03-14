@@ -8,6 +8,7 @@ name = "wb"
 path = "src/main.rs"
 
 [dependencies]
+datafrog = "2"
 anyhow = "1.0.102"
 comemo = "0.5.1"
 notify-debouncer-full = "0.6.0"
