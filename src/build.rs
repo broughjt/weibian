@@ -53,7 +53,7 @@ impl Builder {
         }
         fs::create_dir(&self.config.output_directory)?;
 
-        let mut compiler = Compiler::new();
+        let mut compiler = Compiler::default();
 
         let ids = WalkDir::new(&self.config.root)
             .into_iter()
@@ -62,8 +62,11 @@ impl Builder {
                     if entry.file_type().is_file() && self.config.is_match(entry.path()) {
                         let path = entry.into_path();
                         let result = VirtualPath::virtualize(&self.config.root, &path)
-                            .map(|vpath| FileId::new(RootedPath::new(VirtualRoot::Project, vpath)))
+                            .map(|virtual_path| {
+                                FileId::new(RootedPath::new(VirtualRoot::Project, virtual_path))
+                            })
                             .map_err(|error| anyhow!("failed to virtualize path: {error:?}"));
+
                         Some(result)
                     } else {
                         None
@@ -76,10 +79,10 @@ impl Builder {
             let id = result?;
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
 
-            compiler.compile(&world, id)?;
+            compiler.compile(&world, id);
         }
 
-        compiler.process(&self.config.output_directory)?;
+        compiler.process().apply(&self.config.output_directory)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
         let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;

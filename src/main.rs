@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use weibian::build::Builder;
 use weibian::config::{Arguments, BuildConfig, Command};
-use weibian::watch::WatchState;
+use weibian::watch::Watcher;
 
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
@@ -43,7 +43,7 @@ fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Watch => {
-            let mut watch_state = WatchState::new(config);
+            let mut watch_state = Watcher::new(config);
 
             watch_state.watch()?;
 

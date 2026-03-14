@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::Path;
 
 use dom_query::Document;
@@ -13,34 +14,27 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
+#[derive(Default)]
 pub struct Compiler {
     files: HashMap<FileId, Vec<NodeId>>,
     nodes: HashMap<NodeId, NodeEntry>,
     file_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
+    dirty: HashSet<NodeId>,
+    removed: HashSet<NodeId>,
 }
 
 impl Compiler {
-    /// Creates an empty `Compiler`.
-    pub fn new() -> Self {
-        Self {
-            files: HashMap::new(),
-            nodes: HashMap::new(),
-            file_diagnostics: HashMap::new(),
-        }
-    }
-
     /// Compiles a single source file and splits it into nodes, updating the
     /// node store and diagnostics.
     ///
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
-    /// are stored as diagnostics rather than returned as `Err`. `Err` is
-    /// reserved for I/O failures and other fatal conditions.
-    pub fn compile<W: World>(&mut self, world: &W, id: FileId) -> anyhow::Result<()> {
+    /// are stored as diagnostics rather than returned as errors.
+    pub fn compile<W: World>(&mut self, world: &W, id: FileId) {
         // Clean up any nodes from a previous compilation of this file.
-        if let Some(old_ids) = self.files.remove(&id) {
-            for old_id in &old_ids {
-                self.nodes.remove(old_id);
-            }
+        let old_ids: Vec<NodeId> = self.files.remove(&id).unwrap_or_default();
+
+        for old_id in &old_ids {
+            self.nodes.remove(old_id);
         }
 
         let Warned {
@@ -50,53 +44,68 @@ impl Compiler {
 
         // Discard warnings about html being an unstable feature, html is kind
         // of the whole game here
-        warnings.retain(|d: &mut SourceDiagnostic| {
-            !(d.severity == Severity::Warning && d.message == HTML_MESSAGE)
+        warnings.retain(|diagnostic: &mut SourceDiagnostic| {
+            !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
         });
 
-        match result {
-            Ok(html_document) => match typst_html::html(&html_document) {
-                Ok(content) => {
-                    let document = Document::from(content);
+        let nodes_result = result.and_then(|html_document| {
+            typst_html::html(&html_document).and_then(|content| {
+                let document = Document::from(content);
 
-                    match extract(&html_document, document, |id| self.nodes.contains_key(id)) {
-                        Ok(nodes) => {
-                            self.files.insert(id, nodes.keys().cloned().collect());
-                            self.nodes.extend(nodes);
+                extract(&html_document, document, |id| self.nodes.contains_key(id))
+            })
+        });
 
-                            if warnings.is_empty() {
-                                self.file_diagnostics.remove(&id);
-                            } else {
-                                self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
-                            }
-                        }
-                        Err(errors) => {
-                            self.file_diagnostics.insert(id, (warnings, errors));
-                        }
+        match nodes_result {
+            Ok(nodes) => {
+                // Old IDs absent from the new compilation are orphaned.
+                for old_id in old_ids {
+                    if !nodes.contains_key(&old_id) {
+                        self.dirty.remove(&old_id);
+                        self.removed.insert(old_id);
                     }
                 }
-                Err(errors) => {
-                    self.file_diagnostics.insert(id, (warnings, errors));
+                // Newly compiled IDs are dirty.
+                for new_id in nodes.keys() {
+                    self.removed.remove(new_id);
+                    self.dirty.insert(new_id.clone());
                 }
-            },
+
+                self.files.insert(id, nodes.keys().cloned().collect());
+                self.nodes.extend(nodes);
+
+                if warnings.is_empty() {
+                    self.file_diagnostics.remove(&id);
+                } else {
+                    self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
+                }
+            }
             Err(errors) => {
+                // When compilation fails, all old IDs are orphaned
+                for old_id in &old_ids {
+                    self.dirty.remove(old_id);
+                    self.removed.insert(old_id.clone());
+                }
                 self.file_diagnostics.insert(id, (warnings, errors));
             }
         }
-
-        Ok(())
     }
 
     /// Removes a source file's nodes and diagnostics from the in-memory store.
     ///
-    /// Called when a source file is deleted from disk so its nodes are not
-    /// written on the next `process` call.
+    /// Called when a source file is deleted from disk. The removed node IDs
+    /// are accumulated in `self.removed` so that `process` can delete their
+    /// output files.
     pub fn remove(&mut self, id: FileId) {
         if let Some(old_ids) = self.files.remove(&id) {
-            for old_id in old_ids {
-                self.nodes.remove(&old_id);
+            for old_id in &old_ids {
+                self.nodes.remove(old_id);
+                self.dirty.remove(old_id);
             }
+
+            self.removed.extend(old_ids);
         }
+
         self.file_diagnostics.remove(&id);
     }
 
@@ -109,21 +118,18 @@ impl Compiler {
         &self.file_diagnostics
     }
 
-    /// Writes all nodes to `output_dir/<node-id>.html`.
-    ///
-    /// Fatal I/O errors are returned as `Err`.
-    pub fn process(&self, output_directory: &Path) -> anyhow::Result<()> {
-        for (node_id, entry) in &self.nodes {
-            let path = output_directory.join(format!("{node_id}.html"));
-            std::fs::write(&path, &entry.raw_html)?;
-        }
-        Ok(())
-    }
-}
-
-impl Default for Compiler {
-    fn default() -> Self {
-        Compiler::new()
+    /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
+    /// the output directory, and clears the dirty and removed sets.
+    pub fn process(&mut self) -> OutputPlan {
+        let dirty = std::mem::take(&mut self.dirty);
+        let writes = dirty
+            .into_iter()
+            .filter_map(|id| {
+                self.nodes.get(&id).map(|entry| (id, entry.raw_html.clone()))
+            })
+            .collect();
+        let deletes = std::mem::take(&mut self.removed);
+        OutputPlan { writes, deletes }
     }
 }
 
@@ -136,6 +142,32 @@ pub struct NodeEntry {
     pub links: Vec<NodeId>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
+}
+
+/// The set of writes and deletes to apply to the output directory after a
+/// process call.
+pub struct OutputPlan {
+    pub writes: HashMap<NodeId, String>,
+    pub deletes: HashSet<NodeId>,
+}
+
+impl OutputPlan {
+    pub fn apply(&self, output_directory: &Path) -> Result<(), io::Error> {
+        for (node_id, html) in &self.writes {
+            std::fs::write(output_directory.join(format!("{node_id}.html")), html)?;
+        }
+        for node_id in &self.deletes {
+            let path = output_directory.join(format!("{node_id}.html"));
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    eprintln!("warning: expected to delete {path:?} but it was not found");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 // TODO: Doc comment out of date, fix after implementing Stage 4

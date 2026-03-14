@@ -32,7 +32,7 @@ const USER_AGENT: &str = "weibian";
 
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(500);
 
-pub struct WatchState {
+pub struct Watcher {
     file_store: FileStore<SystemFiles>,
     resources: Resources,
     import_graph: ImportGraph,
@@ -40,7 +40,7 @@ pub struct WatchState {
     config: BuildConfig,
 }
 
-impl WatchState {
+impl Watcher {
     /// Creates a `WatchState` from a build configuration.
     pub fn new(config: BuildConfig) -> Self {
         let downloader = SystemDownloader::new(USER_AGENT);
@@ -52,7 +52,7 @@ impl WatchState {
             file_store,
             resources: Resources::default(),
             import_graph: ImportGraph::default(),
-            compiler: Compiler::new(),
+            compiler: Compiler::default(),
             config,
         }
     }
@@ -89,14 +89,16 @@ impl WatchState {
             let world =
                 DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-            self.compiler.compile(&world, id)?;
+            self.compiler.compile(&world, id);
 
             let (_, dependencies) = world.into_inner();
 
             self.import_graph.update(id, dependencies);
         }
 
-        self.compiler.process(&self.config.output_directory)?;
+        self.compiler
+            .process()
+            .apply(&self.config.output_directory)?;
         self.emit_diagnostics()?;
 
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
@@ -121,6 +123,7 @@ impl WatchState {
                     }
                     EventKind::Remove => {
                         self.import_graph.remove(event.id);
+
                         if event.is_source {
                             self.compiler.remove(event.id);
                         }
@@ -134,19 +137,16 @@ impl WatchState {
                 let world =
                     DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-                self.compiler.compile(&world, id)?;
+                self.compiler.compile(&world, id);
 
                 let (_, dependencies) = world.into_inner();
 
                 self.import_graph.update(id, dependencies);
             }
 
-            if self.config.output_directory.exists() {
-                fs::remove_dir_all(&self.config.output_directory)?;
-            }
-            fs::create_dir(&self.config.output_directory)?;
-
-            self.compiler.process(&self.config.output_directory)?;
+            self.compiler
+                .process()
+                .apply(&self.config.output_directory)?;
             self.emit_diagnostics()?;
 
             comemo::evict(10);
