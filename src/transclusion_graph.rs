@@ -24,13 +24,13 @@ impl TransclusionGraph {
 
     /// Returns a topological ordering of all nodes, with dependencies before
     /// dependents. Returns an error if a transclusion cycle is detected.
-    pub fn topo_sort(&self) -> anyhow::Result<Vec<&NodeId>> {
+    pub fn topo_sort(&self) -> anyhow::Result<Vec<NodeId>> {
         todo!()
     }
 
     /// Returns all nodes that transitively transclude `id`, not including
     /// `id` itself.
-    pub fn dependents(&self, id: &str) -> HashSet<&NodeId> {
+    pub fn dependents(&self, id: NodeId) -> HashSet<NodeId> {
         todo!()
     }
 }

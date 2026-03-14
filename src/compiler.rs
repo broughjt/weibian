@@ -16,6 +16,7 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 /// store and per-file diagnostics across incremental rebuilds.
 #[derive(Default)]
 pub struct Compiler {
+    interner: NodeInterner,
     files: HashMap<FileId, Vec<NodeId>>,
     nodes: HashMap<NodeId, NodeEntry>,
     file_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
@@ -51,8 +52,11 @@ impl Compiler {
         let nodes_result = result.and_then(|html_document| {
             typst_html::html(&html_document).and_then(|content| {
                 let document = Document::from(content);
-
-                extract(&html_document, document, |id| self.nodes.contains_key(id))
+                let interner = &mut self.interner;
+                let nodes = &self.nodes;
+                extract(&html_document, document, interner, |id| {
+                    nodes.contains_key(&id)
+                })
             })
         });
 
@@ -66,12 +70,12 @@ impl Compiler {
                     }
                 }
                 // Newly compiled IDs are dirty.
-                for new_id in nodes.keys() {
-                    self.removed.remove(new_id);
-                    self.dirty.insert(new_id.clone());
+                for &new_id in nodes.keys() {
+                    self.removed.remove(&new_id);
+                    self.dirty.insert(new_id);
                 }
 
-                self.files.insert(id, nodes.keys().cloned().collect());
+                self.files.insert(id, nodes.keys().copied().collect());
                 self.nodes.extend(nodes);
 
                 if warnings.is_empty() {
@@ -82,9 +86,9 @@ impl Compiler {
             }
             Err(errors) => {
                 // When compilation fails, all old IDs are orphaned
-                for old_id in &old_ids {
-                    self.dirty.remove(old_id);
-                    self.removed.insert(old_id.clone());
+                for old_id in old_ids {
+                    self.dirty.remove(&old_id);
+                    self.removed.insert(old_id);
                 }
                 self.file_diagnostics.insert(id, (warnings, errors));
             }
@@ -125,15 +129,56 @@ impl Compiler {
         let writes = dirty
             .into_iter()
             .filter_map(|id| {
-                self.nodes.get(&id).map(|entry| (id, entry.raw_html.clone()))
+                let name = self.interner.name(id).to_string();
+                self.nodes
+                    .get(&id)
+                    .map(|entry| (name, entry.raw_html.clone()))
             })
             .collect();
-        let deletes = std::mem::take(&mut self.removed);
+        let deletes = std::mem::take(&mut self.removed)
+            .into_iter()
+            .map(|id| self.interner.name(id).to_string())
+            .collect();
+
         OutputPlan { writes, deletes }
     }
 }
 
-pub type NodeId = String;
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
+pub struct NodeId(u32);
+
+/// Interns node name strings to compact [`NodeId`] handles.
+#[derive(Default)]
+pub struct NodeInterner {
+    forward: HashMap<String, NodeId>,
+    reverse: Vec<String>,
+}
+
+impl NodeInterner {
+    /// Returns the [`NodeId`] for `name`, interning it if not already present.
+    pub fn intern<S: Into<String> + AsRef<str>>(&mut self, name: S) -> NodeId {
+        if let Some(&id) = self.forward.get(name.as_ref()) {
+            return id;
+        }
+        let id = NodeId(self.reverse.len() as u32);
+        let name_owned = name.into();
+        self.forward.insert(name_owned.clone(), id);
+        self.reverse.push(name_owned);
+        id
+    }
+
+    /// Returns the [`NodeId`] for `name` if it has been interned.
+    pub fn get(&self, name: &str) -> Option<NodeId> {
+        self.forward.get(name).copied()
+    }
+
+    /// Returns the name string for a [`NodeId`].
+    ///
+    /// Panics if `id` was not produced by this interner.
+    pub fn name(&self, id: NodeId) -> &str {
+        &self.reverse[id.0 as usize]
+    }
+}
 
 #[derive(Default)]
 pub struct NodeEntry {
@@ -147,8 +192,8 @@ pub struct NodeEntry {
 /// The set of writes and deletes to apply to the output directory after a
 /// process call.
 pub struct OutputPlan {
-    pub writes: HashMap<NodeId, String>,
-    pub deletes: HashSet<NodeId>,
+    pub writes: HashMap<String, String>,
+    pub deletes: HashSet<String>,
 }
 
 impl OutputPlan {
@@ -158,20 +203,21 @@ impl OutputPlan {
         }
         for node_id in &self.deletes {
             let path = output_directory.join(format!("{node_id}.html"));
+
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     eprintln!("warning: expected to delete {path:?} but it was not found");
                 }
-                Err(e) => return Err(e),
+                Err(error) => return Err(error),
             }
         }
+
         Ok(())
     }
 }
 
-// TODO: Doc comment out of date, fix after implementing Stage 4
-/// Parses `document` into a map of node IDs to (HTML, span) pairs.
+/// Parses `document` into a map of node IDs to node entries.
 ///
 /// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
 /// side effect of extraction. `node_exists` is called to detect cross-file
@@ -182,7 +228,8 @@ impl OutputPlan {
 fn extract(
     html_document: &HtmlDocument,
     document: Document,
-    node_exists: impl Fn(&str) -> bool,
+    interner: &mut NodeInterner,
+    node_exists: impl Fn(NodeId) -> bool,
 ) -> Result<HashMap<NodeId, NodeEntry>, EcoVec<SourceDiagnostic>> {
     let (spans, mut errors) = collect_node_spans(html_document);
 
@@ -190,7 +237,7 @@ fn extract(
     errors.extend(
         spans
             .iter()
-            .filter(|(id, _)| node_exists(id))
+            .filter(|(id, _)| node_exists(interner.intern(*id)))
             .map(|(id, &span)| {
                 SourceDiagnostic::error(span, eco_format!("duplicate node identifier: {id:?}"))
             }),
@@ -233,11 +280,16 @@ fn extract(
         };
 
         let html = subnode.html().to_string();
-        let transclusions: Vec<NodeId> = subnode
-            .select("wb-transclude")
-            .iter()
-            .filter_map(|element| element.attr("identifier").map(|id| id.to_string()))
-            .collect();
+        let mut transclusions: Vec<NodeId> = Vec::new();
+        for element in subnode.select("wb-transclude").iter() {
+            match element.attr("identifier").as_deref() {
+                Some(id) => transclusions.push(interner.intern(id)),
+                None => errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-transclude is missing an identifier",
+                )),
+            }
+        }
         let links: Vec<NodeId> = subnode
             .select("a")
             .iter()
@@ -246,7 +298,7 @@ fn extract(
                     .attr("href")
                     .as_deref()
                     .and_then(|href| href.strip_prefix("wb:"))
-                    .map(|id| id.to_string())
+                    .map(|id| interner.intern(id))
             })
             .collect();
 
@@ -259,7 +311,7 @@ fn extract(
         }
 
         nodes.insert(
-            identifier,
+            interner.intern(identifier),
             NodeEntry {
                 raw_html: html,
                 transclusions,
@@ -282,11 +334,16 @@ fn extract(
         Some(wb_node) => {
             if let Some(identifier) = wb_node.attr("identifier") {
                 let identifier = identifier.to_string();
-                let transclusions: Vec<NodeId> = wb_node
-                    .select("wb-transclude")
-                    .iter()
-                    .filter_map(|el| el.attr("identifier").map(|id| id.to_string()))
-                    .collect();
+                let mut transclusions: Vec<NodeId> = Vec::new();
+                for element in wb_node.select("wb-transclude").iter() {
+                    match element.attr("identifier").as_deref() {
+                        Some(id) => transclusions.push(interner.intern(id)),
+                        None => errors.push(SourceDiagnostic::error(
+                            Span::detached(),
+                            "wb-transclude is missing an identifier",
+                        )),
+                    }
+                }
                 let links: Vec<NodeId> = wb_node
                     .select("a")
                     .iter()
@@ -294,12 +351,12 @@ fn extract(
                         el.attr("href")
                             .as_deref()
                             .and_then(|href| href.strip_prefix("wb:"))
-                            .map(|id| id.to_string())
+                            .map(|id| interner.intern(id))
                     })
                     .collect();
 
                 nodes.insert(
-                    identifier,
+                    interner.intern(identifier),
                     NodeEntry {
                         raw_html: wb_node.html().to_string(),
                         transclusions,
@@ -342,7 +399,7 @@ fn extract(
 /// plus errors for any duplicate identifiers found within the document.
 fn collect_node_spans(
     document: &HtmlDocument,
-) -> (HashMap<NodeId, Span>, EcoVec<SourceDiagnostic>) {
+) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
     let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
     let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
