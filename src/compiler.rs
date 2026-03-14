@@ -11,17 +11,12 @@ use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
-pub type NodeId = String;
-
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
 pub struct Compiler {
     files: HashMap<FileId, Vec<NodeId>>,
-    // TODO: Don't keep span in here if we don't end up needing it in process
-    nodes: HashMap<NodeId, (String, Span)>,
+    nodes: HashMap<NodeId, NodeEntry>,
     file_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
-    // TODO: Definitely won't be just a Vec<String>, should map NodeIds to a a list of SourceDiagnostics
-    // node_diagnostics: Vec<String>,
 }
 
 impl Compiler {
@@ -118,14 +113,32 @@ impl Compiler {
     ///
     /// Fatal I/O errors are returned as `Err`.
     pub fn process(&self, output_directory: &Path) -> anyhow::Result<()> {
-        for (node_id, (html, _span)) in &self.nodes {
+        for (node_id, entry) in &self.nodes {
             let path = output_directory.join(format!("{node_id}.html"));
-            std::fs::write(&path, html)?;
+            std::fs::write(&path, &entry.raw_html)?;
         }
         Ok(())
     }
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Compiler::new()
+    }
+}
+
+pub type NodeId = String;
+
+#[derive(Default)]
+pub struct NodeEntry {
+    pub raw_html: String,
+    pub transclusions: Vec<NodeId>,
+    pub links: Vec<NodeId>,
+    pub rendered_body: Option<String>,
+    pub rendered_backmatter: Option<String>,
+}
+
+// TODO: Doc comment out of date, fix after implementing Stage 4
 /// Parses `document` into a map of node IDs to (HTML, span) pairs.
 ///
 /// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
@@ -138,7 +151,7 @@ fn extract(
     html_document: &HtmlDocument,
     document: Document,
     node_exists: impl Fn(&str) -> bool,
-) -> Result<HashMap<NodeId, (String, Span)>, EcoVec<SourceDiagnostic>> {
+) -> Result<HashMap<NodeId, NodeEntry>, EcoVec<SourceDiagnostic>> {
     let (spans, mut errors) = collect_node_spans(html_document);
 
     // Check for global duplicate identifiers before processing.
@@ -151,7 +164,7 @@ fn extract(
             }),
     );
 
-    let mut nodes: HashMap<NodeId, (String, Span)> = HashMap::new();
+    let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
 
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
@@ -197,11 +210,18 @@ fn extract(
             subnode.remove();
         }
 
-        nodes.insert(identifier, (html, span));
+        nodes.insert(
+            identifier,
+            NodeEntry {
+                raw_html: html,
+                ..Default::default()
+            },
+        );
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
     let mut node_iter = document.select("wb-node").iter();
+
     match node_iter.next() {
         None => {
             errors.push(SourceDiagnostic::error(
@@ -212,11 +232,14 @@ fn extract(
         Some(wb_node) => {
             if let Some(identifier) = wb_node.attr("identifier") {
                 let identifier = identifier.to_string();
-                let span = spans
-                    .get(&identifier)
-                    .copied()
-                    .expect("bug: no span found for node identifier");
-                nodes.insert(identifier, (wb_node.html().to_string(), span));
+
+                nodes.insert(
+                    identifier,
+                    NodeEntry {
+                        raw_html: wb_node.html().to_string(),
+                        ..Default::default()
+                    },
+                );
             } else {
                 errors.push(SourceDiagnostic::error(
                     Span::detached(),
@@ -234,6 +257,7 @@ fn extract(
                             .expect("bug: no span found for wb-node identifier")
                     })
                     .unwrap_or(Span::detached());
+
                 SourceDiagnostic::error(span, "source file produced multiple wb-node elements")
             }));
         }
