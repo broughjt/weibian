@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 datafrog = "2"
+petgraph = { version = "0.6", default-features = false, features = ["graphmap"] }
 anyhow = "1.0.102"
 comemo = "0.5.1"
 notify-debouncer-full = "0.6.0"

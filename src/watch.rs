@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{IsTerminal, Write};
+use std::num::NonZeroU16;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -9,6 +10,8 @@ use notify_debouncer_full::notify::{
     EventKind as NotifyEventKind, RecursiveMode, event::ModifyKind,
 };
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use petgraph::graphmap::DiGraphMap;
+use petgraph::visit::{Bfs, Reversed};
 use termcolor::{ColorChoice, StandardStream};
 use typst_kit::{
     diagnostics::{DiagnosticFormat, emit},
@@ -23,7 +26,6 @@ use crate::{
     compiler::Compiler,
     config::BuildConfig,
     file_store::FileStore,
-    import_graph::ImportGraph,
     world::{DependenciesWorld, Resources, SystemWorld},
 };
 
@@ -35,7 +37,7 @@ const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(500);
 pub struct Watcher {
     file_store: FileStore<SystemFiles>,
     resources: Resources,
-    import_graph: ImportGraph,
+    import_graph: DiGraphMap<NonZeroU16, ()>,
     compiler: Compiler,
     config: BuildConfig,
 }
@@ -51,7 +53,7 @@ impl Watcher {
         Self {
             file_store,
             resources: Resources::default(),
-            import_graph: ImportGraph::default(),
+            import_graph: DiGraphMap::new(),
             compiler: Compiler::default(),
             config,
         }
@@ -93,7 +95,7 @@ impl Watcher {
 
             let (_, dependencies) = world.into_inner();
 
-            self.import_graph.update(id, dependencies);
+            update_dependencies(&mut self.import_graph, id, dependencies);
         }
 
         self.compiler
@@ -110,10 +112,22 @@ impl Watcher {
 
         for result in receiver {
             for event in self.parse_events(result)? {
-                let dependents = self.import_graph.dependents(event.id);
+                self.file_store.reset(event.id);
 
-                self.file_store
-                    .reset(std::iter::once(event.id).chain(dependents.iter().copied()));
+                let start = event.id.into_raw();
+                let reversed = Reversed(&self.import_graph);
+                let mut bfs = Bfs::new(reversed, start);
+
+                while let Some(raw) = bfs.next(reversed) {
+                    if raw != start {
+                        let dependency = FileId::from_raw(raw);
+
+                        self.file_store.reset(dependency);
+                        if event.is_source {
+                            recompile.insert(dependency);
+                        }
+                    }
+                }
 
                 match event.kind {
                     EventKind::Update => {
@@ -122,15 +136,13 @@ impl Watcher {
                         }
                     }
                     EventKind::Remove => {
-                        self.import_graph.remove(event.id);
+                        self.import_graph.remove_node(event.id.into_raw());
 
                         if event.is_source {
                             self.compiler.remove(event.id);
                         }
                     }
                 }
-
-                recompile.extend(dependents);
             }
 
             for id in recompile.drain() {
@@ -141,7 +153,7 @@ impl Watcher {
 
                 let (_, dependencies) = world.into_inner();
 
-                self.import_graph.update(id, dependencies);
+                update_dependencies(&mut self.import_graph, id, dependencies);
             }
 
             self.compiler
@@ -235,6 +247,23 @@ impl Watcher {
         }
 
         Ok(())
+    }
+}
+
+/// Updates the import edges for `id` in `graph` given its new set of
+/// dependencies, removing stale edges and adding new ones.
+fn update_dependencies(
+    graph: &mut DiGraphMap<NonZeroU16, ()>,
+    id: FileId,
+    dependencies: HashSet<FileId>,
+) {
+    let raw_id = id.into_raw();
+    let old: HashSet<FileId> = graph.neighbors(raw_id).map(FileId::from_raw).collect();
+    for &dependency in old.difference(&dependencies) {
+        graph.remove_edge(raw_id, dependency.into_raw());
+    }
+    for &dependency in dependencies.difference(&old) {
+        graph.add_edge(raw_id, dependency.into_raw(), ());
     }
 }
 

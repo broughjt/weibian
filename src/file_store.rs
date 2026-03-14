@@ -46,19 +46,17 @@ where
         self.slot(id, |slot| slot.file(&self.loader, id))
     }
 
-    /// Resets the given file slots.
+    /// Resets the given file slot.
     ///
-    /// On subsequent accesses, invalidated files are re-loaded through the
+    /// On subsequent accesses, the invalidated file is re-loaded through the
     /// underlying loader. When a previously parsed source slot is reset, the
     /// stale source is retained so it can be updated in-place via
     /// [`Source::replace`], giving better incremental compilation performance
     /// than creating a new source from scratch.
-    pub fn reset(&mut self, ids: impl IntoIterator<Item = FileId>) {
+    pub fn reset(&mut self, id: FileId) {
         let slots = self.slots.get_mut().unwrap();
-        for id in ids {
-            if let Some(slot) = slots.get_mut(&id) {
-                slot.reset();
-            }
+        if let Some(slot) = slots.get_mut(&id) {
+            slot.reset();
         }
     }
 
