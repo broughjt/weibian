@@ -43,9 +43,9 @@ fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Watch => {
-            let mut watch_state = Watcher::new(config);
+            let mut watcher = Watcher::new(config);
 
-            watch_state.watch()?;
+            watcher.watch()?;
 
             Ok(())
         }
