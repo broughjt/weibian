@@ -5,6 +5,8 @@ use std::path::Path;
 
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
+use petgraph::algo::toposort;
+use petgraph::graphmap::DiGraphMap;
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
@@ -16,10 +18,12 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 /// store and per-file diagnostics across incremental rebuilds.
 #[derive(Default)]
 pub struct Compiler {
-    interner: NodeInterner,
     files: HashMap<FileId, Vec<NodeId>>,
     nodes: HashMap<NodeId, NodeEntry>,
     file_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
+    links: DiGraphMap<NodeId, ()>,
+    transclusions: DiGraphMap<NodeId, ()>,
+    interner: NodeInterner,
     dirty: HashSet<NodeId>,
     removed: HashSet<NodeId>,
 }
@@ -31,12 +35,9 @@ impl Compiler {
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
     pub fn compile<W: World>(&mut self, world: &W, id: FileId) {
-        // Clean up any nodes from a previous compilation of this file.
-        let old_ids: Vec<NodeId> = self.files.remove(&id).unwrap_or_default();
-
-        for old_id in &old_ids {
-            self.nodes.remove(old_id);
-        }
+        // Orphan all nodes from the previous compilation; nodes that reappear
+        // are de-orphaned in the `Ok` branch below.
+        self.remove(id);
 
         let Warned {
             output: result,
@@ -52,44 +53,35 @@ impl Compiler {
         let nodes_result = result.and_then(|html_document| {
             typst_html::html(&html_document).and_then(|content| {
                 let document = Document::from(content);
-                let interner = &mut self.interner;
-                let nodes = &self.nodes;
-                extract(&html_document, document, interner, |id| {
-                    nodes.contains_key(&id)
+
+                extract(&html_document, document, &mut self.interner, |id| {
+                    self.nodes.contains_key(&id)
                 })
             })
         });
 
         match nodes_result {
             Ok(nodes) => {
-                // Old IDs absent from the new compilation are orphaned.
-                for old_id in old_ids {
-                    if !nodes.contains_key(&old_id) {
-                        self.dirty.remove(&old_id);
-                        self.removed.insert(old_id);
+                for (&node_id, (_, transclusions, links)) in &nodes {
+                    self.removed.remove(&node_id);
+                    self.dirty.insert(node_id);
+                    for &t in transclusions {
+                        self.transclusions.add_edge(node_id, t, ());
                     }
-                }
-                // Newly compiled IDs are dirty.
-                for &new_id in nodes.keys() {
-                    self.removed.remove(&new_id);
-                    self.dirty.insert(new_id);
+                    for &l in links {
+                        self.links.add_edge(node_id, l, ());
+                    }
                 }
 
                 self.files.insert(id, nodes.keys().copied().collect());
-                self.nodes.extend(nodes);
+                self.nodes
+                    .extend(nodes.into_iter().map(|(k, (v, _, _))| (k, v)));
 
-                if warnings.is_empty() {
-                    self.file_diagnostics.remove(&id);
-                } else {
+                if !warnings.is_empty() {
                     self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
                 }
             }
             Err(errors) => {
-                // When compilation fails, all old IDs are orphaned
-                for old_id in old_ids {
-                    self.dirty.remove(&old_id);
-                    self.removed.insert(old_id);
-                }
                 self.file_diagnostics.insert(id, (warnings, errors));
             }
         }
@@ -102,12 +94,14 @@ impl Compiler {
     /// output files.
     pub fn remove(&mut self, id: FileId) {
         if let Some(old_ids) = self.files.remove(&id) {
-            for old_id in &old_ids {
-                self.nodes.remove(old_id);
-                self.dirty.remove(old_id);
-            }
+            for old_id in old_ids {
+                self.nodes.remove(&old_id);
+                self.dirty.remove(&old_id);
+                self.removed.insert(old_id);
 
-            self.removed.extend(old_ids);
+                clear_outgoing(&mut self.transclusions, old_id);
+                clear_outgoing(&mut self.links, old_id);
+            }
         }
 
         self.file_diagnostics.remove(&id);
@@ -125,6 +119,7 @@ impl Compiler {
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
     /// the output directory, and clears the dirty and removed sets.
     pub fn process(&mut self) -> OutputPlan {
+        /*
         let dirty = std::mem::take(&mut self.dirty);
         let writes = dirty
             .into_iter()
@@ -141,6 +136,23 @@ impl Compiler {
             .collect();
 
         OutputPlan { writes, deletes }
+        */
+
+        match toposort(&self.transclusions, None) {
+            Ok(order) => {
+                for id in &order {
+                    println!("{}", self.interner.name(*id));
+                }
+            }
+            Err(cycle) => {
+                println!("cycle detected involving: {}", self.interner.name(cycle.node_id()));
+            }
+        }
+
+        OutputPlan {
+            writes: HashMap::new(),
+            deletes: HashSet::new(),
+        }
     }
 }
 
@@ -183,14 +195,21 @@ impl NodeInterner {
 #[derive(Default)]
 pub struct NodeEntry {
     pub raw_html: String,
-    pub transclusions: Vec<NodeId>,
-    pub links: Vec<NodeId>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
 }
 
 /// The set of writes and deletes to apply to the output directory after a
 /// process call.
+/// Removes all outgoing edges from `id` in `graph`, leaving incoming edges
+/// (and thus transitive dependents) intact.
+fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
+    let neighbors: Vec<NodeId> = graph.neighbors(id).collect();
+    for neighbor in neighbors {
+        graph.remove_edge(id, neighbor);
+    }
+}
+
 pub struct OutputPlan {
     pub writes: HashMap<String, String>,
     pub deletes: HashSet<String>,
@@ -230,7 +249,7 @@ fn extract(
     document: Document,
     interner: &mut NodeInterner,
     node_exists: impl Fn(NodeId) -> bool,
-) -> Result<HashMap<NodeId, NodeEntry>, EcoVec<SourceDiagnostic>> {
+) -> Result<HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)>, EcoVec<SourceDiagnostic>> {
     let (spans, mut errors) = collect_node_spans(html_document);
 
     // Check for global duplicate identifiers before processing.
@@ -243,7 +262,7 @@ fn extract(
             }),
     );
 
-    let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
+    let mut nodes: HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)> = HashMap::new();
 
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
@@ -312,12 +331,14 @@ fn extract(
 
         nodes.insert(
             interner.intern(identifier),
-            NodeEntry {
-                raw_html: html,
+            (
+                NodeEntry {
+                    raw_html: html,
+                    ..Default::default()
+                },
                 transclusions,
                 links,
-                ..Default::default()
-            },
+            ),
         );
     }
 
@@ -357,12 +378,14 @@ fn extract(
 
                 nodes.insert(
                     interner.intern(identifier),
-                    NodeEntry {
-                        raw_html: wb_node.html().to_string(),
+                    (
+                        NodeEntry {
+                            raw_html: wb_node.html().to_string(),
+                            ..Default::default()
+                        },
                         transclusions,
                         links,
-                        ..Default::default()
-                    },
+                    ),
                 );
             } else {
                 errors.push(SourceDiagnostic::error(
