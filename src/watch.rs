@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::num::NonZeroU16;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -232,10 +233,10 @@ impl Watcher {
     fn emit_diagnostics(&self) -> anyhow::Result<()> {
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
 
-        // if std::io::stderr().is_terminal() {
-        //     write!(stderr, "\x1B[2J\x1B[1;1H")?;
-        //     stderr.flush()?;
-        // }
+        if std::io::stderr().is_terminal() {
+            write!(stderr, "\x1B[2J\x1B[1;1H")?;
+            stderr.flush()?;
+        }
 
         for (&id, (warnings, errors)) in self.compiler.compile_diagnostics() {
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
