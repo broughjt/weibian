@@ -19,7 +19,8 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 /// store and per-file diagnostics across incremental rebuilds.
 #[derive(Default)]
 pub struct Compiler {
-    files: HashMap<FileId, Vec<NodeId>>,
+    file_to_nodes: HashMap<FileId, Vec<NodeId>>,
+    node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, NodeEntry>,
     compile_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
     process_diagnostics: HashMap<FileId, EcoVec<SourceDiagnostic>>,
@@ -65,17 +66,20 @@ impl Compiler {
         match nodes_result {
             Ok(nodes) => {
                 for (&node_id, (_, transclusions, links)) in &nodes {
+                    self.node_to_file.insert(node_id, id);
                     self.removed.remove(&node_id);
                     self.dirty.insert(node_id);
-                    for &t in transclusions {
-                        self.transclusions.add_edge(node_id, t, ());
+
+                    for &transclusion in transclusions {
+                        self.transclusions.add_edge(node_id, transclusion, ());
                     }
-                    for &l in links {
-                        self.links.add_edge(node_id, l, ());
+                    for &link in links {
+                        self.links.add_edge(node_id, link, ());
                     }
                 }
 
-                self.files.insert(id, nodes.keys().copied().collect());
+                self.file_to_nodes
+                    .insert(id, nodes.keys().copied().collect());
                 self.nodes
                     .extend(nodes.into_iter().map(|(k, (v, _, _))| (k, v)));
 
@@ -96,8 +100,9 @@ impl Compiler {
     /// are accumulated in `self.removed` so that `process` can delete their
     /// output files.
     pub fn remove(&mut self, id: FileId) {
-        if let Some(old_ids) = self.files.remove(&id) {
+        if let Some(old_ids) = self.file_to_nodes.remove(&id) {
             for old_id in old_ids {
+                self.node_to_file.remove(&old_id);
                 self.nodes.remove(&old_id);
                 self.dirty.remove(&old_id);
                 self.removed.insert(old_id);
@@ -142,37 +147,30 @@ impl Compiler {
 
         let dirty = std::mem::take(&mut self.dirty);
         let removed = std::mem::take(&mut self.removed);
+        let rerender = {
+            let reversed = Reversed(&self.transclusions);
 
-        let reversed = Reversed(&self.transclusions);
-
-        let mut dirty_rerender: HashSet<NodeId> = HashSet::new();
-        for &start in &dirty {
-            let mut bfs = Bfs::new(reversed, start);
-            while let Some(id) = bfs.next(reversed) {
-                dirty_rerender.insert(id);
+            let mut dirty_rerender: HashSet<NodeId> = HashSet::new();
+            for &start in &dirty {
+                let mut bfs = Bfs::new(reversed, start);
+                while let Some(id) = bfs.next(reversed) {
+                    dirty_rerender.insert(id);
+                }
             }
-        }
 
-        let mut removed_reachable: HashSet<NodeId> = HashSet::new();
-        for &start in &removed {
-            let mut bfs = Bfs::new(reversed, start);
-            while let Some(id) = bfs.next(reversed) {
-                removed_reachable.insert(id);
+            let mut removed_reachable: HashSet<NodeId> = HashSet::new();
+            for &start in &removed {
+                let mut bfs = Bfs::new(reversed, start);
+                while let Some(id) = bfs.next(reversed) {
+                    removed_reachable.insert(id);
+                }
             }
-        }
 
-        // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
-        let rerender = &dirty_rerender | &(&removed_reachable - &removed);
+            // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
+            &dirty_rerender | &(&removed_reachable - &removed)
+        };
 
         let sccs = tarjan_scc(&self.transclusions);
-
-        // Build reverse map: node → file, for attributing cycle errors.
-        // TODO: Probably we should have this in compiler state
-        let node_to_file: HashMap<NodeId, FileId> = self
-            .files
-            .iter()
-            .flat_map(|(&file_id, node_ids)| node_ids.iter().map(move |&nid| (nid, file_id)))
-            .collect();
 
         // Pass 1: detect cycles and compute the transitively unrenderable set.
         //
@@ -187,12 +185,13 @@ impl Compiler {
                 let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
                 let message = eco_format!("transclusion cycle: {}", names.join(", "));
 
-                unrenderable.extend(scc.iter().copied());
+                unrenderable.extend(scc.iter());
 
                 let files_in_cycle: HashSet<FileId> = scc
                     .iter()
                     .map(|&id| {
-                        *node_to_file
+                        *self
+                            .node_to_file
                             .get(&id)
                             .expect("bug: node in transclusion graph has no file entry")
                     })
@@ -222,7 +221,8 @@ impl Compiler {
             .all_edges()
             .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
         {
-            let file_id = node_to_file
+            let file_id = self
+                .node_to_file
                 .get(&source)
                 .copied()
                 .expect("bug: node in transclusion graph has no file entry");
@@ -243,7 +243,8 @@ impl Compiler {
             .all_edges()
             .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
         {
-            let file_id = node_to_file
+            let file_id = self
+                .node_to_file
                 .get(&source)
                 .copied()
                 .expect("bug: node in link graph has no file entry");
@@ -340,7 +341,6 @@ impl Compiler {
                 (name, html)
             })
             .collect();
-
         let deletes = removed
             .iter()
             .chain(unrenderable.intersection(&rerender))
@@ -432,6 +432,8 @@ impl OutputPlan {
     }
 }
 
+type ExtractData = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
+
 /// Parses `document` into a map of node IDs to node entries.
 ///
 /// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
@@ -445,7 +447,7 @@ fn extract(
     document: Document,
     interner: &mut NodeInterner,
     node_exists: impl Fn(NodeId) -> bool,
-) -> Result<HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)>, EcoVec<SourceDiagnostic>> {
+) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
     let (spans, mut errors) = collect_node_spans(html_document);
 
     // Check for global duplicate identifiers before processing.
