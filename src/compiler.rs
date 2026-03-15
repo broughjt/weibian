@@ -162,10 +162,6 @@ impl Compiler {
         }
 
         // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
-        // let _rerender: HashSet<NodeId> = dirty_rerender
-        //     .union(&(&removed_reachable - &removed))
-        //     .copied()
-        //     .collect();
         let rerender = &dirty_rerender | &(&removed_reachable - &removed);
 
         let sccs = tarjan_scc(&self.transclusions);
@@ -274,12 +270,12 @@ impl Compiler {
             let document = Document::from(raw_html);
 
             for element in document.select("a").iter() {
-                if let Some(href) = element.attr("href") {
-                    if let Some(node_id) = href.strip_prefix("wb:") {
-                        // TODO: Support configurable index node, root
-                        // directory, and trailing slash.
-                        element.set_attr("href", &format!("/{node_id}.html"));
-                    }
+                if let Some(href) = element.attr("href")
+                    && let Some(node_id) = href.strip_prefix("wb:")
+                {
+                    // TODO: Support configurable index node, root
+                    // directory, and trailing slash.
+                    element.set_attr("href", &format!("/{node_id}.html"));
                 }
             }
 
@@ -306,24 +302,52 @@ impl Compiler {
                 }
             }
 
-            let rendered = document.html().to_string();
+            let rendered = document.select("body").first().inner_html().to_string();
             self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered);
         }
 
         // Isolated nodes (no transclusion edges) are absent from the SCC list.
-        // They have no wb-transclude placeholders, so raw_html is already final.
+        // They have no wb-transclude placeholders, so we just need to render
+        // anchor tags
         for &id in &rerender {
             if !self.transclusions.contains_node(id) {
-                if let Some(entry) = self.nodes.get_mut(&id) {
-                    entry.rendered_body = Some(entry.raw_html.clone());
+                let raw_html = self.nodes[&id].raw_html.as_str();
+                let document = Document::from(raw_html);
+
+                for element in document.select("a").iter() {
+                    if let Some(href) = element.attr("href")
+                        && let Some(node_id) = href.strip_prefix("wb:")
+                    {
+                        // TODO: Support configurable index node, root
+                        // directory, and trailing slash.
+                        element.set_attr("href", &format!("/{node_id}.html"));
+                    }
                 }
+
+                self.nodes.get_mut(&id).unwrap().rendered_body =
+                    Some(document.select("body").first().inner_html().to_string());
             }
         }
 
-        OutputPlan {
-            writes: HashMap::new(),
-            deletes: HashSet::new(),
-        }
+        let writes = (&rerender - &unrenderable)
+            .into_iter()
+            .map(|id| {
+                let name = self.interner.name(id).to_string();
+                let html = self.nodes[&id]
+                    .rendered_body
+                    .clone()
+                    .expect("bug: renderable node has no rendered_body after pass 2");
+                (name, html)
+            })
+            .collect();
+
+        let deletes = removed
+            .iter()
+            .chain(unrenderable.intersection(&rerender))
+            .map(|&id| self.interner.name(id).to_string())
+            .collect();
+
+        OutputPlan { writes, deletes }
     }
 }
 
