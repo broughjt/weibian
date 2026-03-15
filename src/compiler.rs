@@ -262,6 +262,64 @@ impl Compiler {
                 ));
         }
 
+        // Pass 2: render wb-transclude substitutions in topological order (leaves first).
+        for scc in &sccs {
+            let id = scc[0];
+
+            if unrenderable.contains(&id) || !rerender.contains(&id) {
+                continue;
+            }
+
+            let raw_html = self.nodes[&id].raw_html.as_str();
+            let document = Document::from(raw_html);
+
+            for element in document.select("a").iter() {
+                if let Some(href) = element.attr("href") {
+                    if let Some(node_id) = href.strip_prefix("wb:") {
+                        // TODO: Support configurable index node, root
+                        // directory, and trailing slash.
+                        element.set_attr("href", &format!("/{node_id}.html"));
+                    }
+                }
+            }
+
+            for element in document.select("wb-transclude").iter() {
+                let identifier = element
+                    .attr("identifier")
+                    .expect("bug: wb-transclude is missing an identifier");
+                let target_id = self
+                    .interner
+                    .get(identifier.as_ref())
+                    .expect("bug: wb-transclude identifier was not interned");
+                if let Some(entry) = self.nodes.get(&target_id) {
+                    let body = entry
+                        .rendered_body
+                        .as_deref()
+                        .expect("bug: wb-transclude target has no rendered_body");
+                    let replacement = format!(
+                        "<section class=\"block\"><details open><h1>{}</h1>{body}</details></section>",
+                        entry.title
+                    );
+                    element.replace_with_html(replacement);
+                } else {
+                    element.remove();
+                }
+            }
+
+            let rendered = document.html().to_string();
+            self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered);
+        }
+
+        // Isolated nodes (no transclusion edges) are absent from the SCC list.
+        // They have no wb-transclude placeholders, so raw_html is already final.
+        for &id in &rerender {
+            if !self.transclusions.contains_node(id) {
+                if let Some(entry) = self.nodes.get_mut(&id) {
+                    entry.rendered_body = Some(entry.raw_html.clone());
+                }
+            }
+        }
+
         OutputPlan {
             writes: HashMap::new(),
             deletes: HashSet::new(),
