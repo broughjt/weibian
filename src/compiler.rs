@@ -5,8 +5,9 @@ use std::path::Path;
 
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
-use petgraph::algo::toposort;
+use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
+use petgraph::visit::{Bfs, Reversed};
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
@@ -20,7 +21,8 @@ const HTML_MESSAGE: &str = "html export is under active development and incomple
 pub struct Compiler {
     files: HashMap<FileId, Vec<NodeId>>,
     nodes: HashMap<NodeId, NodeEntry>,
-    file_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
+    compile_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
+    process_diagnostics: HashMap<FileId, EcoVec<SourceDiagnostic>>,
     links: DiGraphMap<NodeId, ()>,
     transclusions: DiGraphMap<NodeId, ()>,
     interner: NodeInterner,
@@ -78,11 +80,11 @@ impl Compiler {
                     .extend(nodes.into_iter().map(|(k, (v, _, _))| (k, v)));
 
                 if !warnings.is_empty() {
-                    self.file_diagnostics.insert(id, (warnings, EcoVec::new()));
+                    self.compile_diagnostics.insert(id, (warnings, EcoVec::new()));
                 }
             }
             Err(errors) => {
-                self.file_diagnostics.insert(id, (warnings, errors));
+                self.compile_diagnostics.insert(id, (warnings, errors));
             }
         }
     }
@@ -104,16 +106,25 @@ impl Compiler {
             }
         }
 
-        self.file_diagnostics.remove(&id);
+        self.compile_diagnostics.remove(&id);
     }
 
-    /// Returns all collected file diagnostics, keyed by source [`FileId`].
+    /// Returns all compile-time diagnostics, keyed by source [`FileId`].
     ///
     /// Each entry is a `(warnings, errors)` pair of [`SourceDiagnostic`] vecs.
-    pub fn file_diagnostics(
+    pub fn compile_diagnostics(
         &self,
     ) -> &HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)> {
-        &self.file_diagnostics
+        &self.compile_diagnostics
+    }
+
+    /// Returns all structural diagnostics produced by the last [`process`] call,
+    /// keyed by source [`FileId`].
+    ///
+    /// These are errors detected across the full node graph (e.g. transclusion
+    /// cycles) and are recomputed from scratch on every [`process`] call.
+    pub fn process_diagnostics(&self) -> &HashMap<FileId, EcoVec<SourceDiagnostic>> {
+        &self.process_diagnostics
     }
 
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
@@ -138,14 +149,57 @@ impl Compiler {
         OutputPlan { writes, deletes }
         */
 
-        match toposort(&self.transclusions, None) {
-            Ok(order) => {
-                for id in &order {
-                    println!("{}", self.interner.name(*id));
-                }
+        if self.dirty.is_empty() && self.removed.is_empty() {
+            return OutputPlan {
+                writes: HashMap::new(),
+                deletes: HashSet::new(),
+            };
+        }
+
+        self.process_diagnostics.clear();
+
+        let dirty = std::mem::take(&mut self.dirty);
+        let removed = std::mem::take(&mut self.removed);
+        let reversed = Reversed(&self.transclusions);
+
+        let mut dirty_rerender: HashSet<NodeId> = HashSet::new();
+        for &start in &dirty {
+            let mut bfs = Bfs::new(reversed, start);
+            while let Some(id) = bfs.next(reversed) {
+                dirty_rerender.insert(id);
             }
-            Err(cycle) => {
-                println!("cycle detected involving: {}", self.interner.name(cycle.node_id()));
+        }
+
+        let mut removed_reachable: HashSet<NodeId> = HashSet::new();
+        for &start in &removed {
+            let mut bfs = Bfs::new(reversed, start);
+            while let Some(id) = bfs.next(reversed) {
+                removed_reachable.insert(id);
+            }
+        }
+
+        // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
+        let _rerender: HashSet<NodeId> = dirty_rerender
+            .union(&(&removed_reachable - &removed))
+            .copied()
+            .collect();
+
+        let sccs = tarjan_scc(&self.transclusions);
+        eprintln!("SCCs (reverse topological order):");
+        for scc in &sccs {
+            let is_cyclic = scc.len() > 1
+                || self.transclusions.contains_edge(scc[0], scc[0]);
+            if is_cyclic {
+                eprint!("  CYCLE: ");
+                for (i, &id) in scc.iter().enumerate() {
+                    if i > 0 {
+                        eprint!(" → ");
+                    }
+                    eprint!("{}", self.interner.name(id));
+                }
+                eprintln!();
+            } else {
+                eprintln!("  {}", self.interner.name(scc[0]));
             }
         }
 

@@ -100,7 +100,7 @@ impl Builder {
     ) -> anyhow::Result<bool> {
         let mut has_errors = false;
 
-        for (&id, (warnings, errors)) in compiler.file_diagnostics() {
+        for (&id, (warnings, errors)) in compiler.compile_diagnostics() {
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
             emit(
                 stream,
@@ -111,6 +111,12 @@ impl Builder {
             if !errors.is_empty() {
                 has_errors = true;
             }
+        }
+
+        for (&id, errors) in compiler.process_diagnostics() {
+            let world = SystemWorld::new(id, &self.resources, &self.file_store);
+            emit(stream, &world, errors.iter(), DiagnosticFormat::Human)?;
+            has_errors = true;
         }
 
         Ok(has_errors)
