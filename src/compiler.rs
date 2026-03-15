@@ -80,7 +80,8 @@ impl Compiler {
                     .extend(nodes.into_iter().map(|(k, (v, _, _))| (k, v)));
 
                 if !warnings.is_empty() {
-                    self.compile_diagnostics.insert(id, (warnings, EcoVec::new()));
+                    self.compile_diagnostics
+                        .insert(id, (warnings, EcoVec::new()));
                 }
             }
             Err(errors) => {
@@ -130,25 +131,6 @@ impl Compiler {
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
     /// the output directory, and clears the dirty and removed sets.
     pub fn process(&mut self) -> OutputPlan {
-        /*
-        let dirty = std::mem::take(&mut self.dirty);
-        let writes = dirty
-            .into_iter()
-            .filter_map(|id| {
-                let name = self.interner.name(id).to_string();
-                self.nodes
-                    .get(&id)
-                    .map(|entry| (name, entry.raw_html.clone()))
-            })
-            .collect();
-        let deletes = std::mem::take(&mut self.removed)
-            .into_iter()
-            .map(|id| self.interner.name(id).to_string())
-            .collect();
-
-        OutputPlan { writes, deletes }
-        */
-
         if self.dirty.is_empty() && self.removed.is_empty() {
             return OutputPlan {
                 writes: HashMap::new(),
@@ -160,6 +142,7 @@ impl Compiler {
 
         let dirty = std::mem::take(&mut self.dirty);
         let removed = std::mem::take(&mut self.removed);
+
         let reversed = Reversed(&self.transclusions);
 
         let mut dirty_rerender: HashSet<NodeId> = HashSet::new();
@@ -179,28 +162,104 @@ impl Compiler {
         }
 
         // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
-        let _rerender: HashSet<NodeId> = dirty_rerender
-            .union(&(&removed_reachable - &removed))
-            .copied()
-            .collect();
+        // let _rerender: HashSet<NodeId> = dirty_rerender
+        //     .union(&(&removed_reachable - &removed))
+        //     .copied()
+        //     .collect();
+        let rerender = &dirty_rerender | &(&removed_reachable - &removed);
 
         let sccs = tarjan_scc(&self.transclusions);
-        eprintln!("SCCs (reverse topological order):");
+
+        // Build reverse map: node → file, for attributing cycle errors.
+        // TODO: Probably we should have this in compiler state
+        let node_to_file: HashMap<NodeId, FileId> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, node_ids)| node_ids.iter().map(move |&nid| (nid, file_id)))
+            .collect();
+
+        // Pass 1: detect cycles and compute the transitively unrenderable set.
+        //
+        // SCCs are in reverse topological order (leaves first), so when we
+        // visit SCC[i], every node it could transclude has already been
+        // processed---if any target is unrenderable, we catch it here.
+        let mut unrenderable: HashSet<NodeId> = HashSet::new();
         for scc in &sccs {
-            let is_cyclic = scc.len() > 1
-                || self.transclusions.contains_edge(scc[0], scc[0]);
+            let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(scc[0], scc[0]);
+
             if is_cyclic {
-                eprint!("  CYCLE: ");
-                for (i, &id) in scc.iter().enumerate() {
-                    if i > 0 {
-                        eprint!(" → ");
-                    }
-                    eprint!("{}", self.interner.name(id));
+                let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
+                let message = eco_format!("transclusion cycle: {}", names.join(", "));
+
+                unrenderable.extend(scc.iter().copied());
+
+                let files_in_cycle: HashSet<FileId> = scc
+                    .iter()
+                    .map(|&id| {
+                        *node_to_file
+                            .get(&id)
+                            .expect("bug: node in transclusion graph has no file entry")
+                    })
+                    .collect();
+
+                for file_id in files_in_cycle {
+                    // TODO: Store spans in the compiler state so we can
+                    // point out the file locations of the offending
+                    // transclusions
+                    self.process_diagnostics
+                        .entry(file_id)
+                        .or_default()
+                        .push(SourceDiagnostic::error(Span::detached(), message.clone()));
                 }
-                eprintln!();
-            } else {
-                eprintln!("  {}", self.interner.name(scc[0]));
+            } else if scc.iter().any(|&id| {
+                self.transclusions
+                    .neighbors(id)
+                    .any(|neighbor| unrenderable.contains(&neighbor))
+            }) {
+                unrenderable.extend(scc);
             }
+        }
+
+        // Warn on dangling transclusions (target node does not exist).
+        for (source, destination, _) in self
+            .transclusions
+            .all_edges()
+            .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
+        {
+            let file_id = node_to_file
+                .get(&source)
+                .copied()
+                .expect("bug: node in transclusion graph has no file entry");
+            let name = self.interner.name(destination);
+
+            self.process_diagnostics
+                .entry(file_id)
+                .or_default()
+                .push(SourceDiagnostic::warning(
+                    Span::detached(),
+                    eco_format!("dangling transclusion: {name}"),
+                ));
+        }
+
+        // Warn on dangling links (target node does not exist).
+        for (source, destination, _) in self
+            .links
+            .all_edges()
+            .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
+        {
+            let file_id = node_to_file
+                .get(&source)
+                .copied()
+                .expect("bug: node in link graph has no file entry");
+            let name = self.interner.name(destination);
+
+            self.process_diagnostics
+                .entry(file_id)
+                .or_default()
+                .push(SourceDiagnostic::warning(
+                    Span::detached(),
+                    eco_format!("dangling link: {name}"),
+                ));
         }
 
         OutputPlan {
