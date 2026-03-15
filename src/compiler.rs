@@ -145,76 +145,9 @@ impl Compiler {
 
         self.process_diagnostics.clear();
 
-        let dirty = std::mem::take(&mut self.dirty);
-        let removed = std::mem::take(&mut self.removed);
-        let rerender = {
-            let reversed = Reversed(&self.transclusions);
+        // Check for dangling transclusions and links
 
-            let mut dirty_rerender: HashSet<NodeId> = HashSet::new();
-            for &start in &dirty {
-                let mut bfs = Bfs::new(reversed, start);
-                while let Some(id) = bfs.next(reversed) {
-                    dirty_rerender.insert(id);
-                }
-            }
-
-            let mut removed_reachable: HashSet<NodeId> = HashSet::new();
-            for &start in &removed {
-                let mut bfs = Bfs::new(reversed, start);
-                while let Some(id) = bfs.next(reversed) {
-                    removed_reachable.insert(id);
-                }
-            }
-
-            // Removed nodes themselves are deleted, not re-rendered; only their ancestors are.
-            &dirty_rerender | &(&removed_reachable - &removed)
-        };
-
-        let sccs = tarjan_scc(&self.transclusions);
-
-        // Pass 1: detect cycles and compute the transitively unrenderable set.
-        //
-        // SCCs are in reverse topological order (leaves first), so when we
-        // visit SCC[i], every node it could transclude has already been
-        // processed---if any target is unrenderable, we catch it here.
-        let mut unrenderable: HashSet<NodeId> = HashSet::new();
-        for scc in &sccs {
-            let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(scc[0], scc[0]);
-
-            if is_cyclic {
-                let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
-                let message = eco_format!("transclusion cycle: {}", names.join(", "));
-
-                unrenderable.extend(scc.iter());
-
-                let files_in_cycle: HashSet<FileId> = scc
-                    .iter()
-                    .map(|&id| {
-                        *self
-                            .node_to_file
-                            .get(&id)
-                            .expect("bug: node in transclusion graph has no file entry")
-                    })
-                    .collect();
-
-                for file_id in files_in_cycle {
-                    // TODO: Store spans in the compiler state so we can
-                    // point out the file locations of the offending
-                    // transclusions
-                    self.process_diagnostics
-                        .entry(file_id)
-                        .or_default()
-                        .push(SourceDiagnostic::error(Span::detached(), message.clone()));
-                }
-            } else if scc.iter().any(|&id| {
-                self.transclusions
-                    .neighbors(id)
-                    .any(|neighbor| unrenderable.contains(&neighbor))
-            }) {
-                unrenderable.extend(scc);
-            }
-        }
-
+        // TODO: Could possibly fold this into the render loop
         // Warn on dangling transclusions (target node does not exist).
         for (source, destination, _) in self
             .transclusions
@@ -259,17 +192,150 @@ impl Compiler {
                 ));
         }
 
-        // Pass 2: render wb-transclude substitutions in topological order (leaves first).
-        for scc in &sccs {
-            let id = scc[0];
+        // Compute the render set
+        //
+        // Consider the reverse transclusion graph. In the normal transclusion
+        // graph, an edge $i \to j$ means $i$ transcludes $j$; the reverse graph
+        // flips this so that $i \to j$ means $i$ is transcluded by $j$.
+        //
+        // We want to (re)render the set of nodes reachable from the dirty set
+        // in the reverse transclusion graph, since part of their content has
+        // been invalidated. For the same reason, we want to render nodes
+        // reachable from the removed set, but not the members of the removed
+        // set themselves, since we should remove those not render them.
+        //
+        // Formally, let $D$ be the dirty set and $R$ be the removed set. Then
+        // let $D^{*}$ be the set of nodes reachable from $D$ in the reverse
+        // transclusion graph, and let $R^{*}$ be the set of nodes reachable
+        // from $R$ in the reverse transclusion graph. We want to render the
+        // set
+        //
+        // $D^{*} \cup (R^{*} \setminus R)$.
+        //
+        // We note that [`Compiler::remove`] and [`Compiler::compile`] maintain
+        // the invariant that the dirty set and the removed set are disjoint,
+        // that is, $D \cap R = \emptyset$. Moreover, since [`Compiler::remove`]
+        // clears outgoing edges from removed nodes in the transclusion graph,
+        // elements of $R$ have no incoming edges in the reverse transclusion
+        // graph---BFS from $D$ cannot reach them---giving $D^{*} \cap R =
+        // \emptyset$. Using this, we can write
+        //
+        // $D^{*} \cup (R^{*} \setminus R) =
+        //  (D^{*} \setminus R) \cup (R^{*} \setminus R) =
+        //  (D^{*} \cup R^{*}) \setminus R.
+        //
+        // We compute the right-hand side below as `render`. We insert nodes
+        // reachable from $D$ or $R$, and remove each member of $R$ in the
+        // second for loop.
 
-            if unrenderable.contains(&id) || !rerender.contains(&id) {
-                continue;
+        assert!(self.dirty.is_disjoint(&self.removed));
+
+        let dirty = std::mem::take(&mut self.dirty);
+        let removed = std::mem::take(&mut self.removed);
+        let reversed = Reversed(&self.transclusions);
+        let mut render: HashSet<NodeId> = HashSet::new();
+
+        for &start in &dirty {
+            let mut bfs = Bfs::new(reversed, start);
+            while let Some(id) = bfs.next(reversed) {
+                render.insert(id);
+            }
+        }
+        for &start in &removed {
+            let mut bfs = Bfs::new(reversed, start);
+            while let Some(id) = bfs.next(reversed) {
+                render.insert(id);
+            }
+            render.remove(&start);
+        }
+
+        // Pass 1: Detect cycles, compute the unrenderable set, compute
+        // rendering order
+
+        // The unrenderable set consists of all nodes in the transclusion graph
+        // which lie in a cycle and all nodes which directly or transitively
+        // transclude a cyclic node. We use Tarjan's algorithm to compute
+        // strongly connected components (SCCs). A strongly connected component
+        // is cyclic if it has length greater than one or if its only node has a
+        // self-loop.
+
+        // We can compute the unrenderable set in one pass, since `tarjan_scc`
+        // returns SCCs in reverse topological order (leaves first). When we
+        // visit a node $v$, every node that $v$ directly transcluded has
+        // already been visited. If any such neighbor is unrenderable---whether
+        // because it lies in a cycle or because it in turn depends on an
+        // unrenderable node---it is already in the unrenderable set. Therefore,
+        // if $v$ does not lie in a cycle, it suffices to check whether any of
+        // its neighbors lies in the unrenderable set.
+
+        // To compute the rendering order, we note that isolated nodes can be
+        // rendered in any order, so we initialize `render_order` with them
+        // before the first pass. Every non-isolated node in the render set is
+        // in the transclusion graph---either as a dirty node with transclusion
+        // edges, or as a node reached by BFS through the graph. Since
+        // `tarjan_scc` covers all nodes in the transclusion graph, the SCC loop
+        // accounts for every non-isolated node in the render set. Renderable
+        // nodes in the render set are appended to `render_order` upon
+        // visitation, so the reverse topological ordering of the SCCs is
+        // inherited by `render_order`.
+        let mut render_order: Vec<NodeId> = dirty
+            .iter()
+            .filter(|&&id| !self.transclusions.contains_node(id))
+            .copied()
+            .collect();
+        let sccs = tarjan_scc(&self.transclusions);
+        let mut unrenderable: HashSet<NodeId> = HashSet::new();
+        for scc in &sccs {
+            let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(scc[0], scc[0]);
+
+            if is_cyclic {
+                let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
+                let message = eco_format!("transclusion cycle: {}", names.join(", "));
+
+                unrenderable.extend(scc.iter());
+
+                let files_in_cycle: HashSet<FileId> = scc
+                    .iter()
+                    .map(|&id| {
+                        *self
+                            .node_to_file
+                            .get(&id)
+                            .expect("bug: node in transclusion graph has no file entry")
+                    })
+                    .collect();
+
+                for file_id in files_in_cycle {
+                    // TODO: Store spans in the compiler state so we can
+                    // point out the file locations of the offending
+                    // transclusions
+                    self.process_diagnostics
+                        .entry(file_id)
+                        .or_default()
+                        .push(SourceDiagnostic::error(Span::detached(), message.clone()));
+                }
+            } else if scc.iter().any(|&id| {
+                self.transclusions
+                    .neighbors(id)
+                    .any(|neighbor| unrenderable.contains(&neighbor))
+            }) {
+                unrenderable.extend(scc);
             }
 
+            let id = scc[0];
+            if !unrenderable.contains(&id) && render.contains(&id) {
+                render_order.push(id);
+            }
+        }
+
+        // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
+
+        for &id in &render_order {
             let raw_html = self.nodes[&id].raw_html.as_str();
             let document = Document::from(raw_html);
 
+            // Note: if the node has transclusions, which we substitute below,
+            // they have already had their anchors properly rendered. We do this
+            // before transclusion substitution to avoid doing unnecessary work.
             for element in document.select("a").iter() {
                 if let Some(href) = element.attr("href")
                     && let Some(node_id) = href.strip_prefix("wb:")
@@ -280,70 +346,56 @@ impl Compiler {
                 }
             }
 
-            for element in document.select("wb-transclude").iter() {
-                let identifier = element
-                    .attr("identifier")
-                    .expect("bug: wb-transclude is missing an identifier");
-                let target_id = self
-                    .interner
-                    .get(identifier.as_ref())
-                    .expect("bug: wb-transclude identifier was not interned");
-                if let Some(entry) = self.nodes.get(&target_id) {
-                    let body = entry
-                        .rendered_body
-                        .as_deref()
-                        .expect("bug: wb-transclude target has no rendered_body");
-                    let replacement = format!(
-                        "<section class=\"block\"><details open><h1>{}</h1>{body}</details></section>",
-                        entry.title
-                    );
-                    element.replace_with_html(replacement);
-                } else {
-                    element.remove();
-                }
-            }
+            // Checking whether the node has any neighbors in the transclusion
+            // graph is faster than walking the HTML for `wb-transclude`
+            // elements and finding none.
+            if self.transclusions.neighbors(id).next().is_some() {
+                for element in document.select("wb-transclude").iter() {
+                    let identifier = element
+                        .attr("identifier")
+                        .expect("bug: wb-transclude is missing an identifier");
+                    let target_id = self
+                        .interner
+                        .get(identifier.as_ref())
+                        .expect("bug: wb-transclude identifier was not interned");
 
-            let rendered = document.select("body").first().inner_html().to_string();
-            self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered);
-        }
+                    if let Some(entry) = self.nodes.get(&target_id) {
+                        let body = entry
+                            .rendered_body
+                            .as_deref()
+                            .expect("bug: wb-transclude target has no rendered_body");
+                        let replacement = format!(
+                            "<section class=\"block\"><details open><h1>{}</h1>{body}</details></section>",
+                            entry.title
+                        );
 
-        // Isolated nodes (no transclusion edges) are absent from the SCC list.
-        // They have no wb-transclude placeholders, so we just need to render
-        // anchor tags
-        for &id in &rerender {
-            if !self.transclusions.contains_node(id) {
-                let raw_html = self.nodes[&id].raw_html.as_str();
-                let document = Document::from(raw_html);
-
-                for element in document.select("a").iter() {
-                    if let Some(href) = element.attr("href")
-                        && let Some(node_id) = href.strip_prefix("wb:")
-                    {
-                        // TODO: Support configurable index node, root
-                        // directory, and trailing slash.
-                        element.set_attr("href", &format!("/{node_id}.html"));
+                        element.replace_with_html(replacement);
+                    } else {
+                        element.remove();
                     }
                 }
-
-                self.nodes.get_mut(&id).unwrap().rendered_body =
-                    Some(document.select("body").first().inner_html().to_string());
             }
+
+            let rendered_body = document.select("body").first().inner_html().to_string();
+
+            self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
         }
 
-        let writes = (&rerender - &unrenderable)
-            .into_iter()
-            .map(|id| {
+        let writes = render_order
+            .iter()
+            .map(|&id| {
                 let name = self.interner.name(id).to_string();
                 let html = self.nodes[&id]
                     .rendered_body
                     .clone()
                     .expect("bug: renderable node has no rendered_body after pass 2");
+
                 (name, html)
             })
             .collect();
         let deletes = removed
             .iter()
-            .chain(unrenderable.intersection(&rerender))
+            .chain(unrenderable.intersection(&render))
             .map(|&id| self.interner.name(id).to_string())
             .collect();
 
