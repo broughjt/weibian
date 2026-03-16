@@ -24,7 +24,7 @@ use walkdir::WalkDir;
 
 use crate::{
     compiler::Compiler,
-    config::BuildConfig,
+    config::{BuildConfig, copy_directory_recursive},
     file_store::FileStore,
     world::{DependenciesWorld, Resources, SystemWorld},
 };
@@ -69,6 +69,10 @@ impl Watcher {
             fs::remove_dir_all(&self.config.output_directory)?;
         }
         fs::create_dir(&self.config.output_directory)?;
+
+        if let Some(public_directory) = &self.config.public_directory {
+            copy_directory_recursive(public_directory, &self.config.output_directory)?;
+        }
 
         let ids = WalkDir::new(&self.config.input_directory)
             .into_iter()

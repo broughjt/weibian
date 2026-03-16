@@ -65,6 +65,7 @@ pub struct WeibianConfig {
     pub input_directory: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
     pub node_template: PathBuf,
+    pub public_directory: Option<PathBuf>,
 
     #[serde(default, deserialize_with = "deserialize_globset")]
     pub include: GlobSet,
@@ -81,6 +82,7 @@ pub struct BuildConfig {
     /// The Typst project root and file scan root. Defaults to `root`.
     pub input_directory: PathBuf,
     pub output_directory: PathBuf,
+    pub public_directory: Option<PathBuf>,
     pub include: GlobSet,
     pub exclude: GlobSet,
     pub environment: minijinja::Environment<'static>,
@@ -94,6 +96,10 @@ impl BuildConfig {
             .input_directory
             .map(|p| if p.is_absolute() { p } else { root.join(p) })
             .unwrap_or_else(|| root.clone());
+
+        let public_directory = config
+            .public_directory
+            .map(|p| if p.is_absolute() { p } else { root.join(p) });
 
         let include = if config.include.is_empty() {
             GlobSetBuilder::new().add(Glob::new("**/*.typ")?).build()?
@@ -116,6 +122,20 @@ impl BuildConfig {
         })?;
         let mut environment = minijinja::Environment::new();
 
+        environment.add_filter("striptags", |value: String| -> String {
+            let mut result = String::new();
+            let mut in_tag = false;
+            for ch in value.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => result.push(ch),
+                    _ => {}
+                }
+            }
+            result
+        });
+
         environment
             .add_template_owned(NODE_TEMPLATE, node_template_source)
             .map_err(|e| {
@@ -129,6 +149,7 @@ impl BuildConfig {
             root,
             input_directory,
             output_directory,
+            public_directory,
             include,
             exclude: config.exclude,
             environment,
@@ -193,6 +214,23 @@ fn find_project_root() -> anyhow::Result<PathBuf> {
             }
         }
     }
+}
+
+pub fn copy_directory_recursive(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+    use walkdir::WalkDir;
+
+    for entry in WalkDir::new(src) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src)?;
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn deserialize_globset<'de, D>(deserializer: D) -> Result<GlobSet, D::Error>

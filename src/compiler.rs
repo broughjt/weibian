@@ -364,7 +364,7 @@ impl Compiler {
                             .as_deref()
                             .expect("bug: wb-transclude target has no rendered_body");
                         let replacement = format!(
-                            "<section class=\"block\"><details open><h1>{}</h1>{body}</details></section>",
+                            "<section class=\"block\"><details open><summary><header><h1>{}</h1></header></summary>{body}</details></section>",
                             entry.title
                         );
 

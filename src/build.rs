@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 
 use crate::{
     compiler::Compiler,
-    config::BuildConfig,
+    config::{BuildConfig, copy_directory_recursive},
     file_store::FileStore,
     world::{Resources, SystemWorld},
 };
@@ -53,6 +53,10 @@ impl Builder {
         }
         fs::create_dir(&self.config.output_directory)?;
 
+        if let Some(public_directory) = &self.config.public_directory {
+            copy_directory_recursive(public_directory, &self.config.output_directory)?;
+        }
+
         let mut compiler = Compiler::default();
 
         let ids = WalkDir::new(&self.config.input_directory)
@@ -82,7 +86,9 @@ impl Builder {
             compiler.compile(&world, id);
         }
 
-        compiler.process(&self.config)?.apply(&self.config.output_directory)?;
+        compiler
+            .process(&self.config)?
+            .apply(&self.config.output_directory)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
         let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;
