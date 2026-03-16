@@ -5,6 +5,7 @@ use std::path::Path;
 
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
+use crate::config::BuildConfig;
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Bfs, Reversed};
@@ -135,12 +136,12 @@ impl Compiler {
 
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
     /// the output directory, and clears the dirty and removed sets.
-    pub fn process(&mut self) -> OutputPlan {
+    pub fn process(&mut self, config: &BuildConfig) -> anyhow::Result<OutputPlan> {
         if self.dirty.is_empty() && self.removed.is_empty() {
-            return OutputPlan {
+            return Ok(OutputPlan {
                 writes: HashMap::new(),
                 deletes: HashSet::new(),
-            };
+            });
         }
 
         self.process_diagnostics.clear();
@@ -383,23 +384,35 @@ impl Compiler {
 
         let writes = render_order
             .iter()
-            .map(|&id| {
-                let name = self.interner.name(id).to_string();
-                let html = self.nodes[&id]
+            .map(|&id| -> anyhow::Result<(String, String)> {
+                let name = self.interner.name(id);
+                let entry = &self.nodes[&id];
+                let body = entry
                     .rendered_body
-                    .clone()
+                    .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
-
-                (name, html)
+                let tmpl = config.env
+                    .get_template("node.html")
+                    .expect("bug: node.html template missing from environment");
+                let html = tmpl
+                    .render(minijinja::context! {
+                        node => minijinja::context! {
+                            id => name,
+                            title => entry.title.as_str(),
+                            body => body,
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!("failed to render template for node {name}: {e}"))?;
+                Ok((name.to_owned(), html))
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         let deletes = removed
             .iter()
             .chain(unrenderable.intersection(&render))
             .map(|&id| self.interner.name(id).to_string())
             .collect();
 
-        OutputPlan { writes, deletes }
+        Ok(OutputPlan { writes, deletes })
     }
 }
 

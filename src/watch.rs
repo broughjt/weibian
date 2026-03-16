@@ -102,7 +102,7 @@ impl Watcher {
         }
 
         self.compiler
-            .process()
+            .process(&self.config)?
             .apply(&self.config.output_directory)?;
         self.emit_diagnostics()?;
 
@@ -160,7 +160,7 @@ impl Watcher {
             }
 
             self.compiler
-                .process()
+                .process(&self.config)?
                 .apply(&self.config.output_directory)?;
             self.emit_diagnostics()?;
 
