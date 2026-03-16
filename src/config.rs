@@ -122,20 +122,6 @@ impl BuildConfig {
         })?;
         let mut environment = minijinja::Environment::new();
 
-        environment.add_filter("striptags", |value: String| -> String {
-            let mut result = String::new();
-            let mut in_tag = false;
-            for ch in value.chars() {
-                match ch {
-                    '<' => in_tag = true,
-                    '>' => in_tag = false,
-                    _ if !in_tag => result.push(ch),
-                    _ => {}
-                }
-            }
-            result
-        });
-
         environment
             .add_template_owned(NODE_TEMPLATE, node_template_source)
             .map_err(|e| {

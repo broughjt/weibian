@@ -398,6 +398,7 @@ impl Compiler {
                         node => minijinja::context! {
                             id => name,
                             title => entry.title.as_str(),
+                            title_text => entry.title_text.as_str(),
                             body => body,
                         }
                     })
@@ -458,6 +459,7 @@ impl NodeInterner {
 pub struct NodeEntry {
     pub raw_html: String,
     pub title: String,
+    pub title_text: String,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
 }
@@ -576,6 +578,7 @@ fn extract(
             continue;
         }
         let title = title_selection.inner_html().to_string();
+        let title_text = title_selection.text().to_string();
         title_selection.remove();
 
         let raw_html = subnode.inner_html().to_string();
@@ -615,6 +618,7 @@ fn extract(
                 NodeEntry {
                     raw_html,
                     title,
+                    title_text,
                     ..Default::default()
                 },
                 transclusions,
@@ -653,6 +657,7 @@ fn extract(
                     ));
                 } else {
                     let title = title_selection.inner_html().to_string();
+                    let title_text = title_selection.text().to_string();
                     title_selection.remove();
 
                     let raw_html = wb_node.inner_html().to_string();
@@ -683,6 +688,7 @@ fn extract(
                             NodeEntry {
                                 raw_html,
                                 title,
+                                title_text,
                                 ..Default::default()
                             },
                             transclusions,
