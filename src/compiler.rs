@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
-use crate::config::{BuildConfig, NODE_TEMPLATE};
+use crate::config::{BuildConfig, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
@@ -328,6 +328,10 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
+        let transclusion_template = config
+            .environment
+            .get_template(TRANSCLUSION_TEMPLATE)
+            .expect("bug: transclusion.html template missing from environment");
         for &id in &render_order {
             let raw_html = self.nodes[&id].raw_html.as_str();
             let document = Document::from(raw_html);
@@ -357,21 +361,36 @@ impl Compiler {
                         .interner
                         .get(identifier.as_ref())
                         .expect("bug: wb-transclude identifier was not interned");
-
-                    if let Some(entry) = self.nodes.get(&target_id) {
+                    let context = if let Some(entry) = self.nodes.get(&target_id) {
                         let body = entry
                             .rendered_body
                             .as_deref()
                             .expect("bug: wb-transclude target has no rendered_body");
-                        let replacement = format!(
-                            "<section class=\"block\"><details open><summary><header><h1>{}</h1></header></summary>{body}</details></section>",
-                            entry.title
-                        );
 
-                        element.replace_with_html(replacement);
+                        minijinja::context! {
+                            transclusion => minijinja::context! {
+                                identifier => identifier.as_ref(),
+                                resolved => true,
+                                title => entry.title.as_str(),
+                                title_text => entry.title_text.as_str(),
+                                body => body,
+                            }
+                        }
                     } else {
-                        element.remove();
-                    }
+                        minijinja::context! {
+                            transclusion => minijinja::context! {
+                                identifier => identifier.as_ref(),
+                                resolved => false,
+                            }
+                        }
+                    };
+                    let replacement = transclusion_template.render(context).map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to render transclusion template for {identifier}: {e}"
+                        )
+                    })?;
+
+                    element.replace_with_html(replacement);
                 }
             }
 
@@ -380,6 +399,10 @@ impl Compiler {
             self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
         }
 
+        let node_template = config
+            .environment
+            .get_template(NODE_TEMPLATE)
+            .expect("bug: node.html template missing from environment");
         let writes = render_order
             .iter()
             .map(|&id| -> anyhow::Result<(String, String)> {
@@ -389,11 +412,7 @@ impl Compiler {
                     .rendered_body
                     .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
-                let template = config
-                    .environment
-                    .get_template(NODE_TEMPLATE)
-                    .expect("bug: node.html template missing from environment");
-                let html = template
+                let html = node_template
                     .render(minijinja::context! {
                         node => minijinja::context! {
                             id => name,
