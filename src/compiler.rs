@@ -161,14 +161,16 @@ impl Compiler {
                 .copied()
                 .expect("bug: node in transclusion graph has no file entry");
             let name = self.interner.name(destination);
+            let message = if self.removed.contains(&destination) {
+                eco_format!("dangling transclusion: {name} was deleted this cycle")
+            } else {
+                eco_format!("dangling transclusion: {name} is not defined")
+            };
 
             self.process_diagnostics
                 .entry(file_id)
                 .or_default()
-                .push(SourceDiagnostic::warning(
-                    Span::detached(),
-                    eco_format!("dangling transclusion: {name}"),
-                ));
+                .push(SourceDiagnostic::warning(Span::detached(), message));
         }
 
         // Warn on dangling links (target node does not exist).
