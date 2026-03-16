@@ -1,5 +1,5 @@
-use std::fmt;
 use std::path::{Path, PathBuf};
+use std::{fmt, fs};
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand, ValueHint};
@@ -8,6 +8,8 @@ use figment::providers::{Format, Toml};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+
+pub const NODE_TEMPLATE: &str = "node.html";
 
 const DEFAULT_CONFIG_NAME: &str = "weibian.toml";
 
@@ -58,11 +60,11 @@ pub enum Command {
 }
 
 /// The raw deserialized contents of `weibian.toml`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct WeibianConfig {
     pub input_directory: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
-    pub node_template: Option<PathBuf>,
+    pub node_template: PathBuf,
 
     #[serde(default, deserialize_with = "deserialize_globset")]
     pub include: GlobSet,
@@ -81,7 +83,7 @@ pub struct BuildConfig {
     pub output_directory: PathBuf,
     pub include: GlobSet,
     pub exclude: GlobSet,
-    pub env: minijinja::Environment<'static>,
+    pub environment: minijinja::Environment<'static>,
 }
 
 impl BuildConfig {
@@ -101,19 +103,27 @@ impl BuildConfig {
 
         let output_directory = config.output_directory.unwrap_or_else(|| root.join("dist"));
 
-        let node_template_path = config
-            .node_template
-            .ok_or_else(|| anyhow!("node_template is required but not set in weibian.toml"))?;
-        let node_template_path = if node_template_path.is_absolute() {
-            node_template_path
+        let node_template_path = if config.node_template.is_absolute() {
+            config.node_template
         } else {
-            root.join(node_template_path)
+            root.join(config.node_template)
         };
-        let node_template_source = std::fs::read_to_string(&node_template_path)
-            .map_err(|e| anyhow!("failed to read node template {}: {e}", node_template_path.display()))?;
-        let mut env = minijinja::Environment::new();
-        env.add_template_owned("node.html", node_template_source)
-            .map_err(|e| anyhow!("failed to parse node template {}: {e}", node_template_path.display()))?;
+        let node_template_source = fs::read_to_string(&node_template_path).map_err(|e| {
+            anyhow!(
+                "failed to read node template {}: {e}",
+                node_template_path.display()
+            )
+        })?;
+        let mut environment = minijinja::Environment::new();
+
+        environment
+            .add_template_owned(NODE_TEMPLATE, node_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse node template {}: {e}",
+                    node_template_path.display()
+                )
+            })?;
 
         Ok(Self {
             root,
@@ -121,7 +131,7 @@ impl BuildConfig {
             output_directory,
             include,
             exclude: config.exclude,
-            env,
+            environment,
         })
     }
 

@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
+use crate::config::{BuildConfig, NODE_TEMPLATE};
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
-use crate::config::BuildConfig;
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Bfs, Reversed};
@@ -287,7 +287,8 @@ impl Compiler {
         let sccs = tarjan_scc(&self.transclusions);
         let mut unrenderable: HashSet<NodeId> = HashSet::new();
         for scc in &sccs {
-            let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(scc[0], scc[0]);
+            let id = scc[0];
+            let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(id, id);
 
             if is_cyclic {
                 let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
@@ -314,16 +315,13 @@ impl Compiler {
                         .or_default()
                         .push(SourceDiagnostic::error(Span::detached(), message.clone()));
                 }
-            } else if scc.iter().any(|&id| {
-                self.transclusions
-                    .neighbors(id)
-                    .any(|neighbor| unrenderable.contains(&neighbor))
-            }) {
-                unrenderable.extend(scc);
-            }
-
-            let id = scc[0];
-            if !unrenderable.contains(&id) && render.contains(&id) {
+            } else if self
+                .transclusions
+                .neighbors(id)
+                .any(|neighbor| unrenderable.contains(&neighbor))
+            {
+                unrenderable.insert(id);
+            } else if !unrenderable.contains(&id) && render.contains(&id) {
                 render_order.push(id);
             }
         }
@@ -391,10 +389,11 @@ impl Compiler {
                     .rendered_body
                     .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
-                let tmpl = config.env
-                    .get_template("node.html")
+                let template = config
+                    .environment
+                    .get_template(NODE_TEMPLATE)
                     .expect("bug: node.html template missing from environment");
-                let html = tmpl
+                let html = template
                     .render(minijinja::context! {
                         node => minijinja::context! {
                             id => name,
@@ -402,7 +401,10 @@ impl Compiler {
                             body => body,
                         }
                     })
-                    .map_err(|e| anyhow::anyhow!("failed to render template for node {name}: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to render template for node {name}: {e}")
+                    })?;
+
                 Ok((name.to_owned(), html))
             })
             .collect::<anyhow::Result<_>>()?;
