@@ -127,11 +127,12 @@ impl Compiler {
         &self.compile_diagnostics
     }
 
-    /// Returns all structural diagnostics produced by the last [`process`] call,
+    /// Returns all structural diagnostics produced by the last [`Compiler::process`] call,
     /// keyed by source [`FileId`].
     ///
     /// These are errors detected across the full node graph (e.g. transclusion
-    /// cycles) and are recomputed from scratch on every [`process`] call.
+    /// cycles) and are recomputed from scratch on every [`Compiler::process`]
+    /// call.
     pub fn process_diagnostics(&self) -> &HashMap<FileId, EcoVec<SourceDiagnostic>> {
         &self.process_diagnostics
     }
@@ -342,6 +343,7 @@ impl Compiler {
             .environment
             .get_template(LINK_TEMPLATE)
             .expect("bug: link.html template missing from environment");
+
         for &id in &render_order {
             let raw_html = self.nodes[&id].raw_html.as_str();
             let document = Document::from(raw_html);
@@ -520,6 +522,8 @@ pub struct NodeEntry {
     pub title_text: String,
     pub span: Span,
     pub metadata: HashMap<String, Vec<String>>,
+    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
 }
@@ -532,6 +536,8 @@ impl Default for NodeEntry {
             title_text: String::new(),
             span: Span::detached(),
             metadata: HashMap::new(),
+            transclusion_metadata: HashMap::new(),
+            link_metadata: HashMap::new(),
             rendered_body: None,
             rendered_backmatter: None,
         }
@@ -593,8 +599,12 @@ fn extract(
 ) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
     let mut errors = EcoVec::new();
     let spans = collect_node_spans(html_document, &mut errors);
-    let mut metadata = collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
+    let (mut metadata, mut transclusion_metadata) =
+        collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
     let mut nodes = HashMap::with_capacity(spans.len());
+    let mut synthetic_counter: u32 = transclusion_metadata.keys().max().map_or(0, |m| {
+        m.checked_add(1).expect("transclusion counter overflow")
+    });
 
     // Check for global duplicate identifiers
     errors.extend(
@@ -609,9 +619,15 @@ fn extract(
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((identifier, entry)) =
-            extract_node_content(&subnode, true, &spans, interner, &mut metadata, &mut errors)
-        else {
+        let Some((identifier, entry)) = extract_node_content(
+            &subnode,
+            true,
+            &spans,
+            interner,
+            &mut metadata,
+            &mut transclusion_metadata,
+            &mut errors,
+        ) else {
             continue;
         };
         let transclude = match subnode.attr("transclude").as_deref() {
@@ -634,8 +650,14 @@ fn extract(
         };
 
         if transclude {
+            let counter = synthetic_counter;
+            synthetic_counter = synthetic_counter
+                .checked_add(1)
+                .expect("transclusion counter overflow");
+
+            transclusion_metadata.insert(counter, entry.0.metadata.clone());
             subnode.replace_with_html(format!(
-                r#"<wb-transclude identifier="{identifier}"></wb-transclude>"#
+                r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
             ));
         } else {
             subnode.remove();
@@ -661,6 +683,7 @@ fn extract(
                 &spans,
                 interner,
                 &mut metadata,
+                &mut transclusion_metadata,
                 &mut errors,
             ) {
                 nodes.insert(interner.intern(identifier), entry);
@@ -682,6 +705,9 @@ fn extract(
         }
     }
 
+    assert!(metadata.is_empty(), "bug: unconsumed node metadata: {:?}", metadata.keys().collect::<Vec<_>>());
+    assert!(transclusion_metadata.is_empty(), "bug: unconsumed transclusion metadata: {:?}", transclusion_metadata.keys().collect::<Vec<_>>());
+
     if errors.is_empty() {
         Ok(nodes)
     } else {
@@ -701,6 +727,7 @@ fn extract_node_content(
     spans: &HashMap<String, Span>,
     interner: &mut NodeInterner,
     metadata: &mut HashMap<String, HashMap<String, Vec<String>>>,
+    transclusion_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     errors: &mut EcoVec<SourceDiagnostic>,
 ) -> Option<(String, ExtractData)> {
     let Some(identifier) = element.attr("identifier") else {
@@ -744,14 +771,41 @@ fn extract_node_content(
     let raw_html = element.inner_html().to_string();
 
     let mut transclusions: Vec<NodeId> = Vec::new();
+    let mut node_transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
     for element in element.select("wb-transclude").iter() {
-        match element.attr("identifier").as_deref() {
-            Some(id) => transclusions.push(interner.intern(id)),
-            None => errors.push(SourceDiagnostic::error(
-                Span::detached(),
-                "wb-transclude is missing an identifier",
-            )),
+        let id = match element.attr("identifier").as_deref() {
+            Some(id) => id.to_owned(),
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-transclude is missing an identifier",
+                ));
+                continue;
+            }
+        };
+        let counter = match element.attr("counter").as_deref() {
+            Some(n) => match n.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    errors.push(SourceDiagnostic::error(
+                        Span::detached(),
+                        eco_format!("wb-transclude has invalid counter: {n:?}"),
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-transclude is missing a counter attribute",
+                ));
+                continue;
+            }
+        };
+        if let Some(meta) = transclusion_metadata.remove(&counter) {
+            node_transclusion_metadata.insert(counter, meta);
         }
+        transclusions.push(interner.intern(&id));
     }
     let links: Vec<NodeId> = element
         .select("a")
@@ -776,6 +830,7 @@ fn extract_node_content(
                 title_text,
                 span,
                 metadata: node_metadata,
+                transclusion_metadata: node_transclusion_metadata,
                 ..Default::default()
             },
             transclusions,
@@ -784,69 +839,137 @@ fn extract_node_content(
     ))
 }
 
-/// Queries the introspector for `#metadata(...)` elements that carry node
-/// metadata (identified by the presence of a `wb-metadata` key in the
-/// dictionary), validates them, and returns a map from identifier to the
-/// remaining key-value pairs.
+/// Queries the introspector for `#metadata(...)` elements that carry node or
+/// transclusion call-site metadata, and returns them as two separate maps.
+///
+/// Metadata elements are identified by a `wb-metadata` key whose value is a
+/// two-element array `[kind, discriminant]`:
+/// - `["node", identifier]`      — node/subnode metadata, keyed by identifier string
+/// - `["transclude", counter]`   — transclusion call-site metadata, keyed by counter integer
 ///
 /// Errors are pushed for:
-/// - metadata elements missing an `wb-metadata` key
-/// - metadata for an identifier not present in `spans` (unknown node)
-/// - more than one metadata element for the same identifier
+/// - `wb-metadata` present but not a two-element array of the expected shape
+/// - node identifier not present in `spans` (unknown node)
+/// - duplicate entries for the same node or counter
 fn collect_metadata<I: Introspector>(
     introspector: &I,
     spans: &HashMap<String, Span>,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> HashMap<String, HashMap<String, Vec<String>>> {
+) -> (
+    HashMap<String, HashMap<String, Vec<String>>>,
+    HashMap<u32, HashMap<String, Vec<String>>>,
+) {
     let selector = MetadataElem::ELEM.select();
     let items = introspector.query(&selector);
-    let mut result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut node_result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut transclusion_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
 
     for item in &items {
-        let Some(meta) = Packed::<MetadataElem>::from_ref(item) else {
+        let Some((dictionary, wb_metadata)) =
+            Packed::<MetadataElem>::from_ref(item).and_then(|meta| match &meta.value {
+                Value::Dict(dictionary) => dictionary
+                    .get("wb-metadata")
+                    .ok()
+                    .map(|wb_metadata| (dictionary, wb_metadata)),
+                _ => None,
+            })
+        else {
             continue;
         };
-
-        let Value::Dict(dictionary) = &meta.value else {
-            continue;
-        };
-        let identifier = match dictionary.get("wb-metadata") {
-            Ok(Value::Str(s)) => s.to_string(),
-            Ok(_) => {
-                errors.push(SourceDiagnostic::error(
-                    item.span(),
-                    "\"wb-metadata\" value must be the node identifier string",
-                ));
-                continue;
-            }
-            Err(_) => continue, // not our metadata element
-        };
-
-        // The identifier must correspond to an a wb-node or wb-subnode in this
-        // source file
-        if !spans.contains_key(&identifier) {
+        let Value::Array(array) = wb_metadata else {
             errors.push(SourceDiagnostic::error(
                 item.span(),
-                eco_format!("metadata for unknown node: {identifier:?}"),
+                "\"wb-metadata\" must be a [kind, discriminant] array",
             ));
             continue;
-        }
+        };
 
-        // At most one metadata element per node
-        match result.entry(identifier) {
-            Entry::Vacant(e) => {
-                e.insert(normalize_metadata(dictionary));
-            }
-            Entry::Occupied(e) => {
+        let mut iter = array.iter();
+        match (iter.next(), iter.next()) {
+            (Some(Value::Str(kind)), Some(discriminant)) => match kind.as_str() {
+                "node" => {
+                    let Value::Str(identifier) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" node identifier must be a string",
+                        ));
+                        continue;
+                    };
+                    let identifier = identifier.to_string();
+
+                    if !spans.contains_key(&identifier) {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            eco_format!("metadata for unknown node: {identifier:?}"),
+                        ));
+                        continue;
+                    }
+
+                    match node_result.entry(identifier) {
+                        Entry::Vacant(e) => {
+                            e.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(e) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!("duplicate metadata for node: {:?}", e.key()),
+                            ));
+                        }
+                    }
+                }
+                "transclude" => {
+                    let Value::Int(counter_i64) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" transclude counter must be an integer",
+                        ));
+                        continue;
+                    };
+                    let counter = match u32::try_from(*counter_i64) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "\"wb-metadata\" transclude counter out of range: {counter_i64}"
+                                ),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    match transclusion_result.entry(counter) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(entry) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "duplicate metadata for transclusion counter: {}",
+                                    entry.key()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    errors.push(SourceDiagnostic::error(
+                        item.span(),
+                        eco_format!("unknown \"wb-metadata\" kind: {:?}", kind.as_str()),
+                    ));
+                }
+            },
+            _ => {
                 errors.push(SourceDiagnostic::error(
                     item.span(),
-                    eco_format!("duplicate metadata for node: {:?}", e.key()),
+                    "\"wb-metadata\" must be a two-element [kind, discriminant] array",
                 ));
             }
         }
     }
 
-    result
+    (node_result, transclusion_result)
 }
 
 /// Converts a Typst metadata dict into a `HashMap<String, Vec<String>>`,
