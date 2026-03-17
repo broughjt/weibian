@@ -352,28 +352,31 @@ impl Compiler {
             // that links inside already-rendered transclusion bodies are not
             // double-processed.
             if self.links.neighbors(id).next().is_some() {
-                for element in document.select("wb-link").iter() {
-                    let identifier = element
-                        .attr("identifier")
-                        .expect("bug: wb-link is missing an identifier");
+                let links = document.select("a").iter().filter_map(|element| {
+                    element
+                        .attr("href")
+                        .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
+                        .map(|id| (element, id))
+                });
+                for (element, id) in links {
                     let counter: u32 = element
-                        .attr("counter")
-                        .expect("bug: wb-link is missing a counter")
+                        .attr("data-counter")
+                        .expect("bug: link is missing a data-counter")
                         .parse()
-                        .expect("bug: wb-link has invalid counter");
-                    let href = format!("/{}.html", identifier.as_ref());
+                        .expect("bug: link has invalid data-counter");
+                    let href = format!("/{id}.html");
                     let content = element.inner_html().to_string();
                     let link_metadata = self.nodes[&id]
                         .link_metadata
                         .get(&counter)
                         .cloned()
                         .unwrap_or_default();
-                    let context = if let Some(target_id) = self.interner.get(identifier.as_ref())
+                    let context = if let Some(target_id) = self.interner.get(&id)
                         && let Some(entry) = self.nodes.get(&target_id)
                     {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => identifier.as_ref(),
+                                identifier => id,
                                 href => href,
                                 content => content,
                                 resolved => true,
@@ -386,7 +389,7 @@ impl Compiler {
                     } else {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => identifier.as_ref(),
+                                identifier => id,
                                 href => href,
                                 content => content,
                                 resolved => false,
@@ -395,7 +398,7 @@ impl Compiler {
                         }
                     };
                     let replacement = link_template.render(context).map_err(|e| {
-                        anyhow::anyhow!("failed to render link template for {identifier}: {e}")
+                        anyhow::anyhow!("failed to render link template for {id}: {e}")
                     })?;
 
                     element.replace_with_html(replacement);
@@ -850,24 +853,20 @@ fn extract_node_content(
 
     let mut links: Vec<NodeId> = Vec::new();
     let mut node_link_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
-    for element in element.select("wb-link").iter() {
-        let id = match element.attr("identifier").as_deref() {
-            Some(id) => id.to_owned(),
-            None => {
-                errors.push(SourceDiagnostic::error(
-                    Span::detached(),
-                    "wb-link is missing an identifier",
-                ));
-                continue;
-            }
-        };
-        let counter = match element.attr("counter").as_deref() {
+    let links_iter = element.select("a").iter().filter_map(|element| {
+        element
+            .attr("href")
+            .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
+            .map(|id| (element, id))
+    });
+    for (element, id) in links_iter {
+        let counter = match element.attr("data-counter").as_deref() {
             Some(n) => match n.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => {
                     errors.push(SourceDiagnostic::error(
                         Span::detached(),
-                        eco_format!("wb-link has invalid counter: {n:?}"),
+                        eco_format!("link has invalid data-counter: {n:?}"),
                     ));
                     continue;
                 }
@@ -875,7 +874,7 @@ fn extract_node_content(
             None => {
                 errors.push(SourceDiagnostic::error(
                     Span::detached(),
-                    "wb-link is missing a counter attribute",
+                    "link is missing a data-counter attribute",
                 ));
                 continue;
             }
