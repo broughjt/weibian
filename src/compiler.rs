@@ -348,60 +348,80 @@ impl Compiler {
             let raw_html = self.nodes[&id].raw_html.as_str();
             let document = Document::from(raw_html);
 
-            // Note: if the node has transclusions, which we substitute below,
-            // they have already had their anchors properly rendered. We do this
-            // before transclusion substitution to avoid doing unnecessary work.
-            for element in document.select("a").iter() {
-                if let Some(href) = element.attr("href")
-                    && let Some(node_id_str) = href.strip_prefix("wb:")
-                {
-                    let href = format!("/{node_id_str}.html");
-                    let text = element.inner_html().to_string();
-                    let context = if let Some(target_id) = self.interner.get(node_id_str)
+            // Render internal links. Done before transclusion substitution so
+            // that links inside already-rendered transclusion bodies are not
+            // double-processed.
+            if self.links.neighbors(id).next().is_some() {
+                for element in document.select("wb-link").iter() {
+                    let identifier = element
+                        .attr("identifier")
+                        .expect("bug: wb-link is missing an identifier");
+                    let counter: u32 = element
+                        .attr("counter")
+                        .expect("bug: wb-link is missing a counter")
+                        .parse()
+                        .expect("bug: wb-link has invalid counter");
+                    let href = format!("/{}.html", identifier.as_ref());
+                    let content = element.inner_html().to_string();
+                    let link_metadata = self.nodes[&id]
+                        .link_metadata
+                        .get(&counter)
+                        .cloned()
+                        .unwrap_or_default();
+                    let context = if let Some(target_id) = self.interner.get(identifier.as_ref())
                         && let Some(entry) = self.nodes.get(&target_id)
                     {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => node_id_str,
+                                identifier => identifier.as_ref(),
                                 href => href,
-                                text => text,
+                                content => content,
                                 resolved => true,
                                 title => entry.title.as_str(),
                                 title_text => entry.title_text.as_str(),
                                 metadata => entry.metadata,
+                                link_metadata => link_metadata,
                             }
                         }
                     } else {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => node_id_str,
+                                identifier => identifier.as_ref(),
                                 href => href,
-                                text => text,
+                                content => content,
                                 resolved => false,
+                                link_metadata => link_metadata,
                             }
                         }
                     };
                     let replacement = link_template.render(context).map_err(|e| {
-                        anyhow::anyhow!("failed to render link template for {node_id_str}: {e}")
+                        anyhow::anyhow!("failed to render link template for {identifier}: {e}")
                     })?;
 
                     element.replace_with_html(replacement);
                 }
             }
 
-            // Checking whether the node has any neighbors in the transclusion
-            // graph is faster than walking the HTML for `wb-transclude`
-            // elements and finding none.
             if self.transclusions.neighbors(id).next().is_some() {
                 for element in document.select("wb-transclude").iter() {
                     let identifier = element
                         .attr("identifier")
                         .expect("bug: wb-transclude is missing an identifier");
-                    let target_id = self
+                    let counter: u32 = element
+                        .attr("counter")
+                        .expect("bug: wb-transclude is missing a counter")
+                        .parse()
+                        .expect("bug: wb-transclude has invalid counter");
+                    let transclusion_metadata = self.nodes[&id]
+                        .transclusion_metadata
+                        .get(&counter)
+                        .cloned()
+                        .unwrap_or_default();
+                    let id = self
                         .interner
                         .get(identifier.as_ref())
                         .expect("bug: wb-transclude identifier was not interned");
-                    let context = if let Some(entry) = self.nodes.get(&target_id) {
+                    let context = if let Some(entry) = self.nodes.get(&id) {
                         let body = entry
                             .rendered_body
                             .as_deref()
@@ -415,6 +435,7 @@ impl Compiler {
                                 title_text => entry.title_text.as_str(),
                                 body => body,
                                 metadata => entry.metadata,
+                                transclusion_metadata => transclusion_metadata,
                             }
                         }
                     } else {
@@ -422,6 +443,7 @@ impl Compiler {
                             transclusion => minijinja::context! {
                                 identifier => identifier.as_ref(),
                                 resolved => false,
+                                transclusion_metadata => transclusion_metadata,
                             }
                         }
                     };
@@ -599,10 +621,10 @@ fn extract(
 ) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
     let mut errors = EcoVec::new();
     let spans = collect_node_spans(html_document, &mut errors);
-    let (mut metadata, mut transclusion_metadata) =
+    let (mut metadata, mut transclusion_metadata, mut link_metadata) =
         collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
     let mut nodes = HashMap::with_capacity(spans.len());
-    let mut synthetic_counter: u32 = transclusion_metadata.keys().max().map_or(0, |m| {
+    let mut synthetic_counter: u32 = transclusion_metadata.keys().copied().max().map_or(0, |m| {
         m.checked_add(1).expect("transclusion counter overflow")
     });
 
@@ -626,6 +648,7 @@ fn extract(
             interner,
             &mut metadata,
             &mut transclusion_metadata,
+            &mut link_metadata,
             &mut errors,
         ) else {
             continue;
@@ -684,6 +707,7 @@ fn extract(
                 interner,
                 &mut metadata,
                 &mut transclusion_metadata,
+                &mut link_metadata,
                 &mut errors,
             ) {
                 nodes.insert(interner.intern(identifier), entry);
@@ -705,8 +729,21 @@ fn extract(
         }
     }
 
-    assert!(metadata.is_empty(), "bug: unconsumed node metadata: {:?}", metadata.keys().collect::<Vec<_>>());
-    assert!(transclusion_metadata.is_empty(), "bug: unconsumed transclusion metadata: {:?}", transclusion_metadata.keys().collect::<Vec<_>>());
+    assert!(
+        metadata.is_empty(),
+        "bug: unconsumed node metadata: {:?}",
+        metadata.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        transclusion_metadata.is_empty(),
+        "bug: unconsumed transclusion metadata: {:?}",
+        transclusion_metadata.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        link_metadata.is_empty(),
+        "bug: unconsumed link metadata: {:?}",
+        link_metadata.keys().collect::<Vec<_>>()
+    );
 
     if errors.is_empty() {
         Ok(nodes)
@@ -721,6 +758,7 @@ fn extract(
 ///
 /// Returns `None` (pushing an error) if the identifier attribute is missing or
 /// if the element's first child is not a `wb-title` element.
+#[allow(clippy::too_many_arguments)]
 fn extract_node_content(
     element: &Selection,
     is_subnode: bool,
@@ -728,6 +766,7 @@ fn extract_node_content(
     interner: &mut NodeInterner,
     metadata: &mut HashMap<String, HashMap<String, Vec<String>>>,
     transclusion_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
+    link_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     errors: &mut EcoVec<SourceDiagnostic>,
 ) -> Option<(String, ExtractData)> {
     let Some(identifier) = element.attr("identifier") else {
@@ -802,22 +841,51 @@ fn extract_node_content(
                 continue;
             }
         };
-        if let Some(meta) = transclusion_metadata.remove(&counter) {
-            node_transclusion_metadata.insert(counter, meta);
+
+        if let Some(metadata) = transclusion_metadata.remove(&counter) {
+            node_transclusion_metadata.insert(counter, metadata);
         }
         transclusions.push(interner.intern(&id));
     }
-    let links: Vec<NodeId> = element
-        .select("a")
-        .iter()
-        .filter_map(|element| {
-            element
-                .attr("href")
-                .as_deref()
-                .and_then(|href| href.strip_prefix("wb:"))
-                .map(|id| interner.intern(id))
-        })
-        .collect();
+
+    let mut links: Vec<NodeId> = Vec::new();
+    let mut node_link_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
+    for element in element.select("wb-link").iter() {
+        let id = match element.attr("identifier").as_deref() {
+            Some(id) => id.to_owned(),
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-link is missing an identifier",
+                ));
+                continue;
+            }
+        };
+        let counter = match element.attr("counter").as_deref() {
+            Some(n) => match n.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    errors.push(SourceDiagnostic::error(
+                        Span::detached(),
+                        eco_format!("wb-link has invalid counter: {n:?}"),
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    "wb-link is missing a counter attribute",
+                ));
+                continue;
+            }
+        };
+
+        if let Some(metadata) = link_metadata.remove(&counter) {
+            node_link_metadata.insert(counter, metadata);
+        }
+        links.push(interner.intern(&id));
+    }
 
     let node_metadata = metadata.remove(&identifier).unwrap_or_default();
 
@@ -831,6 +899,7 @@ fn extract_node_content(
                 span,
                 metadata: node_metadata,
                 transclusion_metadata: node_transclusion_metadata,
+                link_metadata: node_link_metadata,
                 ..Default::default()
             },
             transclusions,
@@ -846,11 +915,13 @@ fn extract_node_content(
 /// two-element array `[kind, discriminant]`:
 /// - `["node", identifier]`      — node/subnode metadata, keyed by identifier string
 /// - `["transclude", counter]`   — transclusion call-site metadata, keyed by counter integer
+/// - `["link", counter]`         — link call-site metadata, keyed by counter integer
 ///
 /// Errors are pushed for:
 /// - `wb-metadata` present but not a two-element array of the expected shape
 /// - node identifier not present in `spans` (unknown node)
 /// - duplicate entries for the same node or counter
+#[allow(clippy::type_complexity)]
 fn collect_metadata<I: Introspector>(
     introspector: &I,
     spans: &HashMap<String, Span>,
@@ -858,11 +929,13 @@ fn collect_metadata<I: Introspector>(
 ) -> (
     HashMap<String, HashMap<String, Vec<String>>>,
     HashMap<u32, HashMap<String, Vec<String>>>,
+    HashMap<u32, HashMap<String, Vec<String>>>,
 ) {
     let selector = MetadataElem::ELEM.select();
     let items = introspector.query(&selector);
     let mut node_result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
     let mut transclusion_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut link_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
 
     for item in &items {
         let Some((dictionary, wb_metadata)) =
@@ -953,6 +1026,39 @@ fn collect_metadata<I: Introspector>(
                         }
                     }
                 }
+                "link" => {
+                    let Value::Int(counter_i64) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" link counter must be an integer",
+                        ));
+                        continue;
+                    };
+                    let counter = match u32::try_from(*counter_i64) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "\"wb-metadata\" link counter out of range: {counter_i64}"
+                                ),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    match link_result.entry(counter) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(entry) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!("duplicate metadata for link counter: {}", entry.key()),
+                            ));
+                        }
+                    }
+                }
                 _ => {
                     errors.push(SourceDiagnostic::error(
                         item.span(),
@@ -969,7 +1075,7 @@ fn collect_metadata<I: Introspector>(
         }
     }
 
-    (node_result, transclusion_result)
+    (node_result, transclusion_result, link_result)
 }
 
 /// Converts a Typst metadata dict into a `HashMap<String, Vec<String>>`,
