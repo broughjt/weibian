@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 
 use crate::config::{BuildConfig, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
-use dom_query::Document;
+use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
@@ -480,14 +480,28 @@ impl NodeInterner {
     }
 }
 
-#[derive(Default)]
 pub struct NodeEntry {
     pub raw_html: String,
     pub title: String,
     pub title_text: String,
+    pub span: Span,
     pub metadata: HashMap<String, Vec<String>>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
+}
+
+impl Default for NodeEntry {
+    fn default() -> Self {
+        Self {
+            raw_html: String::new(),
+            title: String::new(),
+            title_text: String::new(),
+            span: Span::detached(),
+            metadata: HashMap::new(),
+            rendered_body: None,
+            rendered_backmatter: None,
+        }
+    }
 }
 
 /// The set of writes and deletes to apply to the output directory after a
@@ -546,8 +560,9 @@ fn extract(
     let mut errors = EcoVec::new();
     let spans = collect_node_spans(html_document, &mut errors);
     let mut metadata = collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
+    let mut nodes = HashMap::with_capacity(spans.len());
 
-    // Check for global duplicate identifiers before processing.
+    // Check for global duplicate identifiers
     errors.extend(
         spans
             .iter()
@@ -557,80 +572,32 @@ fn extract(
             }),
     );
 
-    let mut nodes: HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)> = HashMap::new();
-
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some(identifier) = subnode.attr("identifier") else {
-            errors.push(SourceDiagnostic::error(
-                Span::detached(),
-                "wb-subnode is missing an identifier",
-            ));
+        let Some((identifier, entry)) =
+            extract_node_content(&subnode, true, &spans, interner, &mut metadata, &mut errors)
+        else {
             continue;
         };
-        let identifier = identifier.to_string();
-        let span = spans
-            .get(&identifier)
-            .copied()
-            .expect("bug: no span found for node identifier");
         let transclude = match subnode.attr("transclude").as_deref() {
             Some("true") => true,
             Some("false") => false,
             Some(other) => {
                 errors.push(SourceDiagnostic::error(
-                    span,
+                    entry.0.span,
                     eco_format!("wb-subnode has invalid transclude value: {other:?}"),
                 ));
                 continue;
             }
             None => {
                 errors.push(SourceDiagnostic::error(
-                    span,
+                    entry.0.span,
                     "wb-subnode is missing the transclude attribute",
                 ));
                 continue;
             }
         };
-
-        let title_selection = subnode.children().first();
-        if !title_selection
-            .nodes()
-            .first()
-            .is_some_and(|n| n.has_name("wb-title"))
-        {
-            errors.push(SourceDiagnostic::error(
-                span,
-                "wb-subnode's first child must be a wb-title element",
-            ));
-            continue;
-        }
-        let title = title_selection.inner_html().to_string();
-        let title_text = title_selection.text().to_string();
-        title_selection.remove();
-
-        let raw_html = subnode.inner_html().to_string();
-        let mut transclusions: Vec<NodeId> = Vec::new();
-        for element in subnode.select("wb-transclude").iter() {
-            match element.attr("identifier").as_deref() {
-                Some(id) => transclusions.push(interner.intern(id)),
-                None => errors.push(SourceDiagnostic::error(
-                    Span::detached(),
-                    "wb-transclude is missing an identifier",
-                )),
-            }
-        }
-        let links: Vec<NodeId> = subnode
-            .select("a")
-            .iter()
-            .filter_map(|element| {
-                element
-                    .attr("href")
-                    .as_deref()
-                    .and_then(|href| href.strip_prefix("wb:"))
-                    .map(|id| interner.intern(id))
-            })
-            .collect();
 
         if transclude {
             subnode.replace_with_html(format!(
@@ -640,21 +607,7 @@ fn extract(
             subnode.remove();
         }
 
-        let node_metadata = metadata.remove(&identifier).unwrap_or_default();
-        nodes.insert(
-            interner.intern(identifier),
-            (
-                NodeEntry {
-                    raw_html,
-                    title,
-                    title_text,
-                    metadata: node_metadata,
-                    ..Default::default()
-                },
-                transclusions,
-                links,
-            ),
-        );
+        nodes.insert(interner.intern(identifier), entry);
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -668,71 +621,15 @@ fn extract(
             ));
         }
         Some(wb_node) => {
-            if let Some(identifier) = wb_node.attr("identifier") {
-                let identifier = identifier.to_string();
-                let span = spans
-                    .get(&identifier)
-                    .copied()
-                    .expect("bug: no span found for node identifier");
-
-                let title_selection = wb_node.children().first();
-                if !title_selection
-                    .nodes()
-                    .first()
-                    .is_some_and(|n| n.has_name("wb-title"))
-                {
-                    errors.push(SourceDiagnostic::error(
-                        span,
-                        "wb-node's first child must be a wb-title element",
-                    ));
-                } else {
-                    let title = title_selection.inner_html().to_string();
-                    let title_text = title_selection.text().to_string();
-                    title_selection.remove();
-
-                    let raw_html = wb_node.inner_html().to_string();
-                    let mut transclusions: Vec<NodeId> = Vec::new();
-                    for element in wb_node.select("wb-transclude").iter() {
-                        match element.attr("identifier").as_deref() {
-                            Some(id) => transclusions.push(interner.intern(id)),
-                            None => errors.push(SourceDiagnostic::error(
-                                Span::detached(),
-                                "wb-transclude is missing an identifier",
-                            )),
-                        }
-                    }
-                    let links: Vec<NodeId> = wb_node
-                        .select("a")
-                        .iter()
-                        .filter_map(|el| {
-                            el.attr("href")
-                                .as_deref()
-                                .and_then(|href| href.strip_prefix("wb:"))
-                                .map(|id| interner.intern(id))
-                        })
-                        .collect();
-
-                    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
-                    nodes.insert(
-                        interner.intern(identifier),
-                        (
-                            NodeEntry {
-                                raw_html,
-                                title,
-                                title_text,
-                                metadata: node_metadata,
-                                ..Default::default()
-                            },
-                            transclusions,
-                            links,
-                        ),
-                    );
-                }
-            } else {
-                errors.push(SourceDiagnostic::error(
-                    Span::detached(),
-                    "wb-node is missing an identifier",
-                ));
+            if let Some((identifier, entry)) = extract_node_content(
+                &wb_node,
+                false,
+                &spans,
+                interner,
+                &mut metadata,
+                &mut errors,
+            ) {
+                nodes.insert(interner.intern(identifier), entry);
             }
 
             errors.extend(node_iter.map(|extra| {
@@ -756,6 +653,101 @@ fn extract(
     } else {
         Err(errors)
     }
+}
+
+/// Extracts the content of a `wb-node` or `wb-subnode` element into a
+/// [`NodeEntry`], collecting its transclusions and links and consuming its
+/// metadata from the provided map.
+///
+/// Returns `None` (pushing an error) if the identifier attribute is missing or
+/// if the element's first child is not a `wb-title` element.
+fn extract_node_content(
+    element: &Selection,
+    is_subnode: bool,
+    spans: &HashMap<String, Span>,
+    interner: &mut NodeInterner,
+    metadata: &mut HashMap<String, HashMap<String, Vec<String>>>,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> Option<(String, ExtractData)> {
+    let Some(identifier) = element.attr("identifier") else {
+        errors.push(SourceDiagnostic::error(
+            Span::detached(),
+            if is_subnode {
+                "wb-subnode is missing an identifier"
+            } else {
+                "wb-node is missing an identifier"
+            },
+        ));
+
+        return None;
+    };
+    let identifier = identifier.to_string();
+    let span = spans
+        .get(&identifier)
+        .copied()
+        .expect("bug: no span found for node identifier");
+
+    let title_selection = element.children().first();
+    if !title_selection
+        .nodes()
+        .first()
+        .is_some_and(|n| n.has_name("wb-title"))
+    {
+        errors.push(SourceDiagnostic::error(
+            span,
+            if is_subnode {
+                "wb-subnode's first child must be a wb-title element"
+            } else {
+                "wb-node's first child must be a wb-title element"
+            },
+        ));
+        return None;
+    }
+    let title = title_selection.inner_html().to_string();
+    let title_text = title_selection.text().to_string();
+    title_selection.remove();
+
+    let raw_html = element.inner_html().to_string();
+
+    let mut transclusions: Vec<NodeId> = Vec::new();
+    for element in element.select("wb-transclude").iter() {
+        match element.attr("identifier").as_deref() {
+            Some(id) => transclusions.push(interner.intern(id)),
+            None => errors.push(SourceDiagnostic::error(
+                Span::detached(),
+                "wb-transclude is missing an identifier",
+            )),
+        }
+    }
+    let links: Vec<NodeId> = element
+        .select("a")
+        .iter()
+        .filter_map(|element| {
+            element
+                .attr("href")
+                .as_deref()
+                .and_then(|href| href.strip_prefix("wb:"))
+                .map(|id| interner.intern(id))
+        })
+        .collect();
+
+    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
+
+    Some((
+        identifier,
+        (
+            NodeEntry {
+                raw_html,
+                title,
+                title_text,
+                span,
+                metadata: node_metadata,
+                ..Default::default()
+            },
+            transclusions,
+            links,
+        ),
+    ))
 }
 
 /// Queries the introspector for `#metadata(...)` elements that carry node
