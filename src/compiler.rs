@@ -11,6 +11,8 @@ use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Bfs, Reversed};
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
+use typst::foundations::{Dict, NativeElement, Packed, Repr, Value};
+use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::{FileId, Span};
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
@@ -483,6 +485,7 @@ pub struct NodeEntry {
     pub raw_html: String,
     pub title: String,
     pub title_text: String,
+    pub metadata: HashMap<String, Vec<String>>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
 }
@@ -540,7 +543,9 @@ fn extract(
     interner: &mut NodeInterner,
     node_exists: impl Fn(NodeId) -> bool,
 ) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
-    let (spans, mut errors) = collect_node_spans(html_document);
+    let mut errors = EcoVec::new();
+    let spans = collect_node_spans(html_document, &mut errors);
+    let mut metadata = collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
 
     // Check for global duplicate identifiers before processing.
     errors.extend(
@@ -635,6 +640,7 @@ fn extract(
             subnode.remove();
         }
 
+        let node_metadata = metadata.remove(&identifier).unwrap_or_default();
         nodes.insert(
             interner.intern(identifier),
             (
@@ -642,6 +648,7 @@ fn extract(
                     raw_html,
                     title,
                     title_text,
+                    metadata: node_metadata,
                     ..Default::default()
                 },
                 transclusions,
@@ -705,6 +712,7 @@ fn extract(
                         })
                         .collect();
 
+                    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
                     nodes.insert(
                         interner.intern(identifier),
                         (
@@ -712,6 +720,7 @@ fn extract(
                                 raw_html,
                                 title,
                                 title_text,
+                                metadata: node_metadata,
                                 ..Default::default()
                             },
                             transclusions,
@@ -749,18 +758,120 @@ fn extract(
     }
 }
 
+/// Queries the introspector for `#metadata(...)` elements that carry node
+/// metadata (identified by the presence of a `wb-metadata` key in the
+/// dictionary), validates them, and returns a map from identifier to the
+/// remaining key-value pairs.
+///
+/// Errors are pushed for:
+/// - metadata elements missing an `wb-metadata` key
+/// - metadata for an identifier not present in `spans` (unknown node)
+/// - more than one metadata element for the same identifier
+fn collect_metadata<I: Introspector>(
+    introspector: &I,
+    spans: &HashMap<String, Span>,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let selector = MetadataElem::ELEM.select();
+    let items = introspector.query(&selector);
+    let mut result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+
+    for item in &items {
+        let Some(meta) = Packed::<MetadataElem>::from_ref(item) else {
+            continue;
+        };
+
+        let Value::Dict(dictionary) = &meta.value else {
+            continue;
+        };
+        let identifier = match dictionary.get("wb-metadata") {
+            Ok(Value::Str(s)) => s.to_string(),
+            Ok(_) => {
+                errors.push(SourceDiagnostic::error(
+                    item.span(),
+                    "\"wb-metadata\" value must be the node identifier string",
+                ));
+                continue;
+            }
+            Err(_) => continue, // not our metadata element
+        };
+
+        // The identifier must correspond to an a wb-node or wb-subnode in this
+        // source file
+        if !spans.contains_key(&identifier) {
+            errors.push(SourceDiagnostic::error(
+                item.span(),
+                eco_format!("metadata for unknown node: {identifier:?}"),
+            ));
+            continue;
+        }
+
+        // At most one metadata element per node
+        match result.entry(identifier) {
+            Entry::Vacant(e) => {
+                e.insert(normalize_metadata(dictionary));
+            }
+            Entry::Occupied(e) => {
+                errors.push(SourceDiagnostic::error(
+                    item.span(),
+                    eco_format!("duplicate metadata for node: {:?}", e.key()),
+                ));
+            }
+        }
+    }
+
+    result
+}
+
+/// Converts a Typst metadata dict into a `HashMap<String, Vec<String>>`,
+/// skipping the structural `"wb-metadata"` key.
+///
+/// Values are normalised as follows:
+/// - `none`  → key omitted entirely
+/// - string  → single-element vec
+/// - array   → vec of elements, with `none` items dropped and non-strings converted via `repr()`
+/// - anything else → single-element vec containing the `repr()` string
+// TODO: Maybe use EcoVec here
+fn normalize_metadata(dictionary: &Dict) -> HashMap<String, Vec<String>> {
+    let mut result = HashMap::with_capacity(dictionary.len().saturating_sub(1));
+
+    for (key, value) in dictionary.iter() {
+        if key.as_str() == "wb-metadata" {
+            continue;
+        }
+        let values: Vec<String> = match value {
+            Value::None => continue,
+            Value::Str(s) => vec![s.to_string()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|v| match v {
+                    Value::None => None,
+                    Value::Str(s) => Some(s.to_string()),
+                    other => Some(other.repr().to_string()),
+                })
+                .collect(),
+            other => vec![other.repr().to_string()],
+        };
+        if !values.is_empty() {
+            result.insert(key.to_string(), values);
+        }
+    }
+
+    result
+}
+
 /// Walks `document`'s element tree once (iterative DFS), returning a map from
 /// each node identifier to the span of its `wb-node` or `wb-subnode` element,
 /// plus errors for any duplicate identifiers found within the document.
 fn collect_node_spans(
     document: &HtmlDocument,
-) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> HashMap<String, Span> {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
     let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
     let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
 
     let mut spans = HashMap::new();
-    let mut errors = EcoVec::new();
     let mut stack = vec![document.root()];
 
     while let Some(element) = stack.pop() {
@@ -786,5 +897,5 @@ fn collect_node_spans(
         }
     }
 
-    (spans, errors)
+    spans
 }
