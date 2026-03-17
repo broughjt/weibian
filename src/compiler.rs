@@ -380,6 +380,7 @@ impl Compiler {
                                 title => entry.title.as_str(),
                                 title_text => entry.title_text.as_str(),
                                 body => body,
+                                metadata => entry.metadata,
                             }
                         }
                     } else {
@@ -425,6 +426,7 @@ impl Compiler {
                             title => entry.title.as_str(),
                             title_text => entry.title_text.as_str(),
                             body => body,
+                            metadata => entry.metadata,
                         }
                     })
                     .map_err(|e| {
