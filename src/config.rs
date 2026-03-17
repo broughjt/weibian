@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 
 pub const NODE_TEMPLATE: &str = "node.html";
 pub const TRANSCLUSION_TEMPLATE: &str = "transclusion.html";
+pub const LINK_TEMPLATE: &str = "link.html";
 
 const DEFAULT_CONFIG_NAME: &str = "weibian.toml";
 
@@ -67,6 +68,7 @@ pub struct WeibianConfig {
     pub output_directory: Option<PathBuf>,
     pub node_template: PathBuf,
     pub transclusion_template: PathBuf,
+    pub link_template: PathBuf,
     pub public_directory: Option<PathBuf>,
 
     #[serde(default, deserialize_with = "deserialize_globset")]
@@ -151,6 +153,26 @@ impl BuildConfig {
                 anyhow!(
                     "failed to parse transclusion template {}: {e}",
                     transclusion_template_path.display()
+                )
+            })?;
+
+        let link_template_path = if config.link_template.is_absolute() {
+            config.link_template
+        } else {
+            root.join(config.link_template)
+        };
+        let link_template_source = fs::read_to_string(&link_template_path).map_err(|e| {
+            anyhow!(
+                "failed to read link template {}: {e}",
+                link_template_path.display()
+            )
+        })?;
+        environment
+            .add_template_owned(LINK_TEMPLATE, link_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse link template {}: {e}",
+                    link_template_path.display()
                 )
             })?;
 

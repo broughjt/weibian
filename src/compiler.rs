@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
-use crate::config::{BuildConfig, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
+use crate::config::{BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
@@ -338,6 +338,10 @@ impl Compiler {
             .environment
             .get_template(TRANSCLUSION_TEMPLATE)
             .expect("bug: transclusion.html template missing from environment");
+        let link_template = config
+            .environment
+            .get_template(LINK_TEMPLATE)
+            .expect("bug: link.html template missing from environment");
         for &id in &render_order {
             let raw_html = self.nodes[&id].raw_html.as_str();
             let document = Document::from(raw_html);
@@ -347,11 +351,39 @@ impl Compiler {
             // before transclusion substitution to avoid doing unnecessary work.
             for element in document.select("a").iter() {
                 if let Some(href) = element.attr("href")
-                    && let Some(node_id) = href.strip_prefix("wb:")
+                    && let Some(node_id_str) = href.strip_prefix("wb:")
                 {
-                    // TODO: Support configurable index node, root
-                    // directory, and trailing slash.
-                    element.set_attr("href", &format!("/{node_id}.html"));
+                    let href = format!("/{node_id_str}.html");
+                    let text = element.inner_html().to_string();
+                    let context = if let Some(target_id) = self.interner.get(node_id_str)
+                        && let Some(entry) = self.nodes.get(&target_id)
+                    {
+                        minijinja::context! {
+                            link => minijinja::context! {
+                                identifier => node_id_str,
+                                href => href,
+                                text => text,
+                                resolved => true,
+                                title => entry.title.as_str(),
+                                title_text => entry.title_text.as_str(),
+                                metadata => entry.metadata,
+                            }
+                        }
+                    } else {
+                        minijinja::context! {
+                            link => minijinja::context! {
+                                identifier => node_id_str,
+                                href => href,
+                                text => text,
+                                resolved => false,
+                            }
+                        }
+                    };
+                    let replacement = link_template.render(context).map_err(|e| {
+                        anyhow::anyhow!("failed to render link template for {node_id_str}: {e}")
+                    })?;
+
+                    element.replace_with_html(replacement);
                 }
             }
 
