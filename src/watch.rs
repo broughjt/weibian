@@ -107,7 +107,7 @@ impl Watcher {
 
         self.compiler
             .process(&self.config)?
-            .apply(&self.config.output_directory)?;
+            .apply(&self.config)?;
         self.emit_diagnostics()?;
 
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
@@ -165,7 +165,7 @@ impl Watcher {
 
             self.compiler
                 .process(&self.config)?
-                .apply(&self.config.output_directory)?;
+                .apply(&self.config)?;
             self.emit_diagnostics()?;
 
             comemo::evict(10);

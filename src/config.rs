@@ -64,11 +64,20 @@ pub enum Command {
 /// The raw deserialized contents of `weibian.toml`.
 #[derive(Debug, Deserialize)]
 pub struct WeibianConfig {
+    #[serde(default)]
+    pub files: FilesConfig,
+
+    #[serde(default)]
+    pub templates: TemplatesConfig,
+
+    #[serde(default)]
+    pub site: SiteConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct FilesConfig {
     pub input_directory: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
-    pub node_template: PathBuf,
-    pub transclusion_template: PathBuf,
-    pub link_template: PathBuf,
     pub public_directory: Option<PathBuf>,
 
     #[serde(default, deserialize_with = "deserialize_globset")]
@@ -76,6 +85,30 @@ pub struct WeibianConfig {
 
     #[serde(default, deserialize_with = "deserialize_globset")]
     pub exclude: GlobSet,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplatesConfig {
+    pub node: PathBuf,
+    pub transclusion: PathBuf,
+    pub link: PathBuf,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            node: PathBuf::from(NODE_TEMPLATE),
+            transclusion: PathBuf::from(TRANSCLUSION_TEMPLATE),
+            link: PathBuf::from(LINK_TEMPLATE),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SiteConfig {
+    pub root_directory: Option<String>,
+    pub trailing_slash: Option<bool>,
+    pub index_node: Option<String>,
 }
 
 /// The fully resolved build configuration.
@@ -89,6 +122,9 @@ pub struct BuildConfig {
     pub public_directory: Option<PathBuf>,
     pub include: GlobSet,
     pub exclude: GlobSet,
+    pub root_directory: String,
+    pub trailing_slash: bool,
+    pub index_node: String,
     pub environment: minijinja::Environment<'static>,
 }
 
@@ -97,26 +133,35 @@ impl BuildConfig {
         let (root, config) = load_config(config_file)?;
 
         let input_directory = config
+            .files
             .input_directory
             .map(|p| if p.is_absolute() { p } else { root.join(p) })
             .unwrap_or_else(|| root.clone());
 
         let public_directory = config
+            .files
             .public_directory
             .map(|p| if p.is_absolute() { p } else { root.join(p) });
 
-        let include = if config.include.is_empty() {
+        let include = if config.files.include.is_empty() {
             GlobSetBuilder::new().add(Glob::new("**/*.typ")?).build()?
         } else {
-            config.include
+            config.files.include
         };
 
-        let output_directory = config.output_directory.unwrap_or_else(|| root.join("dist"));
+        let output_directory = config
+            .files
+            .output_directory
+            .unwrap_or_else(|| root.join("dist"));
 
-        let node_template_path = if config.node_template.is_absolute() {
-            config.node_template
+        let root_directory = normalize_root_directory(config.site.root_directory.as_deref());
+        let trailing_slash = config.site.trailing_slash.unwrap_or(false);
+        let index_node = config.site.index_node.unwrap_or_else(|| "index".to_string());
+
+        let node_template_path = if config.templates.node.is_absolute() {
+            config.templates.node
         } else {
-            root.join(config.node_template)
+            root.join(config.templates.node)
         };
         let node_template_source = fs::read_to_string(&node_template_path).map_err(|e| {
             anyhow!(
@@ -135,10 +180,10 @@ impl BuildConfig {
                 )
             })?;
 
-        let transclusion_template_path = if config.transclusion_template.is_absolute() {
-            config.transclusion_template
+        let transclusion_template_path = if config.templates.transclusion.is_absolute() {
+            config.templates.transclusion
         } else {
-            root.join(config.transclusion_template)
+            root.join(config.templates.transclusion)
         };
         let transclusion_template_source = fs::read_to_string(&transclusion_template_path)
             .map_err(|e| {
@@ -156,10 +201,10 @@ impl BuildConfig {
                 )
             })?;
 
-        let link_template_path = if config.link_template.is_absolute() {
-            config.link_template
+        let link_template_path = if config.templates.link.is_absolute() {
+            config.templates.link
         } else {
-            root.join(config.link_template)
+            root.join(config.templates.link)
         };
         let link_template_source = fs::read_to_string(&link_template_path).map_err(|e| {
             anyhow!(
@@ -184,9 +229,31 @@ impl BuildConfig {
             output_directory,
             public_directory,
             include,
-            exclude: config.exclude,
+            exclude: config.files.exclude,
+            root_directory,
+            trailing_slash,
+            index_node,
             environment,
         })
+    }
+
+    pub fn href(&self, id: &str) -> String {
+        if id == self.index_node {
+            return self.root_directory.clone();
+        }
+        if self.trailing_slash {
+            format!("{}{id}/", self.root_directory)
+        } else {
+            format!("{}{id}.html", self.root_directory)
+        }
+    }
+
+    pub fn output_path(&self, id: &str) -> PathBuf {
+        if self.trailing_slash && id != self.index_node {
+            self.output_directory.join(id).join("index.html")
+        } else {
+            self.output_directory.join(format!("{id}.html"))
+        }
     }
 
     pub fn is_match(&self, path: &Path) -> bool {
@@ -287,6 +354,22 @@ fn demote_headings_html(html: String, levels: usize) -> String {
         document.select(&format!("h{n}")).rename(&format!("h{m}"));
     }
     document.select("body").inner_html().to_string()
+}
+
+fn normalize_root_directory(raw: Option<&str>) -> String {
+    let mut root = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string();
+    if !root.starts_with('/') {
+        root.insert(0, '/');
+    }
+    if !root.ends_with('/') {
+        root.push('/');
+    }
+
+    root
 }
 
 fn deserialize_globset<'de, D>(deserializer: D) -> Result<GlobSet, D::Error>

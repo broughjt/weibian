@@ -1,7 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::Path;
 
 use crate::config::{BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
 use dom_query::{Document, Selection};
@@ -335,6 +334,11 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
+        let site_context = minijinja::context! {
+            root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
+            trailing_slash => config.trailing_slash,
+        };
+
         let transclusion_template = config
             .environment
             .get_template(TRANSCLUSION_TEMPLATE)
@@ -343,6 +347,10 @@ impl Compiler {
             .environment
             .get_template(LINK_TEMPLATE)
             .expect("bug: link.html template missing from environment");
+        let node_template = config
+            .environment
+            .get_template(NODE_TEMPLATE)
+            .expect("bug: node.html template missing from environment");
 
         for &id in &render_order {
             let raw_html = self.nodes[&id].raw_html.as_str();
@@ -364,7 +372,7 @@ impl Compiler {
                         .expect("bug: link is missing a data-counter")
                         .parse()
                         .expect("bug: link has invalid data-counter");
-                    let href = format!("/{identifier}.html");
+                    let href = config.href(&identifier);
                     let content = element.inner_html().to_string();
                     let link_metadata = self.nodes[&id]
                         .link_metadata
@@ -377,14 +385,15 @@ impl Compiler {
                         minijinja::context! {
                             link => minijinja::context! {
                                 identifier => identifier,
-                                href => href,
+                                href => &href,
                                 content => content,
                                 resolved => true,
                                 title => entry.title.as_str(),
                                 title_text => entry.title_text.as_str(),
                                 metadata => entry.metadata,
                                 link_metadata => link_metadata,
-                            }
+                            },
+                            site => site_context,
                         }
                     } else {
                         minijinja::context! {
@@ -394,7 +403,8 @@ impl Compiler {
                                 content => content,
                                 resolved => false,
                                 link_metadata => link_metadata,
-                            }
+                            },
+                            site => site_context,
                         }
                     };
                     let replacement = link_template.render(context).map_err(|e| {
@@ -439,7 +449,8 @@ impl Compiler {
                                 body => body,
                                 metadata => entry.metadata,
                                 transclusion_metadata => transclusion_metadata,
-                            }
+                            },
+                            site => site_context,
                         }
                     } else {
                         minijinja::context! {
@@ -447,7 +458,8 @@ impl Compiler {
                                 identifier => identifier.as_ref(),
                                 resolved => false,
                                 transclusion_metadata => transclusion_metadata,
-                            }
+                            },
+                            site => site_context,
                         }
                     };
                     let replacement = transclusion_template.render(context).map_err(|e| {
@@ -465,10 +477,6 @@ impl Compiler {
             self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
         }
 
-        let node_template = config
-            .environment
-            .get_template(NODE_TEMPLATE)
-            .expect("bug: node.html template missing from environment");
         let writes = render_order
             .iter()
             .map(|&id| -> anyhow::Result<(String, String)> {
@@ -486,7 +494,8 @@ impl Compiler {
                             title_text => entry.title_text.as_str(),
                             body => body,
                             metadata => entry.metadata,
-                        }
+                        },
+                        site => site_context,
                     })
                     .map_err(|e| {
                         anyhow::anyhow!("failed to render template for node {name}: {e}")
@@ -586,12 +595,19 @@ pub struct OutputPlan {
 }
 
 impl OutputPlan {
-    pub fn apply(&self, output_directory: &Path) -> Result<(), io::Error> {
+    pub fn apply(&self, config: &BuildConfig) -> Result<(), io::Error> {
         for (node_id, html) in &self.writes {
-            std::fs::write(output_directory.join(format!("{node_id}.html")), html)?;
+            let path = config.output_path(node_id);
+
+            if let Some(parent) = path.parent()
+                && parent != config.output_directory
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, html)?;
         }
         for node_id in &self.deletes {
-            let path = output_directory.join(format!("{node_id}.html"));
+            let path = config.output_path(node_id);
 
             match std::fs::remove_file(&path) {
                 Ok(()) => {}

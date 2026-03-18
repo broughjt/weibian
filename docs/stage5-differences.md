@@ -404,8 +404,8 @@ v2: citations (emitted by `ct`) use the same `link.html` as internal links →
 
 | Feature | v1 | v2 status |
 |---|---|---|
-| `<html lang>` from metadata | `lang="{{ note.metadata.lang }}"` | Hardcoded `lang="en"` |
-| `<head>` meta tags (identifier, taxon, lang, toc, export-pdf) | Injected via `{{ note.head \| safe }}` | Not emitted |
+| `<html lang>` from metadata | `lang="{{ note.metadata.lang }}"` | ✓ Fixed in `node.html` |
+| `<head>` meta tags (identifier, taxon, lang, toc, export-pdf) | Injected via `{{ note.head \| safe }}` | ✓ Fixed in `node.html` + `template.typ` |
 | CSS/nav/slug hrefs via `site.root_dir` | `{{ site.root_dir }}` | Hardcoded `/` |
 | Trailing-slash URL support | `trailing_slash = true` → `/0001/` | Always `.html` |
 | `<h1 id="identifier">` | Yes (from Typst `_summary_header`) | Not present |

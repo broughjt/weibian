@@ -88,7 +88,7 @@ impl Builder {
 
         compiler
             .process(&self.config)?
-            .apply(&self.config.output_directory)?;
+            .apply(&self.config)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
         let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;
