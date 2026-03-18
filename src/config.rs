@@ -238,9 +238,6 @@ impl BuildConfig {
     }
 
     pub fn href(&self, id: &str) -> String {
-        if id == self.index_node {
-            return self.root_directory.clone();
-        }
         if self.trailing_slash {
             format!("{}{id}/", self.root_directory)
         } else {

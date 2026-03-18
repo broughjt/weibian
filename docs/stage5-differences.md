@@ -406,8 +406,8 @@ v2: citations (emitted by `ct`) use the same `link.html` as internal links →
 |---|---|---|
 | `<html lang>` from metadata | `lang="{{ note.metadata.lang }}"` | ✓ Fixed in `node.html` |
 | `<head>` meta tags (identifier, taxon, lang, toc, export-pdf) | Injected via `{{ note.head \| safe }}` | ✓ Fixed in `node.html` + `template.typ` |
-| CSS/nav/slug hrefs via `site.root_dir` | `{{ site.root_dir }}` | Hardcoded `/` |
-| Trailing-slash URL support | `trailing_slash = true` → `/0001/` | Always `.html` |
+| CSS/nav/slug hrefs via `site.root_dir` | `{{ site.root_dir }}` | ✓ Fixed in `node.html`, `transclusion.html`, `compiler.rs`, `config.rs` |
+| Trailing-slash URL support | `trailing_slash = true` → `/0001/` | ✓ Fixed in `compiler.rs`, `config.rs`, `node.html`, `transclusion.html` |
 | `<h1 id="identifier">` | Yes (from Typst `_summary_header`) | Not present |
 | Date formatted as long form | "September 22, 2023" | ISO 8601 "2023-09-22" in `<time>` |
 | `<li class="meta-item">` | Yes | Plain `<li>` |

@@ -337,6 +337,7 @@ impl Compiler {
         let site_context = minijinja::context! {
             root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
             trailing_slash => config.trailing_slash,
+            index_node => config.index_node.as_str(),
         };
 
         let transclusion_template = config
@@ -372,7 +373,7 @@ impl Compiler {
                         .expect("bug: link is missing a data-counter")
                         .parse()
                         .expect("bug: link has invalid data-counter");
-                    let href = config.href(&identifier);
+                    let href = minijinja::Value::from_safe_string(config.href(&identifier));
                     let content = element.inner_html().to_string();
                     let link_metadata = self.nodes[&id]
                         .link_metadata
@@ -443,6 +444,7 @@ impl Compiler {
                         minijinja::context! {
                             transclusion => minijinja::context! {
                                 identifier => identifier.as_ref(),
+                                href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
                                 resolved => true,
                                 title => entry.title.as_str(),
                                 title_text => entry.title_text.as_str(),
@@ -490,6 +492,7 @@ impl Compiler {
                     .render(minijinja::context! {
                         node => minijinja::context! {
                             id => name,
+                            href => minijinja::Value::from_safe_string(config.href(name)),
                             title => entry.title.as_str(),
                             title_text => entry.title_text.as_str(),
                             body => body,
