@@ -140,8 +140,8 @@ impl BuildConfig {
         } else {
             root.join(config.transclusion_template)
         };
-        let transclusion_template_source =
-            fs::read_to_string(&transclusion_template_path).map_err(|e| {
+        let transclusion_template_source = fs::read_to_string(&transclusion_template_path)
+            .map_err(|e| {
                 anyhow!(
                     "failed to read transclusion template {}: {e}",
                     transclusion_template_path.display()
@@ -175,6 +175,8 @@ impl BuildConfig {
                     link_template_path.display()
                 )
             })?;
+
+        environment.add_filter("demote_headings", filter_demote_headings);
 
         Ok(Self {
             root,
@@ -247,7 +249,10 @@ fn find_project_root() -> anyhow::Result<PathBuf> {
     }
 }
 
-pub fn copy_directory_recursive(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+pub fn copy_directory_recursive(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
     use walkdir::WalkDir;
 
     for entry in WalkDir::new(src) {
@@ -262,6 +267,26 @@ pub fn copy_directory_recursive(src: &std::path::Path, dest: &std::path::Path) -
     }
 
     Ok(())
+}
+
+fn filter_demote_headings(html: String, levels: Option<u32>) -> String {
+    demote_headings_html(html, levels.unwrap_or(1) as usize)
+}
+
+// TODO: move this somewhere more appropriate
+fn demote_headings_html(html: String, levels: usize) -> String {
+    if levels == 0 {
+        return html;
+    }
+    let document = dom_query::Document::from(html.as_str());
+    for n in (1u8..=6).rev() {
+        let m = (n as usize + levels).min(6) as u8;
+        if m == n {
+            continue;
+        }
+        document.select(&format!("h{n}")).rename(&format!("h{m}"));
+    }
+    document.select("body").inner_html().to_string()
 }
 
 fn deserialize_globset<'de, D>(deserializer: D) -> Result<GlobSet, D::Error>

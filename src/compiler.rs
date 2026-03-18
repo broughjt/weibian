@@ -356,27 +356,27 @@ impl Compiler {
                     element
                         .attr("href")
                         .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
-                        .map(|id| (element, id))
+                        .map(|identifier| (element, identifier))
                 });
-                for (element, id) in links {
+                for (element, identifier) in links {
                     let counter: u32 = element
                         .attr("data-counter")
                         .expect("bug: link is missing a data-counter")
                         .parse()
                         .expect("bug: link has invalid data-counter");
-                    let href = format!("/{id}.html");
+                    let href = format!("/{identifier}.html");
                     let content = element.inner_html().to_string();
                     let link_metadata = self.nodes[&id]
                         .link_metadata
                         .get(&counter)
                         .cloned()
                         .unwrap_or_default();
-                    let context = if let Some(target_id) = self.interner.get(&id)
+                    let context = if let Some(target_id) = self.interner.get(&identifier)
                         && let Some(entry) = self.nodes.get(&target_id)
                     {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => id,
+                                identifier => identifier,
                                 href => href,
                                 content => content,
                                 resolved => true,
@@ -389,7 +389,7 @@ impl Compiler {
                     } else {
                         minijinja::context! {
                             link => minijinja::context! {
-                                identifier => id,
+                                identifier => identifier,
                                 href => href,
                                 content => content,
                                 resolved => false,
@@ -398,7 +398,7 @@ impl Compiler {
                         }
                     };
                     let replacement = link_template.render(context).map_err(|e| {
-                        anyhow::anyhow!("failed to render link template for {id}: {e}")
+                        anyhow::anyhow!("failed to render link template for {identifier}: {e}")
                     })?;
 
                     element.replace_with_html(replacement);
@@ -814,8 +814,8 @@ fn extract_node_content(
 
     let mut transclusions: Vec<NodeId> = Vec::new();
     let mut node_transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
-    for element in element.select("wb-transclude").iter() {
-        let id = match element.attr("identifier").as_deref() {
+    for wb_transclude in element.select("wb-transclude").iter() {
+        let id = match wb_transclude.attr("identifier").as_deref() {
             Some(id) => id.to_owned(),
             None => {
                 errors.push(SourceDiagnostic::error(
@@ -825,7 +825,7 @@ fn extract_node_content(
                 continue;
             }
         };
-        let counter = match element.attr("counter").as_deref() {
+        let counter = match wb_transclude.attr("counter").as_deref() {
             Some(n) => match n.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => {
@@ -857,10 +857,10 @@ fn extract_node_content(
         element
             .attr("href")
             .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
-            .map(|id| (element, id))
+            .map(|identifier| (element, identifier))
     });
-    for (element, id) in links_iter {
-        let counter = match element.attr("data-counter").as_deref() {
+    for (anchor, id) in links_iter {
+        let counter = match anchor.attr("data-counter").as_deref() {
             Some(n) => match n.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => {
@@ -883,7 +883,7 @@ fn extract_node_content(
         if let Some(metadata) = link_metadata.remove(&counter) {
             node_link_metadata.insert(counter, metadata);
         }
-        links.push(interner.intern(&id));
+        links.push(interner.intern(id));
     }
 
     let node_metadata = metadata.remove(&identifier).unwrap_or_default();
