@@ -408,10 +408,10 @@ v2: citations (emitted by `ct`) use the same `link.html` as internal links →
 | `<head>` meta tags (identifier, taxon, lang, toc, export-pdf) | Injected via `{{ note.head \| safe }}` | ✓ Fixed in `node.html` + `template.typ` |
 | CSS/nav/slug hrefs via `site.root_dir` | `{{ site.root_dir }}` | ✓ Fixed in `node.html`, `transclusion.html`, `compiler.rs`, `config.rs` |
 | Trailing-slash URL support | `trailing_slash = true` → `/0001/` | ✓ Fixed in `compiler.rs`, `config.rs`, `node.html`, `transclusion.html` |
-| `<h1 id="identifier">` | Yes (from Typst `_summary_header`) | Not present |
-| Date formatted as long form | "September 22, 2023" | ISO 8601 "2023-09-22" in `<time>` |
-| `<li class="meta-item">` | Yes | Plain `<li>` |
-| `<address class="author">` | Yes | Plain `<address>` |
+| `<h1 id="identifier">` | Yes (from Typst `_summary_header`) | ✓ Fixed in `node.html`, `transclusion.html` |
+| Date formatted as long form | "September 22, 2023" | ✓ Fixed in `template.typ` (note: `<time>` wrapper still differs, handled in next entry) |
+| `<li class="meta-item">` | Yes | ✓ Fixed in `node.html`, `transclusion.html` |
+| `<address class="author">` | Yes | ✓ Fixed in `node.html`, `transclusion.html` |
 | Table of Contents | Full TOC sidebar | Not implemented |
 | `hide-metadata` class on transclusions | Yes, when `show_metadata=false` | Not present |
 | Transclusion title: bare `<h1>` without slug | Yes | Always full `<summary><header>` with slug |
@@ -423,3 +423,5 @@ Items where **v2 is cleaner than v1** (no need to replicate):
 - No `<html>` wrapper inside `<details>` (v1 artifact)
 - Unresolved transclusions produce a warning + placeholder rather than hard
   error
+
+TODO: Bibliography-Template is quite different, need to look into this
