@@ -256,6 +256,7 @@ impl BuildConfig {
             })?;
 
         environment.add_filter("demote_headings", filter_demote_headings);
+        environment.add_filter("disable_numbering", filter_disable_numbering);
 
         Ok(Self {
             root,
@@ -371,6 +372,13 @@ pub fn copy_directory_recursive(
 
 fn filter_demote_headings(html: String, levels: Option<u32>) -> String {
     demote_headings_html(html, levels.unwrap_or(1) as usize)
+}
+
+fn filter_disable_numbering(html: String) -> String {
+    let document = dom_query::Document::from(html.as_str());
+    let selection = document.select("h1, h2, h3, h4, h5, h6");
+    selection.add_class("disable-numbering");
+    document.select("body").inner_html().to_string()
 }
 
 // TODO: move this somewhere more appropriate
