@@ -34,7 +34,7 @@ impl Builder {
         let packages = SystemPackages::new(downloader);
         let file_loader = SystemFiles::new(FsRoot::new(config.input_directory.clone()), packages);
         let file_store = FileStore::new(file_loader);
-        let resources = Resources::default();
+        let resources = Resources::new(&config.inputs);
 
         Self {
             file_store,
@@ -86,9 +86,7 @@ impl Builder {
             compiler.compile(&world, id);
         }
 
-        compiler
-            .process(&self.config)?
-            .apply(&self.config)?;
+        compiler.process(&self.config)?.apply(&self.config)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
         let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;

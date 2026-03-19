@@ -52,7 +52,7 @@ impl Watcher {
 
         Self {
             file_store,
-            resources: Resources::default(),
+            resources: Resources::new(&config.inputs),
             import_graph: DiGraphMap::new(),
             compiler: Compiler::default(),
             config,
@@ -105,9 +105,7 @@ impl Watcher {
             update_dependencies(&mut self.import_graph, id, dependencies);
         }
 
-        self.compiler
-            .process(&self.config)?
-            .apply(&self.config)?;
+        self.compiler.process(&self.config)?.apply(&self.config)?;
         self.emit_diagnostics()?;
 
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
@@ -163,9 +161,7 @@ impl Watcher {
                 update_dependencies(&mut self.import_graph, id, dependencies);
             }
 
-            self.compiler
-                .process(&self.config)?
-                .apply(&self.config)?;
+            self.compiler.process(&self.config)?.apply(&self.config)?;
             self.emit_diagnostics()?;
 
             comemo::evict(10);

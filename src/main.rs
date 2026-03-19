@@ -27,9 +27,10 @@ fn main() -> ExitCode {
 fn dispatch(arguments: Arguments) -> anyhow::Result<()> {
     let Arguments {
         config_file,
+        inputs,
         command,
     } = arguments;
-    let config = BuildConfig::try_load(config_file)?;
+    let config = BuildConfig::try_load(config_file, inputs)?;
 
     match command {
         Command::Build => {

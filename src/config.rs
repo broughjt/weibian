@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs};
 
 use anyhow::anyhow;
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Parser, Subcommand, ValueHint, builder::ValueParser};
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -44,6 +45,16 @@ pub struct Arguments {
     )]
     pub config_file: Option<PathBuf>,
 
+    /// Pass a KEY=VALUE input to Typst via sys.inputs.
+    #[arg(
+        long = "input",
+        value_name = "KEY=VALUE",
+        action = ArgAction::Append,
+        value_parser = ValueParser::new(parse_system_input_pair),
+        global = true,
+    )]
+    pub inputs: Vec<(String, String)>,
+
     /// The command to run.
     #[command(subcommand)]
     pub command: Command,
@@ -72,6 +83,9 @@ pub struct WeibianConfig {
 
     #[serde(default)]
     pub site: SiteConfig,
+
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -109,6 +123,7 @@ pub struct SiteConfig {
     pub root_directory: Option<String>,
     pub trailing_slash: Option<bool>,
     pub index_node: Option<String>,
+    pub domain: Option<String>,
 }
 
 /// The fully resolved build configuration.
@@ -125,11 +140,16 @@ pub struct BuildConfig {
     pub root_directory: String,
     pub trailing_slash: bool,
     pub index_node: String,
+    pub domain: String,
+    pub inputs: HashMap<String, String>,
     pub environment: minijinja::Environment<'static>,
 }
 
 impl BuildConfig {
-    pub fn try_load(config_file: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn try_load(
+        config_file: Option<PathBuf>,
+        cli_inputs: Vec<(String, String)>,
+    ) -> anyhow::Result<Self> {
         let (root, config) = load_config(config_file)?;
 
         let input_directory = config
@@ -156,7 +176,21 @@ impl BuildConfig {
 
         let root_directory = normalize_root_directory(config.site.root_directory.as_deref());
         let trailing_slash = config.site.trailing_slash.unwrap_or(false);
-        let index_node = config.site.index_node.unwrap_or_else(|| "index".to_string());
+        let index_node = config
+            .site
+            .index_node
+            .unwrap_or_else(|| "index".to_string());
+        let domain = config.site.domain.unwrap_or_default();
+
+        let mut inputs: HashMap<String, String> = config.inputs;
+
+        inputs.extend(cli_inputs);
+
+        // Compiler-generated wb-* keys always win.
+        inputs.insert("wb-domain".into(), domain.clone());
+        inputs.insert("wb-root-directory".into(), root_directory.clone());
+        inputs.insert("wb-trailing-slash".into(), trailing_slash.to_string());
+        inputs.insert("wb-target".into(), "html".into());
 
         let node_template_path = if config.templates.node.is_absolute() {
             config.templates.node
@@ -233,6 +267,8 @@ impl BuildConfig {
             root_directory,
             trailing_slash,
             index_node,
+            domain,
+            inputs,
             environment,
         })
     }
@@ -342,15 +378,33 @@ fn demote_headings_html(html: String, levels: usize) -> String {
     if levels == 0 {
         return html;
     }
+
     let document = dom_query::Document::from(html.as_str());
+
     for n in (1u8..=6).rev() {
         let m = (n as usize + levels).min(6) as u8;
         if m == n {
             continue;
         }
-        document.select(&format!("h{n}")).rename(&format!("h{m}"));
+
+        let selection = document.select(&format!("h{n}"));
+
+        selection.rename(&format!("h{m}"));
+        selection.set_attr("data-demoted", &levels.to_string());
     }
+
     document.select("body").inner_html().to_string()
+}
+
+fn parse_system_input_pair(s: &str) -> Result<(String, String), clap::Error> {
+    s.split_once('=')
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("--input value must be KEY=VALUE, got: {s:?}\n"),
+            )
+        })
 }
 
 fn normalize_root_directory(raw: Option<&str>) -> String {

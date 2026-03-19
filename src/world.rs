@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 use typst::diag::FileResult;
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Duration, IntoValue};
 use typst::syntax::{FileId, Source, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -21,13 +21,19 @@ pub struct Resources {
     pub fonts: FontStore,
 }
 
-impl Default for Resources {
-    fn default() -> Self {
+impl Resources {
+    pub fn new(inputs: &HashMap<String, String>) -> Self {
         let mut fonts = FontStore::new();
         fonts.extend(typst_kit::fonts::embedded());
         fonts.extend(typst_kit::fonts::system());
 
         let library = Library::builder()
+            .with_inputs(
+                inputs
+                    .iter()
+                    .map(|(k, v)| (k.as_str().into(), v.as_str().into_value()))
+                    .collect(),
+            )
             .with_features(Features::from_iter([Feature::Html]))
             .build();
 
