@@ -338,6 +338,7 @@ impl Compiler {
             root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
             trailing_slash => config.trailing_slash,
             index_node => config.index_node.as_str(),
+            domain => config.domain.as_str(),
         };
 
         let transclusion_template = config
