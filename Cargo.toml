@@ -27,3 +27,6 @@ termcolor = "1.4.1"
 walkdir = "2.5.0"
 dom_query = "0.26.0"
 minijinja = "2"
+
+[dev-dependencies]
+proptest = "1"
