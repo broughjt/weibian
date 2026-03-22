@@ -58,10 +58,22 @@ impl Compiler {
         let nodes_result = result.and_then(|html_document| {
             typst_html::html(&html_document).and_then(|content| {
                 let document = Document::from(content);
+                let (spans, span_errors) = collect_node_spans(&html_document);
+                let (metadata, transclusion_metadata, link_metadata, meta_errors) =
+                    collect_metadata(html_document.introspector().as_ref(), &spans);
+                let mut errors = span_errors;
+                errors.extend(meta_errors);
 
-                extract(&html_document, document, &mut self.interner, |id| {
-                    self.nodes.contains_key(&id)
-                })
+                extract(
+                    spans,
+                    metadata,
+                    transclusion_metadata,
+                    link_metadata,
+                    errors,
+                    document,
+                    &mut self.interner,
+                    |id| self.nodes.contains_key(&id),
+                )
             })
         });
 
@@ -630,6 +642,11 @@ type ExtractData = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
 
 /// Parses `document` into a map of node IDs to node entries.
 ///
+/// `spans`, `metadata`, `transclusion_metadata`, and `link_metadata` must be
+/// pre-computed from the source [`HtmlDocument`] via [`collect_node_spans`] and
+/// [`collect_metadata`]. Any diagnostics they produced should be passed in as
+/// `errors`; further errors are appended to that collection.
+///
 /// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
 /// side effect of extraction. `node_exists` is called to detect cross-file
 /// duplicate identifiers.
@@ -637,15 +654,15 @@ type ExtractData = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
 fn extract(
-    html_document: &HtmlDocument,
+    spans: HashMap<String, Span>,
+    mut metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    mut transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    mut link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    mut errors: EcoVec<SourceDiagnostic>,
     document: Document,
     interner: &mut NodeInterner,
     node_exists: impl Fn(NodeId) -> bool,
 ) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
-    let mut errors = EcoVec::new();
-    let spans = collect_node_spans(html_document, &mut errors);
-    let (mut metadata, mut transclusion_metadata, mut link_metadata) =
-        collect_metadata(html_document.introspector().as_ref(), &spans, &mut errors);
     let mut nodes = HashMap::with_capacity(spans.len());
     let mut synthetic_counter: u32 = transclusion_metadata.keys().copied().max().map_or(0, |m| {
         m.checked_add(1).expect("transclusion counter overflow")
@@ -944,14 +961,15 @@ fn extract_node_content(
 fn collect_metadata<I: Introspector>(
     introspector: &I,
     spans: &HashMap<String, Span>,
-    errors: &mut EcoVec<SourceDiagnostic>,
 ) -> (
     HashMap<String, HashMap<String, Vec<String>>>,
     HashMap<u32, HashMap<String, Vec<String>>>,
     HashMap<u32, HashMap<String, Vec<String>>>,
+    EcoVec<SourceDiagnostic>,
 ) {
     let selector = MetadataElem::ELEM.select();
     let items = introspector.query(&selector);
+    let mut errors = EcoVec::new();
     let mut node_result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
     let mut transclusion_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
     let mut link_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
@@ -1094,7 +1112,7 @@ fn collect_metadata<I: Introspector>(
         }
     }
 
-    (node_result, transclusion_result, link_result)
+    (node_result, transclusion_result, link_result, errors)
 }
 
 /// Converts a Typst metadata dict into a `HashMap<String, Vec<String>>`,
@@ -1139,13 +1157,13 @@ fn normalize_metadata(dictionary: &Dict) -> HashMap<String, Vec<String>> {
 /// plus errors for any duplicate identifiers found within the document.
 fn collect_node_spans(
     document: &HtmlDocument,
-    errors: &mut EcoVec<SourceDiagnostic>,
-) -> HashMap<String, Span> {
+) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
     let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
     let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
 
     let mut spans = HashMap::new();
+    let mut errors = EcoVec::new();
     let mut stack = vec![document.root()];
 
     while let Some(element) = stack.pop() {
@@ -1171,5 +1189,5 @@ fn collect_node_spans(
         }
     }
 
-    spans
+    (spans, errors)
 }
