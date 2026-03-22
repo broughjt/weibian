@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -39,7 +42,7 @@ impl Compiler {
     ///
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
-    pub fn update<C: Compile>(&mut self, compiler: &C, id: FileId) {
+    pub fn update<C: Compile>(&mut self, compiler: C, id: FileId) {
         // Orphan all nodes from the previous compilation; nodes that reappear
         // are de-orphaned in the `Ok` branch below.
         self.remove(id);
@@ -530,12 +533,12 @@ pub trait Compile {
     fn compile(&self, id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
 }
 
-impl<W: World> Compile for W {
+impl<W: World> Compile for &W {
     fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let Warned {
             output: result,
             mut warnings,
-        } = typst::compile::<HtmlDocument>(self);
+        } = typst::compile::<HtmlDocument>(*self);
 
         // Discard warnings about html being an unstable feature, html is kind
         // of the whole game here
