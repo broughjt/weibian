@@ -39,43 +39,18 @@ impl Compiler {
     ///
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
-    pub fn compile<W: World>(&mut self, world: &W, id: FileId) {
+    pub fn update<C: Compile>(&mut self, compiler: &C, id: FileId) {
         // Orphan all nodes from the previous compilation; nodes that reappear
         // are de-orphaned in the `Ok` branch below.
         self.remove(id);
 
         let Warned {
             output: result,
-            mut warnings,
-        } = typst::compile::<HtmlDocument>(world);
+            warnings,
+        } = compiler.compile(id);
 
-        // Discard warnings about html being an unstable feature, html is kind
-        // of the whole game here
-        warnings.retain(|diagnostic: &mut SourceDiagnostic| {
-            !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
-        });
-
-        let nodes_result = result.and_then(|html_document| {
-            typst_html::html(&html_document).and_then(|content| {
-                let document = Document::from(content);
-                let (spans, span_errors) = collect_node_spans(&html_document);
-                let (metadata, transclusion_metadata, link_metadata, meta_errors) =
-                    collect_metadata(html_document.introspector().as_ref(), &spans);
-                let mut errors = span_errors;
-                errors.extend(meta_errors);
-
-                extract(
-                    spans,
-                    metadata,
-                    transclusion_metadata,
-                    link_metadata,
-                    errors,
-                    document,
-                    &mut self.interner,
-                    |id| self.nodes.contains_key(&id),
-                )
-            })
-        });
+        let nodes_result = result
+            .and_then(|output| extract(output, &mut self.interner, |id| self.nodes.contains_key(&id)));
 
         match nodes_result {
             Ok(nodes) => {
@@ -530,6 +505,67 @@ impl Compiler {
     }
 }
 
+/// The output of a successful file compilation.
+pub struct CompileOutput {
+    /// The HTML body of the compiled file.
+    pub html: String,
+    /// Spans for each node identifier within the document, used for diagnostic reporting.
+    pub spans: HashMap<String, Span>,
+    /// Node metadata keyed by node identifier.
+    pub metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    /// Transclusion metadata keyed by counter.
+    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    /// Link metadata keyed by counter.
+    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    /// Diagnostics collected during span and metadata extraction.
+    pub errors: EcoVec<SourceDiagnostic>,
+}
+
+/// Compiles a source file into [`CompileOutput`].
+///
+/// The `id` parameter identifies which file is being compiled. Implementations
+/// backed by a Typst [`World`] may ignore it since the world already encodes
+/// the target file; test implementations use it to look up canned output.
+pub trait Compile {
+    fn compile(&self, id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
+}
+
+impl<W: World> Compile for W {
+    fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
+        let Warned {
+            output: result,
+            mut warnings,
+        } = typst::compile::<HtmlDocument>(self);
+
+        // Discard warnings about html being an unstable feature, html is kind
+        // of the whole game here
+        warnings.retain(|diagnostic: &mut SourceDiagnostic| {
+            !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
+        });
+
+        let output = result.and_then(|html_document| {
+            typst_html::html(&html_document).map(|html| {
+                let (spans, span_errors) = collect_node_spans(&html_document);
+                let (metadata, transclusion_metadata, link_metadata, meta_errors) =
+                    collect_metadata(html_document.introspector().as_ref(), &spans);
+                let mut errors = span_errors;
+                errors.extend(meta_errors);
+
+                CompileOutput {
+                    html,
+                    spans,
+                    metadata,
+                    transclusion_metadata,
+                    link_metadata,
+                    errors,
+                }
+            })
+        });
+
+        Warned { output, warnings }
+    }
+}
+
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub struct NodeId(u32);
 
@@ -571,6 +607,8 @@ pub struct NodeEntry {
     pub title: String,
     pub title_text: String,
     pub span: Span,
+    // TODO: Should we intern metadata strings and output? Is that nuts? Would
+    // it cause incorrectness?
     pub metadata: HashMap<String, Vec<String>>,
     pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
@@ -638,14 +676,9 @@ impl OutputPlan {
     }
 }
 
-type ExtractData = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
+type ExtractOutput = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
 
-/// Parses `document` into a map of node IDs to node entries.
-///
-/// `spans`, `metadata`, `transclusion_metadata`, and `link_metadata` must be
-/// pre-computed from the source [`HtmlDocument`] via [`collect_node_spans`] and
-/// [`collect_metadata`]. Any diagnostics they produced should be passed in as
-/// `errors`; further errors are appended to that collection.
+/// Parses the HTML in `output` into a map of node IDs to node entries.
 ///
 /// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
 /// side effect of extraction. `node_exists` is called to detect cross-file
@@ -654,15 +687,19 @@ type ExtractData = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
 fn extract(
-    spans: HashMap<String, Span>,
-    mut metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    mut transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    mut link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    mut errors: EcoVec<SourceDiagnostic>,
-    document: Document,
+    output: CompileOutput,
     interner: &mut NodeInterner,
     node_exists: impl Fn(NodeId) -> bool,
-) -> Result<HashMap<NodeId, ExtractData>, EcoVec<SourceDiagnostic>> {
+) -> Result<HashMap<NodeId, ExtractOutput>, EcoVec<SourceDiagnostic>> {
+    let CompileOutput {
+        html,
+        spans,
+        mut metadata,
+        mut transclusion_metadata,
+        mut link_metadata,
+        mut errors,
+    } = output;
+    let document = Document::from(html);
     let mut nodes = HashMap::with_capacity(spans.len());
     let mut synthetic_counter: u32 = transclusion_metadata.keys().copied().max().map_or(0, |m| {
         m.checked_add(1).expect("transclusion counter overflow")
@@ -808,7 +845,7 @@ fn extract_node_content(
     transclusion_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     link_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> Option<(String, ExtractData)> {
+) -> Option<(String, ExtractOutput)> {
     let Some(identifier) = element.attr("identifier") else {
         errors.push(SourceDiagnostic::error(
             Span::detached(),
