@@ -15,7 +15,7 @@ use typst::syntax::{FileId, Span};
 
 proptest! {
     #[test]
-    fn compile_scratch_equal_compile_incremental(events in arbitrary_events(&EventConfig::default())) {
+    fn compile_scratch_equal_compile_incremental(events in arbitrary_events(&EventConfig::from_environment())) {
         let config = render_config();
 
         let scratch = {
@@ -110,13 +110,21 @@ struct EventConfig {
     max_links: usize,
 }
 
-impl Default for EventConfig {
-    fn default() -> Self {
+impl EventConfig {
+    fn from_environment() -> Self {
         Self {
-            pool_size: 1..=8,
-            sequence_length: 1..=16,
-            max_transcludes: 3,
-            max_links: 3,
+            pool_size: std::env::var("TEST_POOL_SIZE").ok().as_deref()
+                .map(parse_size_range)
+                .unwrap_or(1..=8),
+            sequence_length: std::env::var("TEST_SEQUENCE_LENGTH").ok().as_deref()
+                .map(parse_size_range)
+                .unwrap_or(1..=16),
+            max_transcludes: std::env::var("TEST_MAX_TRANSCLUDES").ok()
+                .map(|s| s.parse().expect("TEST_MAX_TRANSCLUDES must be a number"))
+                .unwrap_or(3),
+            max_links: std::env::var("TEST_MAX_LINKS").ok()
+                .map(|s| s.parse().expect("TEST_MAX_LINKS must be a number"))
+                .unwrap_or(3),
         }
     }
 }
@@ -172,6 +180,19 @@ fn arbitrary_events(config: &EventConfig) -> impl Strategy<Value = Vec<Event>> {
 
         vec(arbitrary_event(nodes, config), length)
     })
+}
+
+fn parse_size_range(s: &str) -> RangeInclusive<usize> {
+    if let Some((lo, hi)) = s.split_once("..") {
+        let lo = lo.parse().expect("invalid lower bound in size range");
+        let hi = hi.parse().expect("invalid upper bound in size range");
+        lo..=hi
+    } else {
+        let n = s
+            .parse()
+            .expect("TEST_* size value must be a number or range");
+        n..=n
+    }
 }
 
 fn reduce_events(events: &[Event]) -> HashMap<NonZeroU16, &MockNode> {
