@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc feb9ef35c7c900ab88cefebbc3c2139b565a2e7aba55a3b468d3cc818585e07b # shrinks to _universe = ()
+cc 5b9c469e369cea2dbdf40e1104be16b8008db9cb3b8e160036181652885c5fc9 # shrinks to events = [Update(5113, MockNode { id: 5113, title: "a", body: "", transcludes: [19886], links: [] }), Update(19886, MockNode { id: 19886, title: "a", body: "", transcludes: [5113], links: [] })]

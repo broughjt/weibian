@@ -224,15 +224,35 @@ fn file_id(id: NonZeroU16) -> FileId {
 }
 
 fn render_config() -> RenderConfig {
+    let node_template = "{{ node.body | safe }}".to_string();
+    let transclusion_template = concat!(
+        "{%- if transclusion.resolved -%}",
+        "{{ transclusion.body | safe }}",
+        "{%- else -%}",
+        r#"<wb-missing identifier="{{ transclusion.identifier }}"></wb-missing>"#,
+        "{%- endif -%}",
+    )
+    .to_string();
+    let link_template = concat!(
+        "{%- if link.resolved -%}",
+        r#"<span class="link local"><a href="{{ link.href }}">"#,
+        "{%- if link.content %}{{ link.content | safe }}{%- else %}{{ link.title | safe }}{%- endif %}",
+        "</a></span>",
+        "{%- else -%}",
+        r#"<span class="link local"><a href="{{ link.href }}">{{ link.content | safe }}</a></span>"#,
+        "{%- endif -%}",
+    )
+    .to_string();
+
     let mut environment = minijinja::Environment::new();
     environment
-        .add_template_owned(NODE_TEMPLATE, String::new())
+        .add_template_owned(NODE_TEMPLATE, node_template)
         .unwrap();
     environment
-        .add_template_owned(TRANSCLUSION_TEMPLATE, String::new())
+        .add_template_owned(TRANSCLUSION_TEMPLATE, transclusion_template)
         .unwrap();
     environment
-        .add_template_owned(LINK_TEMPLATE, String::new())
+        .add_template_owned(LINK_TEMPLATE, link_template)
         .unwrap();
     RenderConfig {
         root_directory: "/".to_string(),
