@@ -5,10 +5,43 @@ use std::num::NonZeroU16;
 use proptest::prelude::*;
 use proptest::sample::subsequence;
 
-use crate::compiler::{Compile, CompileOutput};
+use crate::compiler::{Compile, CompileOutput, Compiler, OutputPlan};
+use crate::config::{LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE};
 use ecow::EcoVec;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
+
+proptest! {
+    #[test]
+    fn compile_scratch_equal_compile_incremental(events in arbitrary_events()) {
+        let config = test_render_config();
+
+        let scratch = {
+            let mut compiler = Compiler::default();
+            for (id, node) in reduce_events(&events) {
+                compiler.update(node, file_id(id));
+            }
+            let mut files = HashMap::new();
+            apply(compiler.process(&config).unwrap(), &mut files);
+            files
+        };
+
+        let incremental = {
+            let mut compiler = Compiler::default();
+            let mut files = HashMap::new();
+            for event in &events {
+                match event {
+                    Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                    Event::Remove(id) => compiler.remove(file_id(*id)),
+                }
+                apply(compiler.process(&config).unwrap(), &mut files);
+            }
+            files
+        };
+
+        prop_assert_eq!(scratch, incremental);
+    }
+}
 
 /// A single mock file: one primary node with edges to other nodes by ID.
 #[derive(Debug, Clone)]
@@ -26,8 +59,7 @@ enum Event {
     Remove(NonZeroU16),
 }
 
-// TODO: Prolly impelement instead for (NonZeroU16, MockNode) pairs, not sure yet
-impl Compile for MockNode {
+impl Compile for &MockNode {
     fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let node_id = format_id(self.id);
 
@@ -71,10 +103,11 @@ impl Compile for MockNode {
 
 fn arbitrary_mock_node(
     id: NonZeroU16,
-    nodes: Cow<'static, [NonZeroU16]>,
+    pool: Cow<'static, [NonZeroU16]>,
 ) -> impl Strategy<Value = MockNode> {
-    let transcludes = subsequence(nodes.clone(), 0..=3);
-    let links = subsequence(nodes, 0..=3);
+    let max_edges = pool.len().min(3);
+    let transcludes = subsequence(pool.clone(), 0..=max_edges);
+    let links = subsequence(pool, 0..=max_edges);
 
     ("[a-z]+", "[a-z]*", transcludes, links).prop_map(move |(title, body, transcludes, links)| {
         MockNode {
@@ -91,17 +124,47 @@ fn reduce_events(events: &[Event]) -> HashMap<NonZeroU16, &MockNode> {
     let mut result = HashMap::new();
     for event in events {
         match event {
-            Event::Update(id, node) => { result.insert(*id, node); }
-            Event::Remove(id) => { result.remove(id); }
+            Event::Update(id, node) => {
+                result.insert(*id, node);
+            }
+            Event::Remove(id) => {
+                result.remove(id);
+            }
         }
     }
     result
 }
 
-proptest! {
-    #[test]
-    fn compile_scratch_equal_compile_incremental(_events in arbitrary_events()) {
-        todo!("implement scratch vs incremental comparison")
+fn apply(plan: OutputPlan, fs: &mut HashMap<String, String>) {
+    for (k, v) in plan.writes {
+        fs.insert(k, v);
+    }
+    for k in plan.deletes {
+        fs.remove(&k);
+    }
+}
+
+fn file_id(id: NonZeroU16) -> FileId {
+    FileId::from_raw(id)
+}
+
+fn test_render_config() -> RenderConfig {
+    let mut environment = minijinja::Environment::new();
+    environment
+        .add_template_owned(NODE_TEMPLATE, String::new())
+        .unwrap();
+    environment
+        .add_template_owned(TRANSCLUSION_TEMPLATE, String::new())
+        .unwrap();
+    environment
+        .add_template_owned(LINK_TEMPLATE, String::new())
+        .unwrap();
+    RenderConfig {
+        root_directory: "/".to_string(),
+        trailing_slash: false,
+        index_node: "index".to_string(),
+        domain: String::new(),
+        environment,
     }
 }
 
@@ -110,25 +173,20 @@ fn arbitrary_remove(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = E
 }
 
 fn arbitrary_update(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
-    proptest::sample::select(pool.clone())
-        .prop_flat_map(move |id| {
-            arbitrary_mock_node(id, pool.clone()).prop_map(move |node| Event::Update(id, node))
-        })
+    proptest::sample::select(pool.clone()).prop_flat_map(move |id| {
+        arbitrary_mock_node(id, pool.clone()).prop_map(move |node| Event::Update(id, node))
+    })
 }
 
 fn arbitrary_event(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
-    prop_oneof![
-        arbitrary_update(pool.clone()),
-        arbitrary_remove(pool),
-    ]
+    prop_oneof![arbitrary_update(pool.clone()), arbitrary_remove(pool),]
 }
 
 fn arbitrary_events() -> impl Strategy<Value = Vec<Event>> {
-    proptest::collection::hash_set(any::<NonZeroU16>(), 1..=8)
-        .prop_flat_map(|ids| {
-            let pool: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
-            proptest::collection::vec(arbitrary_event(pool), 1..=16)
-        })
+    proptest::collection::hash_set(any::<NonZeroU16>(), 1..=8).prop_flat_map(|ids| {
+        let pool: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
+        proptest::collection::vec(arbitrary_event(pool), 1..=16)
+    })
 }
 
 fn format_id(id: NonZeroU16) -> String {
