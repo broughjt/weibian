@@ -105,8 +105,30 @@ proptest! {
     }
 }
 
+fn arbitrary_remove(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
+    proptest::sample::select(pool).prop_map(Event::Remove)
+}
+
+fn arbitrary_update(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
+    proptest::sample::select(pool.clone())
+        .prop_flat_map(move |id| {
+            arbitrary_mock_node(id, pool.clone()).prop_map(move |node| Event::Update(id, node))
+        })
+}
+
+fn arbitrary_event(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
+    prop_oneof![
+        arbitrary_update(pool.clone()),
+        arbitrary_remove(pool),
+    ]
+}
+
 fn arbitrary_events() -> impl Strategy<Value = Vec<Event>> {
-    Just(vec![])
+    proptest::collection::hash_set(any::<NonZeroU16>(), 1..=8)
+        .prop_flat_map(|ids| {
+            let pool: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
+            proptest::collection::vec(arbitrary_event(pool), 1..=16)
+        })
 }
 
 fn format_id(id: NonZeroU16) -> String {
