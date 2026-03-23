@@ -126,6 +126,28 @@ pub struct SiteConfig {
     pub domain: Option<String>,
 }
 
+/// The subset of configuration used by [`crate::compiler::Compiler::process`]
+/// to render node HTML. Separated so tests can construct a minimal config
+/// without touching the filesystem.
+#[derive(Debug)]
+pub struct RenderConfig {
+    pub root_directory: String,
+    pub trailing_slash: bool,
+    pub index_node: String,
+    pub domain: String,
+    pub environment: minijinja::Environment<'static>,
+}
+
+impl RenderConfig {
+    pub fn href(&self, id: &str) -> String {
+        if self.trailing_slash {
+            format!("{}{id}/", self.root_directory)
+        } else {
+            format!("{}{id}.html", self.root_directory)
+        }
+    }
+}
+
 /// The fully resolved build configuration.
 #[derive(Debug)]
 pub struct BuildConfig {
@@ -137,12 +159,8 @@ pub struct BuildConfig {
     pub public_directory: Option<PathBuf>,
     pub include: GlobSet,
     pub exclude: GlobSet,
-    pub root_directory: String,
-    pub trailing_slash: bool,
-    pub index_node: String,
-    pub domain: String,
     pub inputs: HashMap<String, String>,
-    pub environment: minijinja::Environment<'static>,
+    pub render: RenderConfig,
 }
 
 impl BuildConfig {
@@ -265,25 +283,19 @@ impl BuildConfig {
             public_directory,
             include,
             exclude: config.files.exclude,
-            root_directory,
-            trailing_slash,
-            index_node,
-            domain,
             inputs,
-            environment,
+            render: RenderConfig {
+                root_directory,
+                trailing_slash,
+                index_node,
+                domain,
+                environment,
+            },
         })
     }
 
-    pub fn href(&self, id: &str) -> String {
-        if self.trailing_slash {
-            format!("{}{id}/", self.root_directory)
-        } else {
-            format!("{}{id}.html", self.root_directory)
-        }
-    }
-
     pub fn output_path(&self, id: &str) -> PathBuf {
-        if self.trailing_slash && id != self.index_node {
+        if self.render.trailing_slash && id != self.render.index_node {
             self.output_directory.join(id).join("index.html")
         } else {
             self.output_directory.join(format!("{id}.html"))

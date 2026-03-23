@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
 
-use crate::config::{BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
+use crate::config::{BuildConfig, RenderConfig, LINK_TEMPLATE, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
@@ -128,7 +128,7 @@ impl Compiler {
 
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
     /// the output directory, and clears the dirty and removed sets.
-    pub fn process(&mut self, config: &BuildConfig) -> anyhow::Result<OutputPlan> {
+    pub fn process(&mut self, config: &RenderConfig) -> anyhow::Result<OutputPlan> {
         if self.dirty.is_empty() && self.removed.is_empty() {
             return Ok(OutputPlan {
                 writes: HashMap::new(),

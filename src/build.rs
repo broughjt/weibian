@@ -86,7 +86,7 @@ impl Builder {
             compiler.update(&world, id);
         }
 
-        compiler.process(&self.config)?.apply(&self.config)?;
+        compiler.process(&self.config.render)?.apply(&self.config)?;
 
         let mut stderr = StandardStream::stderr(ColorChoice::Auto);
         let has_errors = self.emit_diagnostics(&mut stderr, &compiler)?;
