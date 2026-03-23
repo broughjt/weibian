@@ -15,12 +15,44 @@ use typst::syntax::{FileId, Span};
 
 proptest! {
     #[test]
+    fn compile_scratch_equal_compile_batched(batches in arbitrary_event_batches(&EventConfig::from_environment())) {
+        let config = render_config();
+
+        let scratch = {
+            let mut compiler = Compiler::default();
+            for (id, node) in reduce_events(batches.iter().flatten()) {
+                compiler.update(node, file_id(id));
+            }
+            let mut files = HashMap::new();
+            apply(compiler.process(&config).unwrap(), &mut files);
+            files
+        };
+
+        let incremental = {
+            let mut compiler = Compiler::default();
+            let mut files = HashMap::new();
+            for batch in &batches {
+                for event in batch {
+                    match event {
+                        Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                        Event::Remove(id) => compiler.remove(file_id(*id)),
+                    }
+                }
+                apply(compiler.process(&config).unwrap(), &mut files);
+            }
+            files
+        };
+
+        prop_assert_eq!(scratch, incremental);
+    }
+
+    #[test]
     fn compile_scratch_equal_compile_incremental(events in arbitrary_events(&EventConfig::from_environment())) {
         let config = render_config();
 
         let scratch = {
             let mut compiler = Compiler::default();
-            for (id, node) in reduce_events(&events) {
+            for (id, node) in reduce_events(events.iter()) {
                 compiler.update(node, file_id(id));
             }
             let mut files = HashMap::new();
@@ -106,6 +138,7 @@ enum Event {
 struct EventConfig {
     pool_size: RangeInclusive<usize>,
     sequence_length: RangeInclusive<usize>,
+    batch_count: RangeInclusive<usize>,
     max_transcludes: usize,
     max_links: usize,
 }
@@ -119,6 +152,9 @@ impl EventConfig {
             sequence_length: std::env::var("TEST_SEQUENCE_LENGTH").ok().as_deref()
                 .map(parse_size_range)
                 .unwrap_or(1..=16),
+            batch_count: std::env::var("TEST_BATCH_COUNT").ok().as_deref()
+                .map(parse_size_range)
+                .unwrap_or(1..=4),
             max_transcludes: std::env::var("TEST_MAX_TRANSCLUDES").ok()
                 .map(|s| s.parse().expect("TEST_MAX_TRANSCLUDES must be a number"))
                 .unwrap_or(3),
@@ -173,6 +209,16 @@ fn arbitrary_event(
     ]
 }
 
+fn arbitrary_event_batches(config: &EventConfig) -> impl Strategy<Value = Vec<Vec<Event>>> {
+    hash_set(any::<NonZeroU16>(), config.pool_size.clone()).prop_flat_map(move |ids| {
+        let nodes: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
+        let batch_count = config.batch_count.clone();
+        let batch_length = config.sequence_length.clone();
+
+        vec(vec(arbitrary_event(nodes, config), batch_length), batch_count)
+    })
+}
+
 fn arbitrary_events(config: &EventConfig) -> impl Strategy<Value = Vec<Event>> {
     hash_set(any::<NonZeroU16>(), config.pool_size.clone()).prop_flat_map(move |ids| {
         let nodes: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
@@ -195,7 +241,7 @@ fn parse_size_range(s: &str) -> RangeInclusive<usize> {
     }
 }
 
-fn reduce_events(events: &[Event]) -> HashMap<NonZeroU16, &MockNode> {
+fn reduce_events<'a>(events: impl Iterator<Item = &'a Event>) -> HashMap<NonZeroU16, &'a MockNode> {
     let mut result = HashMap::new();
     for event in events {
         match event {
