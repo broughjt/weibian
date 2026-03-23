@@ -20,7 +20,7 @@ proptest! {
         let scratch = {
             let mut compiler = Compiler::default();
             for (id, node) in reduce_events(&events) {
-                compiler.update(node, file_id(id));
+                compiler.update(node.clone(), file_id(id));
             }
             let mut files = HashMap::new();
             apply(compiler.process(&config).unwrap(), &mut files);
@@ -32,7 +32,7 @@ proptest! {
             let mut files = HashMap::new();
             for event in &events {
                 match event {
-                    Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                    Event::Update(id, node) => compiler.update(node.clone(), file_id(*id)),
                     Event::Remove(id) => compiler.remove(file_id(*id)),
                 }
                 apply(compiler.process(&config).unwrap(), &mut files);
@@ -54,7 +54,7 @@ struct MockNode {
     links: Vec<NonZeroU16>,
 }
 
-impl Compile for &MockNode {
+impl Compile for MockNode {
     fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let node_id = format_id(self.id);
 

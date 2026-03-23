@@ -533,12 +533,15 @@ pub trait Compile {
     fn compile(&self, id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
 }
 
-impl<W: World> Compile for &W {
+/// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
+pub struct TypstCompile<W>(pub W);
+
+impl<W: World> Compile for TypstCompile<W> {
     fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let Warned {
             output: result,
             mut warnings,
-        } = typst::compile::<HtmlDocument>(*self);
+        } = typst::compile::<HtmlDocument>(&self.0);
 
         // Discard warnings about html being an unstable feature, html is kind
         // of the whole game here

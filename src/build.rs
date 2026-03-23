@@ -11,7 +11,7 @@ use typst_syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use walkdir::WalkDir;
 
 use crate::{
-    compiler::Compiler,
+    compiler::{Compiler, TypstCompile},
     config::{BuildConfig, copy_directory_recursive},
     file_store::FileStore,
     world::{Resources, SystemWorld},
@@ -83,7 +83,7 @@ impl Builder {
             let id = result?;
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
 
-            compiler.update(&world, id);
+            compiler.update(TypstCompile(&world), id);
         }
 
         compiler.process(&self.config.render)?.apply(&self.config)?;
