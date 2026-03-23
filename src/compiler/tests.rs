@@ -212,10 +212,23 @@ fn arbitrary_event(
 fn arbitrary_event_batches(config: &EventConfig) -> impl Strategy<Value = Vec<Vec<Event>>> {
     hash_set(any::<NonZeroU16>(), config.pool_size.clone()).prop_flat_map(move |ids| {
         let nodes: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
+        let length = config.sequence_length.clone();
         let batch_count = config.batch_count.clone();
-        let batch_length = config.sequence_length.clone();
 
-        vec(vec(arbitrary_event(nodes, config), batch_length), batch_count)
+        (vec(arbitrary_event(nodes, config), length), batch_count).prop_flat_map(|(events, k)| {
+            let n = events.len();
+            vec(0..=n, k.saturating_sub(1)).prop_map(move |mut points| {
+                points.sort_unstable();
+                let mut batches = Vec::with_capacity(k);
+                let mut prev = 0;
+                for point in points {
+                    batches.push(events[prev..point].to_vec());
+                    prev = point;
+                }
+                batches.push(events[prev..].to_vec());
+                batches
+            })
+        })
     })
 }
 
