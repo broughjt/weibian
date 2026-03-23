@@ -98,7 +98,7 @@ impl Watcher {
             let world =
                 DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-            self.compiler.update(TypstCompile(&world), id);
+            self.compiler.update(&TypstCompile(&world), id);
 
             let (_, dependencies) = world.into_inner();
 
@@ -154,7 +154,7 @@ impl Watcher {
                 let world =
                     DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-                self.compiler.update(TypstCompile(&world), id);
+                self.compiler.update(&TypstCompile(&world), id);
 
                 let (_, dependencies) = world.into_inner();
 

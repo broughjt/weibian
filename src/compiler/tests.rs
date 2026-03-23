@@ -20,7 +20,7 @@ proptest! {
         let scratch = {
             let mut compiler = Compiler::default();
             for (id, node) in reduce_events(&events) {
-                compiler.update(node.clone(), file_id(id));
+                compiler.update(node, file_id(id));
             }
             let mut files = HashMap::new();
             apply(compiler.process(&config).unwrap(), &mut files);
@@ -32,7 +32,7 @@ proptest! {
             let mut files = HashMap::new();
             for event in &events {
                 match event {
-                    Event::Update(id, node) => compiler.update(node.clone(), file_id(*id)),
+                    Event::Update(id, node) => compiler.update(node, file_id(*id)),
                     Event::Remove(id) => compiler.remove(file_id(*id)),
                 }
                 apply(compiler.process(&config).unwrap(), &mut files);

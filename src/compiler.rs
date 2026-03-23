@@ -42,7 +42,7 @@ impl Compiler {
     ///
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
-    pub fn update<C: Compile>(&mut self, compiler: C, id: FileId) {
+    pub fn update<C: Compile>(&mut self, compiler: &C, id: FileId) {
         // Orphan all nodes from the previous compilation; nodes that reappear
         // are de-orphaned in the `Ok` branch below.
         self.remove(id);

@@ -83,7 +83,7 @@ impl Builder {
             let id = result?;
             let world = SystemWorld::new(id, &self.resources, &self.file_store);
 
-            compiler.update(TypstCompile(&world), id);
+            compiler.update(&TypstCompile(&world), id);
         }
 
         compiler.process(&self.config.render)?.apply(&self.config)?;
