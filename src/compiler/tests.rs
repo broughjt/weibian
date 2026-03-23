@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::ops::RangeInclusive;
 
+use proptest::collection::{hash_set, vec};
 use proptest::prelude::*;
 use proptest::sample::subsequence;
 
@@ -14,8 +15,8 @@ use typst::syntax::{FileId, Span};
 
 proptest! {
     #[test]
-    fn compile_scratch_equal_compile_incremental(events in arbitrary_events(EventConfig::default())) {
-        let config = test_render_config();
+    fn compile_scratch_equal_compile_incremental(events in arbitrary_events(&EventConfig::default())) {
+        let config = render_config();
 
         let scratch = {
             let mut compiler = Compiler::default();
@@ -102,7 +103,6 @@ enum Event {
     Remove(NonZeroU16),
 }
 
-#[derive(Clone)]
 struct EventConfig {
     pool_size: RangeInclusive<usize>,
     sequence_length: RangeInclusive<usize>,
@@ -123,13 +123,13 @@ impl Default for EventConfig {
 
 fn arbitrary_mock_node(
     id: NonZeroU16,
-    pool: Cow<'static, [NonZeroU16]>,
-    config: EventConfig,
+    nodes: Cow<'static, [NonZeroU16]>,
+    config: &EventConfig,
 ) -> impl Strategy<Value = MockNode> {
-    let max_transcludes = pool.len().min(config.max_transcludes);
-    let max_links = pool.len().min(config.max_links);
-    let transcludes = subsequence(pool.clone(), 0..=max_transcludes);
-    let links = subsequence(pool, 0..=max_links);
+    let max_transcludes = nodes.len().min(config.max_transcludes);
+    let max_links = nodes.len().min(config.max_links);
+    let transcludes = subsequence(nodes.clone(), 0..=max_transcludes);
+    let links = subsequence(nodes, 0..=max_links);
 
     ("[a-z]+", "[a-z]*", transcludes, links).prop_map(move |(title, body, transcludes, links)| {
         MockNode {
@@ -139,6 +139,38 @@ fn arbitrary_mock_node(
             transcludes,
             links,
         }
+    })
+}
+
+fn arbitrary_remove(nodes: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
+    proptest::sample::select(nodes).prop_map(Event::Remove)
+}
+
+fn arbitrary_update(
+    nodes: Cow<'static, [NonZeroU16]>,
+    config: &EventConfig,
+) -> impl Strategy<Value = Event> {
+    proptest::sample::select(nodes.clone()).prop_flat_map(move |id| {
+        arbitrary_mock_node(id, nodes.clone(), config).prop_map(move |node| Event::Update(id, node))
+    })
+}
+
+fn arbitrary_event(
+    nodes: Cow<'static, [NonZeroU16]>,
+    config: &EventConfig,
+) -> impl Strategy<Value = Event> {
+    prop_oneof![
+        arbitrary_update(nodes.clone(), config),
+        arbitrary_remove(nodes),
+    ]
+}
+
+fn arbitrary_events(config: &EventConfig) -> impl Strategy<Value = Vec<Event>> {
+    hash_set(any::<NonZeroU16>(), config.pool_size.clone()).prop_flat_map(move |ids| {
+        let nodes: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
+        let length = config.sequence_length.clone();
+
+        vec(arbitrary_event(nodes, config), length)
     })
 }
 
@@ -170,7 +202,7 @@ fn file_id(id: NonZeroU16) -> FileId {
     FileId::from_raw(id)
 }
 
-fn test_render_config() -> RenderConfig {
+fn render_config() -> RenderConfig {
     let mut environment = minijinja::Environment::new();
     environment
         .add_template_owned(NODE_TEMPLATE, String::new())
@@ -188,40 +220,6 @@ fn test_render_config() -> RenderConfig {
         domain: String::new(),
         environment,
     }
-}
-
-fn arbitrary_remove(pool: Cow<'static, [NonZeroU16]>) -> impl Strategy<Value = Event> {
-    proptest::sample::select(pool).prop_map(Event::Remove)
-}
-
-fn arbitrary_update(
-    pool: Cow<'static, [NonZeroU16]>,
-    config: EventConfig,
-) -> impl Strategy<Value = Event> {
-    proptest::sample::select(pool.clone()).prop_flat_map(move |id| {
-        arbitrary_mock_node(id, pool.clone(), config.clone())
-            .prop_map(move |node| Event::Update(id, node))
-    })
-}
-
-fn arbitrary_event(
-    pool: Cow<'static, [NonZeroU16]>,
-    config: EventConfig,
-) -> impl Strategy<Value = Event> {
-    prop_oneof![
-        arbitrary_update(pool.clone(), config),
-        arbitrary_remove(pool),
-    ]
-}
-
-fn arbitrary_events(config: EventConfig) -> impl Strategy<Value = Vec<Event>> {
-    proptest::collection::hash_set(any::<NonZeroU16>(), config.pool_size.clone()).prop_flat_map(
-        move |ids| {
-            let pool: Cow<'static, [NonZeroU16]> = Cow::Owned(ids.into_iter().collect());
-            let sequence_length = config.sequence_length.clone();
-            proptest::collection::vec(arbitrary_event(pool, config.clone()), sequence_length)
-        },
-    )
 }
 
 fn format_id(id: NonZeroU16) -> String {
