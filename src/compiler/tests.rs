@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 
 use proptest::prelude::*;
 use proptest::sample::subsequence;
@@ -10,15 +11,22 @@ use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
 
 /// A single mock file: one primary node with edges to other nodes by ID.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MockNode {
-    id: u32,
+    id: NonZeroU16,
     title: String,
     body: String,
-    transcludes: Vec<u32>,
-    links: Vec<u32>,
+    transcludes: Vec<NonZeroU16>,
+    links: Vec<NonZeroU16>,
 }
 
+#[derive(Debug, Clone)]
+enum Event {
+    Update(NonZeroU16, MockNode),
+    Remove(NonZeroU16),
+}
+
+// TODO: Prolly impelement instead for (NonZeroU16, MockNode) pairs, not sure yet
 impl Compile for MockNode {
     fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let node_id = format_id(self.id);
@@ -61,9 +69,12 @@ impl Compile for MockNode {
     }
 }
 
-fn arbitrary_mock_node(id: u32, nodes: Cow<'static, [u32]>) -> impl Strategy<Value = MockNode> {
+fn arbitrary_mock_node(
+    id: NonZeroU16,
+    nodes: Cow<'static, [NonZeroU16]>,
+) -> impl Strategy<Value = MockNode> {
     let transcludes = subsequence(nodes.clone(), 0..=3);
-    let links = subsequence(nodes.clone(), 0..=3);
+    let links = subsequence(nodes, 0..=3);
 
     ("[a-z]+", "[a-z]*", transcludes, links).prop_map(move |(title, body, transcludes, links)| {
         MockNode {
@@ -76,17 +87,28 @@ fn arbitrary_mock_node(id: u32, nodes: Cow<'static, [u32]>) -> impl Strategy<Val
     })
 }
 
+fn reduce_events(events: &[Event]) -> HashMap<NonZeroU16, &MockNode> {
+    let mut result = HashMap::new();
+    for event in events {
+        match event {
+            Event::Update(id, node) => { result.insert(*id, node); }
+            Event::Remove(id) => { result.remove(id); }
+        }
+    }
+    result
+}
+
 proptest! {
     #[test]
-    fn compile_scratch_equal_compile_incremental(_universe in mock_universe()) {
+    fn compile_scratch_equal_compile_incremental(_events in arbitrary_events()) {
         todo!("implement scratch vs incremental comparison")
     }
 }
 
-fn mock_universe() -> impl Strategy<Value = ()> {
-    Just(())
+fn arbitrary_events() -> impl Strategy<Value = Vec<Event>> {
+    Just(vec![])
 }
 
-fn format_id(id: u32) -> String {
+fn format_id(id: NonZeroU16) -> String {
     format!("n{id}")
 }
