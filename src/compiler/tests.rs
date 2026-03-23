@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU16;
 use std::ops::RangeInclusive;
 
@@ -74,6 +74,24 @@ proptest! {
         };
 
         prop_assert_eq!(scratch, incremental);
+    }
+
+    #[test]
+    fn output_plan_writes_and_deletes_are_disjoint(events in arbitrary_events(&EventConfig::from_environment())) {
+        let config = render_config();
+        let mut compiler = Compiler::default();
+
+        for event in &events {
+            match event {
+                Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                Event::Remove(id) => compiler.remove(file_id(*id)),
+            }
+        }
+        let plan = compiler.process(&config).unwrap();
+        let writes: HashSet<&str> = plan.writes.keys().map(String::as_str).collect();
+        let deletes: HashSet<&str> = plan.deletes.iter().map(String::as_str).collect();
+
+        prop_assert!(writes.is_disjoint(&deletes));
     }
 
     #[test]
