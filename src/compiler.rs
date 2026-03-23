@@ -5,7 +5,9 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
 
-use crate::config::{BuildConfig, RenderConfig, LINK_TEMPLATE, NODE_TEMPLATE, TRANSCLUSION_TEMPLATE};
+use crate::config::{
+    BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE,
+};
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
@@ -52,8 +54,11 @@ impl Compiler {
             warnings,
         } = compiler.compile(id);
 
-        let nodes_result = result
-            .and_then(|output| extract(output, &mut self.interner, |id| self.nodes.contains_key(&id)));
+        let nodes_result = result.and_then(|output| {
+            extract(output, &mut self.interner, |id| {
+                self.nodes.contains_key(&id)
+            })
+        });
 
         match nodes_result {
             Ok(nodes) => {

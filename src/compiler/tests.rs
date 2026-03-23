@@ -15,7 +15,7 @@ use typst::syntax::{FileId, Span};
 
 proptest! {
     #[test]
-    fn compile_scratch_equal_compile_batched(batches in arbitrary_event_batches(&EventConfig::from_environment())) {
+    fn compile_scratch_equal_compile_incremental_batched(batches in arbitrary_event_batches(&EventConfig::from_environment())) {
         let config = render_config();
 
         let scratch = {
@@ -75,6 +75,25 @@ proptest! {
 
         prop_assert_eq!(scratch, incremental);
     }
+
+    #[test]
+    fn process_is_idempotent(events in arbitrary_events(&EventConfig::from_environment())) {
+        let config = render_config();
+        let mut compiler = Compiler::default();
+
+        for event in &events {
+            match event {
+                Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                Event::Remove(id) => compiler.remove(file_id(*id)),
+            }
+        }
+        compiler.process(&config).unwrap();
+
+        let second = compiler.process(&config).unwrap();
+        prop_assert!(second.writes.is_empty(), "expected no writes on second process call, got {:?}", second.writes.keys().collect::<Vec<_>>());
+        prop_assert!(second.deletes.is_empty(), "expected no deletes on second process call, got {:?}", second.deletes);
+    }
+
 }
 
 /// A single mock file: one primary node with edges to other nodes by ID.
@@ -146,19 +165,27 @@ struct EventConfig {
 impl EventConfig {
     fn from_environment() -> Self {
         Self {
-            pool_size: std::env::var("TEST_POOL_SIZE").ok().as_deref()
+            pool_size: std::env::var("TEST_POOL_SIZE")
+                .ok()
+                .as_deref()
                 .map(parse_size_range)
                 .unwrap_or(1..=8),
-            sequence_length: std::env::var("TEST_SEQUENCE_LENGTH").ok().as_deref()
+            sequence_length: std::env::var("TEST_SEQUENCE_LENGTH")
+                .ok()
+                .as_deref()
                 .map(parse_size_range)
                 .unwrap_or(1..=16),
-            batch_count: std::env::var("TEST_BATCH_COUNT").ok().as_deref()
+            batch_count: std::env::var("TEST_BATCH_COUNT")
+                .ok()
+                .as_deref()
                 .map(parse_size_range)
                 .unwrap_or(1..=4),
-            max_transcludes: std::env::var("TEST_MAX_TRANSCLUDES").ok()
+            max_transcludes: std::env::var("TEST_MAX_TRANSCLUDES")
+                .ok()
                 .map(|s| s.parse().expect("TEST_MAX_TRANSCLUDES must be a number"))
                 .unwrap_or(3),
-            max_links: std::env::var("TEST_MAX_LINKS").ok()
+            max_links: std::env::var("TEST_MAX_LINKS")
+                .ok()
                 .map(|s| s.parse().expect("TEST_MAX_LINKS must be a number"))
                 .unwrap_or(3),
         }
