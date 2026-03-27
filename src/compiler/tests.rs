@@ -197,7 +197,7 @@ impl EventConfig {
                 .ok()
                 .as_deref()
                 .map(parse_size_range)
-                .unwrap_or(1..=4),
+                .unwrap_or(1..=12),
             max_transcludes: std::env::var("TEST_MAX_TRANSCLUDES")
                 .ok()
                 .map(|s| s.parse().expect("TEST_MAX_TRANSCLUDES must be a number"))
