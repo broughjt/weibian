@@ -419,7 +419,6 @@ fn apply(plan: OutputPlan, fs: &mut HashMap<String, String>) {
     }
 }
 
-
 fn render_config() -> RenderConfig {
     let node_template = "{{ node.body | safe }}{{ node.backmatter | safe }}".to_string();
     let transclusion_template = concat!(

@@ -105,7 +105,9 @@ impl Watcher {
             update_dependencies(&mut self.import_graph, id, dependencies);
         }
 
-        self.compiler.process(&self.config.render)?.apply(&self.config)?;
+        self.compiler
+            .process(&self.config.render)?
+            .apply(&self.config)?;
         self.emit_diagnostics()?;
 
         let (sender, receiver) = mpsc::channel::<DebounceEventResult>();
@@ -161,7 +163,9 @@ impl Watcher {
                 update_dependencies(&mut self.import_graph, id, dependencies);
             }
 
-            self.compiler.process(&self.config.render)?.apply(&self.config)?;
+            self.compiler
+                .process(&self.config.render)?
+                .apply(&self.config)?;
             self.emit_diagnostics()?;
 
             comemo::evict(10);
