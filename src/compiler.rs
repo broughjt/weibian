@@ -40,65 +40,6 @@ pub struct Compiler {
     metadata_dirty: HashSet<NodeId>,
 }
 
-/// Recomputes the backmatter cache for `id`, diffs it against the old cache,
-/// and inserts `id` into `backmatter_render` if a re-render is needed.
-///
-/// Returns the computed `outlinks` set so the caller can store it in
-/// `outlinks_accum` for nodes that may be queried by transclusion parents.
-#[allow(clippy::too_many_arguments)]
-fn update_backmatter_cache(
-    id: NodeId,
-    nodes: &mut HashMap<NodeId, NodeEntry>,
-    links: &DiGraphMap<NodeId, ()>,
-    transclusions: &DiGraphMap<NodeId, ()>,
-    outlinks_accum: &HashMap<NodeId, BTreeSet<NodeId>>,
-    metadata_dirty: &HashSet<NodeId>,
-    removed: &HashSet<NodeId>,
-    backmatter_render: &mut HashSet<NodeId>,
-) -> BTreeSet<NodeId> {
-    let mut outlinks: BTreeSet<NodeId> = links.neighbors(id).collect();
-    for target in transclusions.neighbors(id) {
-        if let Some(acc) = outlinks_accum.get(&target) {
-            outlinks.extend(acc.iter().copied());
-        }
-    }
-
-    let contexts: BTreeSet<NodeId> = transclusions
-        .neighbors_directed(id, Direction::Incoming)
-        .collect();
-    let backlinks: BTreeSet<NodeId> = links.neighbors_directed(id, Direction::Incoming).collect();
-
-    let new_cache = BackmatterCache {
-        contexts,
-        backlinks,
-        outlinks: outlinks.clone(),
-    };
-
-    let entry = nodes.get_mut(&id).expect("bug: node has no entry");
-    let needs_rerender = match &entry.backmatter_cache {
-        None => true,
-        Some(old) => {
-            old.contexts != new_cache.contexts
-                || old.backlinks != new_cache.backlinks
-                || old.outlinks != new_cache.outlinks
-                || new_cache
-                    .contexts
-                    .iter()
-                    .chain(new_cache.backlinks.iter())
-                    .chain(new_cache.outlinks.iter())
-                    .any(|member| metadata_dirty.contains(member) || removed.contains(member))
-        }
-    };
-
-    entry.backmatter_cache = Some(new_cache);
-
-    if needs_rerender {
-        backmatter_render.insert(id);
-    }
-
-    outlinks
-}
-
 impl Compiler {
     /// Compiles a single source file and splits it into nodes, updating the
     /// node store and diagnostics.
@@ -320,10 +261,10 @@ impl Compiler {
         let metadata_dirty = std::mem::take(&mut self.metadata_dirty);
 
         let mut body_affected: HashSet<NodeId> = HashSet::new();
-        let mut render_order: Vec<NodeId> = Vec::new();
-        let mut outlinks_accum: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
-        let mut backmatter_render: HashSet<NodeId> = HashSet::new();
+        let mut backmatter_affected: HashSet<NodeId> = HashSet::new();
         let mut unrenderable: HashSet<NodeId> = HashSet::new();
+        let mut outgoing_links: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+        let mut render_order: Vec<NodeId> = Vec::new();
 
         let sccs = tarjan_scc(&self.transclusions);
 
@@ -335,32 +276,25 @@ impl Compiler {
                 let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
                 let message = eco_format!("transclusion cycle: {}", names.join(", "));
 
-                unrenderable.extend(scc.iter().copied());
+                unrenderable.extend(scc.iter());
 
-                // Track body_affected for cyclic nodes so deletes are correct:
-                // the whole SCC is affected if any member is dirty or any
-                // cross-SCC transclusion target is body_affected or removed.
                 let scc_set: HashSet<NodeId> = scc.iter().copied().collect();
-                let any_affected = scc.iter().any(|&m| dirty.contains(&m))
+                let any_should_body_render = scc.iter().any(|&m| dirty.contains(&m))
                     || scc
                         .iter()
                         .flat_map(|&m| self.transclusions.neighbors(m))
                         .filter(|t| !scc_set.contains(t))
                         .any(|t| body_affected.contains(&t) || removed.contains(&t));
-                if any_affected {
-                    body_affected.extend(scc.iter().copied());
+                if any_should_body_render {
+                    body_affected.extend(scc.iter());
                 }
 
-                let files_in_cycle: HashSet<FileId> = scc
-                    .iter()
-                    .map(|&id| {
-                        *self
-                            .node_to_file
-                            .get(&id)
-                            .expect("bug: node in transclusion graph has no file entry")
-                    })
-                    .collect();
-
+                let files_in_cycle = scc.iter().map(|&id| {
+                    *self
+                        .node_to_file
+                        .get(&id)
+                        .expect("bug: node in transclusion graph has no file entry")
+                });
                 for file_id in files_in_cycle {
                     // TODO: Store spans in the compiler state so we can
                     // point out the file locations of the offending
@@ -376,22 +310,21 @@ impl Compiler {
                 .any(|neighbor| unrenderable.contains(&neighbor))
             {
                 unrenderable.insert(id);
-                let needs_body = dirty.contains(&id)
+                let should_body_render = dirty.contains(&id)
                     || self
                         .transclusions
                         .neighbors(id)
                         .any(|t| body_affected.contains(&t) || removed.contains(&t));
-                if needs_body {
+                if should_body_render {
                     body_affected.insert(id);
                 }
             } else {
-                // Renderable, non-cyclic node.
-                let needs_body = dirty.contains(&id)
+                let should_body_render = dirty.contains(&id)
                     || self
                         .transclusions
                         .neighbors(id)
                         .any(|t| body_affected.contains(&t) || removed.contains(&t));
-                if needs_body {
+                if should_body_render {
                     body_affected.insert(id);
                     render_order.push(id);
                 }
@@ -399,18 +332,21 @@ impl Compiler {
                 // Compute backmatter for all live renderable nodes in the
                 // transclusion graph. Removed nodes remain as targets until
                 // their parent's edge is cleared; skip them here.
-                if self.nodes.contains_key(&id) {
-                    let outlinks = update_backmatter_cache(
+                if let Some(entry) = self.nodes.get(&id) {
+                    let (links, option_cache) = compute_backmatter_cache(
                         id,
-                        &mut self.nodes,
+                        entry,
                         &self.links,
                         &self.transclusions,
-                        &outlinks_accum,
+                        &outgoing_links,
                         &metadata_dirty,
                         &removed,
-                        &mut backmatter_render,
                     );
-                    outlinks_accum.insert(id, outlinks);
+                    outgoing_links.insert(id, links);
+                    if let Some(cache) = option_cache {
+                        self.nodes.get_mut(&id).unwrap().backmatter_cache = Some(cache);
+                        backmatter_affected.insert(id);
+                    }
                 }
             }
         }
@@ -420,27 +356,32 @@ impl Compiler {
         // must be handled separately. We visit ALL isolated nodes (not just
         // dirty ones) so that a non-dirty node whose backlinks changed because
         // a dirty node linked to it still gets its backmatter recomputed.
-        let isolated_ids: Vec<NodeId> = self
-            .nodes
-            .keys()
-            .filter(|&&id| !self.transclusions.contains_node(id))
-            .copied()
-            .collect();
-        for id in isolated_ids {
+        //
+        // Split borrows let us hold `&mut self.nodes` for the iterator while
+        // reading from `self.links` and `self.transclusions` separately.
+        let links = &self.links;
+        let transclusions = &self.transclusions;
+        for (&id, entry) in self.nodes.iter_mut() {
+            if transclusions.contains_node(id) {
+                continue;
+            }
             if dirty.contains(&id) {
                 body_affected.insert(id);
                 render_order.push(id);
             }
-            update_backmatter_cache(
+            let (_, maybe_cache) = compute_backmatter_cache(
                 id,
-                &mut self.nodes,
-                &self.links,
-                &self.transclusions,
-                &outlinks_accum,
+                entry,
+                links,
+                transclusions,
+                &outgoing_links,
                 &metadata_dirty,
                 &removed,
-                &mut backmatter_render,
             );
+            if let Some(cache) = maybe_cache {
+                entry.backmatter_cache = Some(cache);
+                backmatter_affected.insert(id);
+            }
         }
 
         // TODO: Probably just do this in the loops man
@@ -450,7 +391,7 @@ impl Compiler {
         // relative order doesn't matter since backmatter rendering has no
         // inter-node dependencies.
         render_order.extend(
-            backmatter_render
+            backmatter_affected
                 .iter()
                 .copied()
                 .filter(|id| !body_affected.contains(id) && !unrenderable.contains(id)),
@@ -608,7 +549,7 @@ impl Compiler {
                 self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
             }
 
-            if backmatter_render.contains(&id) {
+            if backmatter_affected.contains(&id) {
                 let cache = self.nodes[&id]
                     .backmatter_cache
                     .as_ref()
@@ -671,8 +612,10 @@ impl Compiler {
                     .rendered_body
                     .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
-                // TODO: We should panic if rendered backmatter is missing at this point, right?
-                let backmatter = entry.rendered_backmatter.as_deref().unwrap_or_default();
+                let backmatter = entry
+                    .rendered_backmatter
+                    .as_deref()
+                    .expect("bug: renderable node has no rendered backmatter after pass 2");
                 let html = node_template
                     .render(minijinja::context! {
                         node => minijinja::context! {
@@ -852,6 +795,53 @@ fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
     for neighbor in neighbors {
         graph.remove_edge(id, neighbor);
     }
+}
+
+/// Computes the new backmatter cache for a node and diffs it against the old
+/// one. Returns `(outlinks, Some(new_cache))` if a re-render is needed, or
+/// `(outlinks, None)` if the cache is unchanged. The caller is responsible for
+/// writing the new cache back to the node entry and updating `backmatter_render`.
+fn compute_backmatter_cache(
+    id: NodeId,
+    entry: &NodeEntry,
+    links: &DiGraphMap<NodeId, ()>,
+    transclusions: &DiGraphMap<NodeId, ()>,
+    outgoing_links: &HashMap<NodeId, BTreeSet<NodeId>>,
+    metadata_dirty: &HashSet<NodeId>,
+    removed: &HashSet<NodeId>,
+) -> (BTreeSet<NodeId>, Option<BackmatterCache>) {
+    let mut outlinks: BTreeSet<NodeId> = links.neighbors(id).collect();
+    for target in transclusions.neighbors(id) {
+        if let Some(acc) = outgoing_links.get(&target) {
+            outlinks.extend(acc.iter());
+        }
+    }
+    let contexts: BTreeSet<NodeId> = transclusions
+        .neighbors_directed(id, Direction::Incoming)
+        .collect();
+    let backlinks: BTreeSet<NodeId> = links.neighbors_directed(id, Direction::Incoming).collect();
+
+    let new_cache = entry
+        .backmatter_cache
+        .as_ref()
+        .filter(|old| {
+            old.contexts == contexts
+                && old.backlinks == backlinks
+                && old.outlinks == outlinks
+                && !contexts
+                    .iter()
+                    .chain(backlinks.iter())
+                    .chain(outlinks.iter())
+                    .any(|member| metadata_dirty.contains(member) || removed.contains(member))
+        })
+        .is_none()
+        .then_some(BackmatterCache {
+            contexts,
+            backlinks,
+            outlinks: outlinks.clone(),
+        });
+
+    (outlinks, new_cache)
 }
 
 pub struct OutputPlan {
