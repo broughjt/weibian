@@ -997,7 +997,11 @@ fn extract(
             subnode.remove();
         }
 
-        nodes.insert(interner.intern(identifier), entry);
+        let displaced = nodes.insert(interner.intern(&identifier), entry);
+        assert!(
+            displaced.is_none(),
+            "bug: duplicate node identifier slipped past collect_node_spans: {identifier:?}"
+        );
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -1021,7 +1025,11 @@ fn extract(
                 &mut link_metadata,
                 &mut errors,
             ) {
-                nodes.insert(interner.intern(identifier), entry);
+                let displaced = nodes.insert(interner.intern(&identifier), entry);
+                assert!(
+                    displaced.is_none(),
+                    "bug: duplicate node identifier slipped past collect_node_spans: {identifier:?}"
+                );
             }
 
             errors.extend(node_iter.map(|extra| {
