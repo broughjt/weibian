@@ -23,7 +23,7 @@ proptest! {
         let scratch = {
             let mut compiler = Compiler::default();
             for (id, node) in reduce_events(batches.iter().flatten()) {
-                compiler.update(node, file_id(id));
+                compiler.update(node, FileId::from_raw(id));
             }
             let mut files = HashMap::new();
             apply(compiler.process(&config).unwrap(), &mut files);
@@ -36,8 +36,8 @@ proptest! {
             for batch in &batches {
                 for event in batch {
                     match event {
-                        Event::Update(id, node) => compiler.update(node, file_id(*id)),
-                        Event::Remove(id) => compiler.remove(file_id(*id)),
+                        Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
+                        Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
                     }
                 }
                 apply(compiler.process(&config).unwrap(), &mut files);
@@ -55,7 +55,7 @@ proptest! {
         let scratch = {
             let mut compiler = Compiler::default();
             for (id, node) in reduce_events(events.iter()) {
-                compiler.update(node, file_id(id));
+                compiler.update(node, FileId::from_raw(id));
             }
             let mut files = HashMap::new();
             apply(compiler.process(&config).unwrap(), &mut files);
@@ -67,8 +67,8 @@ proptest! {
             let mut files = HashMap::new();
             for event in &events {
                 match event {
-                    Event::Update(id, node) => compiler.update(node, file_id(*id)),
-                    Event::Remove(id) => compiler.remove(file_id(*id)),
+                    Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
+                    Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
                 }
                 apply(compiler.process(&config).unwrap(), &mut files);
             }
@@ -85,8 +85,8 @@ proptest! {
 
         for event in &events {
             match event {
-                Event::Update(id, node) => compiler.update(node, file_id(*id)),
-                Event::Remove(id) => compiler.remove(file_id(*id)),
+                Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
+                Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
             }
         }
         let plan = compiler.process(&config).unwrap();
@@ -103,8 +103,8 @@ proptest! {
 
         for event in &events {
             match event {
-                Event::Update(id, node) => compiler.update(node, file_id(*id)),
-                Event::Remove(id) => compiler.remove(file_id(*id)),
+                Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
+                Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
             }
         }
         compiler.process(&config).unwrap();
@@ -127,8 +127,8 @@ proptest! {
 
         for event in &events {
             match event {
-                Event::Update(id, node) => compiler.update(node, file_id(*id)),
-                Event::Remove(id) => compiler.remove(file_id(*id)),
+                Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
+                Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
             }
         }
         let first = compiler.process(&config).unwrap();
@@ -137,7 +137,7 @@ proptest! {
 
         // Emit a title-only update for changed_id (no edge changes).
         let node_id_str = format_id(changed_id);
-        let changed_file = file_id(changed_id);
+        let changed_file = FileId::from_raw(changed_id);
         if !compiler.has_node(changed_id) {
             // Node doesn't exist yet; insert a fresh one with no edges.
             let node = MockNode { id: changed_id, title: "before".into(), body: String::new(), transcludes: vec![], links: vec![] };
@@ -190,16 +190,16 @@ proptest! {
         for event in &events {
             match event {
                 Event::Update(id, node) => {
-                    incremental.update(node, file_id(*id));
-                    current_nodes.insert(file_id(*id), node.clone());
+                    incremental.update(node, FileId::from_raw(*id));
+                    current_nodes.insert(FileId::from_raw(*id), node.clone());
                 }
                 Event::Remove(id) => {
-                    incremental.remove(file_id(*id));
-                    current_nodes.remove(&file_id(*id));
+                    incremental.remove(FileId::from_raw(*id));
+                    current_nodes.remove(&FileId::from_raw(*id));
                 }
             }
             apply(incremental.process(&config).unwrap(), &mut inc_fs);
-            let ref_fs = process_stateless(
+            let (ref_fs, ..) = process_stateless(
                 &current_nodes.values().cloned().collect::<Vec<_>>(),
                 &config,
             )
@@ -419,9 +419,6 @@ fn apply(plan: OutputPlan, fs: &mut HashMap<String, String>) {
     }
 }
 
-fn file_id(id: NonZeroU16) -> FileId {
-    FileId::from_raw(id)
-}
 
 fn render_config() -> RenderConfig {
     let node_template = "{{ node.body | safe }}{{ node.backmatter | safe }}".to_string();
@@ -479,8 +476,12 @@ fn format_id(id: NonZeroU16) -> String {
     format!("n{id}")
 }
 
+type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
+type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
+
 /// Stateless reference implementation: compiles `mock_nodes` from scratch and
-/// returns the complete rendered filesystem as a map of node name → HTML.
+/// returns the complete rendered filesystem, compile diagnostics, and process
+/// diagnostics.
 ///
 /// Has no notion of previous state — no dirty/removed/metadata_dirty sets.
 /// Every call recomputes everything. Used as a test oracle against the
@@ -488,37 +489,98 @@ fn format_id(id: NonZeroU16) -> String {
 fn process_stateless(
     mock_nodes: &[MockNode],
     config: &RenderConfig,
-) -> anyhow::Result<HashMap<String, String>> {
+) -> anyhow::Result<(
+    HashMap<String, String>,
+    CompileDiagnostics,
+    ProcessDiagnostics,
+)> {
     use std::collections::BTreeSet;
 
     use petgraph::algo::tarjan_scc;
     use petgraph::graphmap::DiGraphMap;
 
     use super::{
-        NodeId, NodeInterner, backmatter_cache, extract, render_backmatter, render_body,
-        render_node,
+        NodeId, NodeInterner, backmatter_cache, cycle_diagnostics, dangling_link_diagnostic,
+        dangling_transclusion_diagnostic, extract, render_backmatter, render_body, render_node,
     };
 
     let mut interner = NodeInterner::default();
     let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
-    let mut all_nodes: HashMap<NodeId, super::NodeEntry> = HashMap::new();
+    let mut nodes: HashMap<NodeId, super::NodeEntry> = HashMap::new();
+    let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
+    let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
 
     for mock_node in mock_nodes {
-        let typst::diag::Warned { output: result, .. } = mock_node.compile(file_id(mock_node.id));
-        if let Ok(output) = result
-            && let Ok(extracted) = extract(output, &mut interner, |_| false)
-        {
-            for (node_id, (entry, trans, lnks)) in extracted {
-                for &t in &trans {
-                    transclusions.add_edge(node_id, t, ());
+        let file_id = FileId::from_raw(mock_node.id);
+        let Warned {
+            output: result,
+            warnings,
+        } = mock_node.compile(file_id);
+
+        // TODO: This correctly rejects cross-file duplicate node names, but
+        // `process_stateless` processes files in HashMap iteration order while
+        // the incremental compiler respects update() call order. These can
+        // disagree on which file "wins" when a duplicate exists. This doesn't
+        // matter currently because each MockNode produces exactly one node
+        // whose name is derived from its own file ID, making cross-file
+        // duplicates impossible. Revisit if subnodes are added to the mock
+        // test data.
+        match result.and_then(|output| {
+            extract(output, &mut interner, |node_id| {
+                nodes.contains_key(&node_id)
+            })
+        }) {
+            Ok(extracted) => {
+                for (node_id, (entry, trans, lnks)) in extracted {
+                    node_to_file.insert(node_id, file_id);
+                    for &t in &trans {
+                        transclusions.add_edge(node_id, t, ());
+                    }
+                    for &l in &lnks {
+                        links.add_edge(node_id, l, ());
+                    }
+                    nodes.insert(node_id, entry);
                 }
-                for &l in &lnks {
-                    links.add_edge(node_id, l, ());
+
+                if !warnings.is_empty() {
+                    compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
                 }
-                all_nodes.insert(node_id, entry);
+            }
+            Err(errors) => {
+                compile_diagnostics.insert(file_id, (warnings, errors));
             }
         }
+    }
+
+    let mut process_diagnostics: ProcessDiagnostics = HashMap::new();
+
+    for (source, destination, _) in transclusions
+        .all_edges()
+        .filter(|&(_, dst, _)| !nodes.contains_key(&dst))
+    {
+        let fid = *node_to_file
+            .get(&source)
+            .expect("bug: node in transclusion graph has no file entry");
+        let name = interner.name(destination);
+        process_diagnostics
+            .entry(fid)
+            .or_default()
+            .push(dangling_transclusion_diagnostic(name));
+    }
+
+    for (source, destination, _) in links
+        .all_edges()
+        .filter(|&(_, dst, _)| !nodes.contains_key(&dst))
+    {
+        let fid = *node_to_file
+            .get(&source)
+            .expect("bug: node in link graph has no file entry");
+        let name = interner.name(destination);
+        process_diagnostics
+            .entry(fid)
+            .or_default()
+            .push(dangling_link_diagnostic(name));
     }
 
     let mut unrenderable: HashSet<NodeId> = HashSet::new();
@@ -533,9 +595,20 @@ fn process_stateless(
 
         if is_cyclic {
             unrenderable.extend(scc.iter().copied());
-        } else if transclusions.neighbors(id).any(|t| unrenderable.contains(&t)) {
+            for (fid, diag) in cycle_diagnostics(scc.iter().map(|&id| {
+                let fid = *node_to_file
+                    .get(&id)
+                    .expect("bug: node in transclusion cycle has no file entry");
+                (fid, interner.name(id))
+            })) {
+                process_diagnostics.entry(fid).or_default().push(diag);
+            }
+        } else if transclusions
+            .neighbors(id)
+            .any(|t| unrenderable.contains(&t))
+        {
             unrenderable.insert(id);
-        } else if let Some(entry) = all_nodes.get_mut(&id) {
+        } else if let Some(entry) = nodes.get_mut(&id) {
             let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
             outlinks_accumulator.insert(id, new_cache.outlinks.clone());
             entry.backmatter_cache = Some(new_cache);
@@ -545,14 +618,14 @@ fn process_stateless(
 
     // Nodes that appear in no transclusion edge (neither source nor target) are
     // not visited by the SCC loop. Process them separately.
-    let isolated: Vec<NodeId> = all_nodes
+    let isolated: Vec<NodeId> = nodes
         .keys()
         .copied()
         .filter(|&id| !transclusions.contains_node(id))
         .collect();
 
     for id in isolated {
-        if let Some(entry) = all_nodes.get_mut(&id) {
+        if let Some(entry) = nodes.get_mut(&id) {
             let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
             entry.backmatter_cache = Some(new_cache);
             render_order.push(id);
@@ -585,30 +658,30 @@ fn process_stateless(
     for &id in &render_order {
         let rendered_body = render_body(
             id,
-            &all_nodes,
+            &nodes,
             &interner,
             &link_template,
             &transclusion_template,
             config,
             &site_context,
         )?;
-        all_nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
+        nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
         let rendered_backmatter = render_backmatter(
             id,
-            &all_nodes,
+            &nodes,
             &interner,
             &backmatter_template,
             config,
             &site_context,
         )?;
-        all_nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
+        nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
     }
 
-    render_order
+    let fs = render_order
         .iter()
         .map(|&id| -> anyhow::Result<(String, String)> {
             let name = interner.name(id);
-            let entry = &all_nodes[&id];
+            let entry = &nodes[&id];
             let body = entry
                 .rendered_body
                 .as_deref()
@@ -628,5 +701,7 @@ fn process_stateless(
             )?;
             Ok((name.to_owned(), html))
         })
-        .collect::<anyhow::Result<_>>()
+        .collect::<anyhow::Result<_>>()?;
+
+    Ok((fs, compile_diagnostics, process_diagnostics))
 }

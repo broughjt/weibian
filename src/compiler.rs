@@ -191,22 +191,15 @@ impl Compiler {
             .all_edges()
             .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
         {
-            let file_id = self
+            let file_id = *self
                 .node_to_file
                 .get(&source)
-                .copied()
                 .expect("bug: node in transclusion graph has no file entry");
             let name = self.interner.name(destination);
-            let message = if self.removed.contains(&destination) {
-                eco_format!("dangling transclusion: {name} was deleted")
-            } else {
-                eco_format!("dangling transclusion: {name} is not defined")
-            };
-
             self.process_diagnostics
                 .entry(file_id)
                 .or_default()
-                .push(SourceDiagnostic::warning(Span::detached(), message));
+                .push(dangling_transclusion_diagnostic(name));
         }
 
         // Warn on dangling links (target node does not exist).
@@ -215,22 +208,15 @@ impl Compiler {
             .all_edges()
             .filter(|&(_, destination, _)| !self.nodes.contains_key(&destination))
         {
-            let file_id = self
+            let file_id = *self
                 .node_to_file
                 .get(&source)
-                .copied()
                 .expect("bug: node in link graph has no file entry");
             let name = self.interner.name(destination);
-            let message = if self.removed.contains(&destination) {
-                eco_format!("dangling link: {name} was deleted")
-            } else {
-                eco_format!("dangling link: {name} is not defined")
-            };
-
             self.process_diagnostics
                 .entry(file_id)
                 .or_default()
-                .push(SourceDiagnostic::warning(Span::detached(), message));
+                .push(dangling_link_diagnostic(name));
         }
 
         // Pass 1
@@ -279,28 +265,20 @@ impl Compiler {
 
                 unrenderable.extend(scc.iter().copied());
 
-                let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
-                let message = eco_format!("transclusion cycle: {}", names.join(", "));
-
-                // HashSet is for deduplication
-                //
                 // TODO: Store spans in the compiler state so we can
                 // point out the file locations of the offending
                 // transclusions
-                let files_in_cycle: HashSet<FileId> = scc
-                    .iter()
-                    .map(|&id| {
-                        *self
-                            .node_to_file
-                            .get(&id)
-                            .expect("bug: node in transclusion graph has no file entry")
-                    })
-                    .collect();
-                for file_id in files_in_cycle {
+                for (file_id, diag) in cycle_diagnostics(scc.iter().map(|&id| {
+                    let file_id = *self
+                        .node_to_file
+                        .get(&id)
+                        .expect("bug: node in transclusion cycle has no file entry");
+                    (file_id, self.interner.name(id))
+                })) {
                     self.process_diagnostics
                         .entry(file_id)
                         .or_default()
-                        .push(SourceDiagnostic::error(Span::detached(), message.clone()));
+                        .push(diag);
                 }
             } else {
                 // Non-cyclic SCCs are always singletons, so a per-node check
@@ -621,6 +599,39 @@ fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
     for neighbor in neighbors {
         graph.remove_edge(id, neighbor);
     }
+}
+
+// TODO: Future improvement: We have spans, we should not use detached for these diagnostics
+
+fn dangling_transclusion_diagnostic(name: &str) -> SourceDiagnostic {
+    SourceDiagnostic::warning(
+        Span::detached(),
+        eco_format!("dangling transclusion: {name} is not defined"),
+    )
+}
+
+fn dangling_link_diagnostic(name: &str) -> SourceDiagnostic {
+    SourceDiagnostic::warning(
+        Span::detached(),
+        eco_format!("dangling link: {name} is not defined"),
+    )
+}
+
+fn cycle_diagnostics<'a>(
+    pairs: impl Iterator<Item = (FileId, &'a str)>,
+) -> Vec<(FileId, SourceDiagnostic)> {
+    let (files, names): (HashSet<FileId>, Vec<&str>) = pairs.unzip();
+    let message = eco_format!("transclusion cycle: {}", names.join(", "));
+
+    files
+        .into_iter()
+        .map(|file_id| {
+            (
+                file_id,
+                SourceDiagnostic::error(Span::detached(), message.clone()),
+            )
+        })
+        .collect()
 }
 
 fn backmatter_cache(
