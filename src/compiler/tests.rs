@@ -388,7 +388,7 @@ fn file_id(id: NonZeroU16) -> FileId {
 }
 
 fn render_config() -> RenderConfig {
-    let node_template = "{{ node.body | safe }}".to_string();
+    let node_template = "{{ node.body | safe }}{{ node.backmatter | safe }}".to_string();
     let transclusion_template = concat!(
         "{%- if transclusion.resolved -%}",
         "{{ transclusion.body | safe }}",
