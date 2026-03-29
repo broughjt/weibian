@@ -248,26 +248,36 @@ impl Compiler {
         let sccs = tarjan_scc(&self.transclusions);
 
         for scc in &sccs {
-            for &id in scc {
-                let should_body_render = dirty.contains(&id)
-                    || self
-                        .transclusions
-                        .neighbors(id)
-                        .any(|t| body_affected.contains(&t) || removed.contains(&t));
-                if should_body_render {
-                    body_affected.insert(id);
-                }
-                // TODO: Unsure about this
-                if removed.contains(&id) {
-                    body_affected.remove(&id);
-                }
-            }
-
             let id = scc[0];
             let is_cyclic = scc.len() > 1 || self.transclusions.contains_edge(id, id);
 
             if is_cyclic {
-                unrenderable.extend(scc.iter());
+                // Treat the whole SCC atomically: if any member is dirty, or
+                // any cross-SCC transclusion target is body_affected or
+                // removed, every member is body_affected. A per-member linear
+                // scan would be order-dependent and miss propagation across the
+                // cycle (e.g. dirty node appears after its cycle partner).
+                //
+                // We only check cross-SCC edges because intra-SCC edges point
+                // to nodes whose body_affected status we are currently deciding
+                // — checking them would be circular.
+                //
+                // Removed nodes cannot appear in cycles: `remove()` clears all
+                // outgoing edges, which breaks any cycle that passed through
+                // the removed node. So we do not need to guard against removed
+                // nodes being spuriously added to body_affected here.
+                let scc_set: HashSet<NodeId> = scc.iter().copied().collect();
+                let any_affected = scc.iter().any(|&m| dirty.contains(&m))
+                    || scc
+                        .iter()
+                        .flat_map(|&m| self.transclusions.neighbors(m))
+                        .filter(|t| !scc_set.contains(t))
+                        .any(|t| body_affected.contains(&t) || removed.contains(&t));
+                if any_affected {
+                    body_affected.extend(scc.iter().copied());
+                }
+
+                unrenderable.extend(scc.iter().copied());
 
                 let names: Vec<&str> = scc.iter().map(|&id| self.interner.name(id)).collect();
                 let message = eco_format!("transclusion cycle: {}", names.join(", "));
@@ -292,42 +302,58 @@ impl Compiler {
                         .or_default()
                         .push(SourceDiagnostic::error(Span::detached(), message.clone()));
                 }
-            } else if self
-                .transclusions
-                .neighbors(id)
-                .any(|t| unrenderable.contains(&t))
-            {
-                unrenderable.insert(id);
             } else {
-                // push to render_order if body_render or backmatter_render
-
-                // Dangling transclusions stay in the transclusion graph until
-                // the transclusion is removed. We cannot assume they are in the
-                // removed set, since they might have been dangling in many
-                // previous calls to `process`. We check for dangling
-                // transclusions in the a loop above.
-                if let Some(entry) = self.nodes.get_mut(&id) {
-                    let new_cache = backmatter_cache(
-                        id,
-                        &self.links,
-                        &self.transclusions,
-                        &outlinks_accumulator,
-                    );
-                    outlinks_accumulator.insert(id, new_cache.contexts.clone());
-
-                    if should_backmatter_render(
-                        entry.backmatter_cache.as_ref(),
-                        &new_cache,
-                        &metadata_dirty,
-                        &removed,
-                    ) {
-                        entry.backmatter_cache = Some(new_cache);
-                        backmatter_affected.insert(id);
-                    }
+                // Non-cyclic SCCs are always singletons, so a per-node check
+                // is unambiguous — no ordering concern.
+                //
+                // Removed nodes cannot be spuriously added to body_affected
+                // here: remove() clears outgoing edges, so
+                // transclusions.neighbors returns empty for them, and they are
+                // not in dirty. Both conditions are therefore false.
+                let is_body_affected = dirty.contains(&id)
+                    || self
+                        .transclusions
+                        .neighbors(id)
+                        .any(|t| body_affected.contains(&t) || removed.contains(&t));
+                if is_body_affected {
+                    body_affected.insert(id);
                 }
 
-                if body_affected.contains(&id) || backmatter_affected.contains(&id) {
-                    render_order.push(id);
+                if self
+                    .transclusions
+                    .neighbors(id)
+                    .any(|t| unrenderable.contains(&t))
+                {
+                    unrenderable.insert(id);
+                } else {
+                    // Dangling transclusions stay in the transclusion graph
+                    // until the transclusion is removed. We cannot assume they
+                    // are in the removed set, since they might have been
+                    // dangling in many previous calls to `process`. We check
+                    // for dangling transclusions in a loop above.
+                    if let Some(entry) = self.nodes.get_mut(&id) {
+                        let new_cache = backmatter_cache(
+                            id,
+                            &self.links,
+                            &self.transclusions,
+                            &outlinks_accumulator,
+                        );
+                        outlinks_accumulator.insert(id, new_cache.outlinks.clone());
+
+                        if should_backmatter_render(
+                            entry.backmatter_cache.as_ref(),
+                            &new_cache,
+                            &metadata_dirty,
+                            &removed,
+                        ) {
+                            entry.backmatter_cache = Some(new_cache);
+                            backmatter_affected.insert(id);
+                        }
+                    }
+
+                    if body_affected.contains(&id) || backmatter_affected.contains(&id) {
+                        render_order.push(id);
+                    }
                 }
             }
         }
@@ -386,180 +412,26 @@ impl Compiler {
 
         for &id in &render_order {
             if body_affected.contains(&id) {
-                let raw_html = self.nodes[&id].raw_html.as_str();
-                let document = Document::from(raw_html);
-
-                // Render internal links. Done before transclusion substitution so
-                // that links inside already-rendered transclusion bodies are not
-                // double-processed.
-                if self.links.neighbors(id).next().is_some() {
-                    let links = document.select("a").iter().filter_map(|element| {
-                        element
-                            .attr("href")
-                            .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
-                            .map(|identifier| (element, identifier))
-                    });
-                    for (element, identifier) in links {
-                        let counter: u32 = element
-                            .attr("data-counter")
-                            .expect("bug: link is missing a data-counter")
-                            .parse()
-                            .expect("bug: link has invalid data-counter");
-                        let href = minijinja::Value::from_safe_string(config.href(&identifier));
-                        let content = element.inner_html().to_string();
-                        let link_metadata = self.nodes[&id]
-                            .link_metadata
-                            .get(&counter)
-                            .cloned()
-                            .unwrap_or_default();
-                        let context = if let Some(target_id) = self.interner.get(&identifier)
-                            && let Some(entry) = self.nodes.get(&target_id)
-                        {
-                            minijinja::context! {
-                                link => minijinja::context! {
-                                    identifier => identifier,
-                                    href => &href,
-                                    content => content,
-                                    resolved => true,
-                                    title => entry.title.as_str(),
-                                    title_text => entry.title_text.as_str(),
-                                    metadata => entry.metadata,
-                                    link_metadata => link_metadata,
-                                },
-                                site => site_context,
-                            }
-                        } else {
-                            minijinja::context! {
-                                link => minijinja::context! {
-                                    identifier => identifier,
-                                    href => href,
-                                    content => content,
-                                    resolved => false,
-                                    link_metadata => link_metadata,
-                                },
-                                site => site_context,
-                            }
-                        };
-                        let replacement = link_template.render(context).map_err(|e| {
-                            anyhow::anyhow!("failed to render link template for {identifier}: {e}")
-                        })?;
-
-                        element.replace_with_html(replacement);
-                    }
-                }
-
-                if self.transclusions.neighbors(id).next().is_some() {
-                    for element in document.select("wb-transclude").iter() {
-                        let identifier = element
-                            .attr("identifier")
-                            .expect("bug: wb-transclude is missing an identifier");
-                        let counter: u32 = element
-                            .attr("counter")
-                            .expect("bug: wb-transclude is missing a counter")
-                            .parse()
-                            .expect("bug: wb-transclude has invalid counter");
-                        let transclusion_metadata = self.nodes[&id]
-                            .transclusion_metadata
-                            .get(&counter)
-                            .cloned()
-                            .unwrap_or_default();
-                        let transclude_id = self
-                            .interner
-                            .get(identifier.as_ref())
-                            .expect("bug: wb-transclude identifier was not interned");
-                        let context = if let Some(entry) = self.nodes.get(&transclude_id) {
-                            let body = entry
-                                .rendered_body
-                                .as_deref()
-                                .expect("bug: wb-transclude target has no rendered_body");
-
-                            minijinja::context! {
-                                transclusion => minijinja::context! {
-                                    identifier => identifier.as_ref(),
-                                    href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
-                                    resolved => true,
-                                    title => entry.title.as_str(),
-                                    title_text => entry.title_text.as_str(),
-                                    body => body,
-                                    metadata => entry.metadata,
-                                    transclusion_metadata => transclusion_metadata,
-                                },
-                                site => site_context,
-                            }
-                        } else {
-                            minijinja::context! {
-                                transclusion => minijinja::context! {
-                                    identifier => identifier.as_ref(),
-                                    resolved => false,
-                                    transclusion_metadata => transclusion_metadata,
-                                },
-                                site => site_context,
-                            }
-                        };
-                        let replacement = transclusion_template.render(context).map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to render transclusion template for {identifier}: {e}"
-                            )
-                        })?;
-
-                        element.replace_with_html(replacement);
-                    }
-                }
-
-                let rendered_body = document.select("body").first().inner_html().to_string();
+                let rendered_body = render_body(
+                    id,
+                    &self.nodes,
+                    &self.interner,
+                    &link_template,
+                    &transclusion_template,
+                    config,
+                    &site_context,
+                )?;
                 self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
             }
-
             if backmatter_affected.contains(&id) {
-                let cache = self.nodes[&id]
-                    .backmatter_cache
-                    .as_ref()
-                    .expect("bug: backmatter_render node has no backmatter_cache");
-
-                let node_info = |node_id: NodeId| {
-                    let name = self.interner.name(node_id);
-                    let entry = self.nodes.get(&node_id);
-                    minijinja::context! {
-                        id => name,
-                        href => minijinja::Value::from_safe_string(config.href(name)),
-                        title => entry.map(|e| e.title.as_str()).unwrap_or(""),
-                        title_text => entry.map(|e| e.title_text.as_str()).unwrap_or(""),
-                        metadata => entry.map(|e| &e.metadata),
-                    }
-                };
-
-                // Sort by name so output is stable across independent compiler
-                // instances (NodeId order is interning-order-dependent).
-                let mut contexts_ids: Vec<NodeId> = cache.contexts.iter().copied().collect();
-                contexts_ids.sort_by_key(|&nid| self.interner.name(nid));
-                let contexts: Vec<_> = contexts_ids.into_iter().map(&node_info).collect();
-
-                let mut backlinks_ids: Vec<NodeId> = cache.backlinks.iter().copied().collect();
-                backlinks_ids.sort_by_key(|&nid| self.interner.name(nid));
-                let backlinks: Vec<_> = backlinks_ids.into_iter().map(&node_info).collect();
-
-                let mut outlinks_ids: Vec<NodeId> = cache.outlinks.iter().copied().collect();
-                outlinks_ids.sort_by_key(|&nid| self.interner.name(nid));
-                let outlinks: Vec<_> = outlinks_ids.into_iter().map(&node_info).collect();
-
-                let name = self.interner.name(id);
-                let rendered_backmatter = backmatter_template
-                    .render(minijinja::context! {
-                        backmatter => minijinja::context! {
-                            contexts => contexts,
-                            backlinks => backlinks,
-                            outlinks => outlinks,
-                        },
-                        node => minijinja::context! {
-                            id => name,
-                            href => minijinja::Value::from_safe_string(config.href(name)),
-                        },
-                        site => site_context,
-                    })
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to render backmatter template for {name}: {e}")
-                    })?;
-
+                let rendered_backmatter = render_backmatter(
+                    id,
+                    &self.nodes,
+                    &self.interner,
+                    &backmatter_template,
+                    config,
+                    &site_context,
+                )?;
                 self.nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
             }
         }
@@ -577,23 +449,15 @@ impl Compiler {
                     .rendered_backmatter
                     .as_deref()
                     .expect("bug: renderable node has no rendered backmatter after pass 2");
-                let html = node_template
-                    .render(minijinja::context! {
-                        node => minijinja::context! {
-                            id => name,
-                            href => minijinja::Value::from_safe_string(config.href(name)),
-                            title => entry.title.as_str(),
-                            title_text => entry.title_text.as_str(),
-                            body => body,
-                            backmatter => backmatter,
-                            metadata => entry.metadata,
-                        },
-                        site => site_context,
-                    })
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to render template for node {name}: {e}")
-                    })?;
-
+                let html = render_node(
+                    name,
+                    entry,
+                    body,
+                    backmatter,
+                    &node_template,
+                    config,
+                    &site_context,
+                )?;
                 Ok((name.to_owned(), html))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -767,10 +631,9 @@ fn backmatter_cache(
 ) -> BackmatterCache {
     let mut outlinks: BTreeSet<NodeId> = links.neighbors(id).collect();
     for target in transclusions.neighbors(id) {
-        let links = outlinks_accumulator
-            .get(&target)
-            .expect("bug: transclusion missing from `outlinks_accumulator`, should exist");
-        outlinks.extend(links.iter());
+        if let Some(target_outlinks) = outlinks_accumulator.get(&target) {
+            outlinks.extend(target_outlinks.iter());
+        }
     }
     let contexts: BTreeSet<NodeId> = transclusions
         .neighbors_directed(id, Direction::Incoming)
@@ -799,6 +662,205 @@ fn should_backmatter_render(
                 .chain(new.outlinks.iter())
                 .any(|id| metadata_dirty.contains(id) || removed.contains(id))
     })
+}
+
+fn render_body(
+    id: NodeId,
+    nodes: &HashMap<NodeId, NodeEntry>,
+    interner: &NodeInterner,
+    link_template: &minijinja::Template<'_, '_>,
+    transclusion_template: &minijinja::Template<'_, '_>,
+    config: &RenderConfig,
+    site_context: &minijinja::Value,
+) -> anyhow::Result<String> {
+    let entry = &nodes[&id];
+    let document = Document::from(entry.raw_html.as_str());
+
+    // Render internal links. Done before transclusion substitution so that
+    // links inside already-rendered transclusion bodies are not double-processed.
+    for (element, identifier) in document.select("a").iter().filter_map(|element| {
+        element
+            .attr("href")
+            .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
+            .map(|identifier| (element, identifier))
+    }) {
+        let counter: u32 = element
+            .attr("data-counter")
+            .expect("bug: link is missing a data-counter")
+            .parse()
+            .expect("bug: link has invalid data-counter");
+        let href = minijinja::Value::from_safe_string(config.href(&identifier));
+        let content = element.inner_html().to_string();
+        let link_metadata = entry
+            .link_metadata
+            .get(&counter)
+            .cloned()
+            .unwrap_or_default();
+        let context = if let Some(target_id) = interner.get(&identifier)
+            && let Some(target) = nodes.get(&target_id)
+        {
+            minijinja::context! {
+                link => minijinja::context! {
+                    identifier => identifier,
+                    href => &href,
+                    content => content,
+                    resolved => true,
+                    title => target.title.as_str(),
+                    title_text => target.title_text.as_str(),
+                    metadata => target.metadata,
+                    link_metadata => link_metadata,
+                },
+                site => site_context,
+            }
+        } else {
+            minijinja::context! {
+                link => minijinja::context! {
+                    identifier => identifier,
+                    href => href,
+                    content => content,
+                    resolved => false,
+                    link_metadata => link_metadata,
+                },
+                site => site_context,
+            }
+        };
+        let replacement = link_template
+            .render(context)
+            .map_err(|e| anyhow::anyhow!("failed to render link template for {identifier}: {e}"))?;
+        element.replace_with_html(replacement);
+    }
+
+    for element in document.select("wb-transclude").iter() {
+        let identifier = element
+            .attr("identifier")
+            .expect("bug: wb-transclude is missing an identifier");
+        let counter: u32 = element
+            .attr("counter")
+            .expect("bug: wb-transclude is missing a counter")
+            .parse()
+            .expect("bug: wb-transclude has invalid counter");
+        let transclusion_metadata = entry
+            .transclusion_metadata
+            .get(&counter)
+            .cloned()
+            .unwrap_or_default();
+        let transclude_id = interner
+            .get(identifier.as_ref())
+            .expect("bug: wb-transclude identifier was not interned");
+        let context = if let Some(target) = nodes.get(&transclude_id) {
+            let body = target
+                .rendered_body
+                .as_deref()
+                .expect("bug: wb-transclude target has no rendered_body");
+            minijinja::context! {
+                transclusion => minijinja::context! {
+                    identifier => identifier.as_ref(),
+                    href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
+                    resolved => true,
+                    title => target.title.as_str(),
+                    title_text => target.title_text.as_str(),
+                    body => body,
+                    metadata => target.metadata,
+                    transclusion_metadata => transclusion_metadata,
+                },
+                site => site_context,
+            }
+        } else {
+            minijinja::context! {
+                transclusion => minijinja::context! {
+                    identifier => identifier.as_ref(),
+                    resolved => false,
+                    transclusion_metadata => transclusion_metadata,
+                },
+                site => site_context,
+            }
+        };
+        let replacement = transclusion_template.render(context).map_err(|e| {
+            anyhow::anyhow!("failed to render transclusion template for {identifier}: {e}")
+        })?;
+        element.replace_with_html(replacement);
+    }
+
+    Ok(document.select("body").first().inner_html().to_string())
+}
+
+fn render_backmatter(
+    id: NodeId,
+    nodes: &HashMap<NodeId, NodeEntry>,
+    interner: &NodeInterner,
+    backmatter_template: &minijinja::Template<'_, '_>,
+    config: &RenderConfig,
+    site_context: &minijinja::Value,
+) -> anyhow::Result<String> {
+    let cache = nodes[&id]
+        .backmatter_cache
+        .as_ref()
+        .expect("bug: backmatter_render node has no backmatter_cache");
+
+    let node_info = |node_id: NodeId| {
+        let name = interner.name(node_id);
+        let entry = nodes.get(&node_id);
+        minijinja::context! {
+            id => name,
+            href => minijinja::Value::from_safe_string(config.href(name)),
+            title => entry.map(|e| e.title.as_str()).unwrap_or(""),
+            title_text => entry.map(|e| e.title_text.as_str()).unwrap_or(""),
+            metadata => entry.map(|e| &e.metadata),
+        }
+    };
+
+    let mut contexts_ids: Vec<NodeId> = cache.contexts.iter().copied().collect();
+    contexts_ids.sort_by_key(|&nid| interner.name(nid));
+    let contexts: Vec<_> = contexts_ids.into_iter().map(&node_info).collect();
+
+    let mut backlinks_ids: Vec<NodeId> = cache.backlinks.iter().copied().collect();
+    backlinks_ids.sort_by_key(|&nid| interner.name(nid));
+    let backlinks: Vec<_> = backlinks_ids.into_iter().map(&node_info).collect();
+
+    let mut outlinks_ids: Vec<NodeId> = cache.outlinks.iter().copied().collect();
+    outlinks_ids.sort_by_key(|&nid| interner.name(nid));
+    let outlinks: Vec<_> = outlinks_ids.into_iter().map(&node_info).collect();
+
+    let name = interner.name(id);
+    backmatter_template
+        .render(minijinja::context! {
+            backmatter => minijinja::context! {
+                contexts => contexts,
+                backlinks => backlinks,
+                outlinks => outlinks,
+            },
+            node => minijinja::context! {
+                id => name,
+                href => minijinja::Value::from_safe_string(config.href(name)),
+            },
+            site => site_context,
+        })
+        .map_err(|e| anyhow::anyhow!("failed to render backmatter template for {name}: {e}"))
+}
+
+fn render_node(
+    name: &str,
+    entry: &NodeEntry,
+    body: &str,
+    backmatter: &str,
+    node_template: &minijinja::Template<'_, '_>,
+    config: &RenderConfig,
+    site_context: &minijinja::Value,
+) -> anyhow::Result<String> {
+    node_template
+        .render(minijinja::context! {
+            node => minijinja::context! {
+                id => name,
+                href => minijinja::Value::from_safe_string(config.href(name)),
+                title => entry.title.as_str(),
+                title_text => entry.title_text.as_str(),
+                body => body,
+                backmatter => backmatter,
+                metadata => entry.metadata,
+            },
+            site => site_context,
+        })
+        .map_err(|e| anyhow::anyhow!("failed to render template for node {name}: {e}"))
 }
 
 pub struct OutputPlan {
