@@ -172,6 +172,42 @@ proptest! {
         }
     }
 
+    /// After each event, the incremental compiler's filesystem state must
+    /// exactly match `process_stateless` applied to the current node set.
+    ///
+    /// This catches mid-sequence bugs (e.g. skipped backmatter rerenders) that
+    /// the scratch-vs-incremental tests miss because those tests only compare
+    /// the final state after collapsing all events via `reduce_events`.
+    #[test]
+    fn compile_incremental_matches_reference(
+        events in arbitrary_events(&EventConfig::from_environment())
+    ) {
+        let config = render_config();
+        let mut incremental = Compiler::default();
+        let mut inc_fs: HashMap<String, String> = HashMap::new();
+        let mut current_nodes: HashMap<FileId, MockNode> = HashMap::new();
+
+        for event in &events {
+            match event {
+                Event::Update(id, node) => {
+                    incremental.update(node, file_id(*id));
+                    current_nodes.insert(file_id(*id), node.clone());
+                }
+                Event::Remove(id) => {
+                    incremental.remove(file_id(*id));
+                    current_nodes.remove(&file_id(*id));
+                }
+            }
+            apply(incremental.process(&config).unwrap(), &mut inc_fs);
+            let ref_fs = process_stateless(
+                &current_nodes.values().cloned().collect::<Vec<_>>(),
+                &config,
+            )
+            .unwrap();
+            prop_assert_eq!(&inc_fs, &ref_fs);
+        }
+    }
+
 }
 
 /// A single mock file: one primary node with edges to other nodes by ID.
@@ -441,4 +477,156 @@ fn render_config() -> RenderConfig {
 
 fn format_id(id: NonZeroU16) -> String {
     format!("n{id}")
+}
+
+/// Stateless reference implementation: compiles `mock_nodes` from scratch and
+/// returns the complete rendered filesystem as a map of node name → HTML.
+///
+/// Has no notion of previous state — no dirty/removed/metadata_dirty sets.
+/// Every call recomputes everything. Used as a test oracle against the
+/// incremental `Compiler`.
+fn process_stateless(
+    mock_nodes: &[MockNode],
+    config: &RenderConfig,
+) -> anyhow::Result<HashMap<String, String>> {
+    use std::collections::BTreeSet;
+
+    use petgraph::algo::tarjan_scc;
+    use petgraph::graphmap::DiGraphMap;
+
+    use super::{
+        NodeId, NodeInterner, backmatter_cache, extract, render_backmatter, render_body,
+        render_node,
+    };
+
+    let mut interner = NodeInterner::default();
+    let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
+    let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
+    let mut all_nodes: HashMap<NodeId, super::NodeEntry> = HashMap::new();
+
+    for mock_node in mock_nodes {
+        let typst::diag::Warned { output: result, .. } = mock_node.compile(file_id(mock_node.id));
+        if let Ok(output) = result
+            && let Ok(extracted) = extract(output, &mut interner, |_| false)
+        {
+            for (node_id, (entry, trans, lnks)) in extracted {
+                for &t in &trans {
+                    transclusions.add_edge(node_id, t, ());
+                }
+                for &l in &lnks {
+                    links.add_edge(node_id, l, ());
+                }
+                all_nodes.insert(node_id, entry);
+            }
+        }
+    }
+
+    let mut unrenderable: HashSet<NodeId> = HashSet::new();
+    let mut outlinks_accumulator: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+    let mut render_order: Vec<NodeId> = Vec::new();
+
+    let sccs = tarjan_scc(&transclusions);
+
+    for scc in &sccs {
+        let id = scc[0];
+        let is_cyclic = scc.len() > 1 || transclusions.contains_edge(id, id);
+
+        if is_cyclic {
+            unrenderable.extend(scc.iter().copied());
+        } else if transclusions.neighbors(id).any(|t| unrenderable.contains(&t)) {
+            unrenderable.insert(id);
+        } else if let Some(entry) = all_nodes.get_mut(&id) {
+            let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
+            outlinks_accumulator.insert(id, new_cache.outlinks.clone());
+            entry.backmatter_cache = Some(new_cache);
+            render_order.push(id);
+        }
+    }
+
+    // Nodes that appear in no transclusion edge (neither source nor target) are
+    // not visited by the SCC loop. Process them separately.
+    let isolated: Vec<NodeId> = all_nodes
+        .keys()
+        .copied()
+        .filter(|&id| !transclusions.contains_node(id))
+        .collect();
+
+    for id in isolated {
+        if let Some(entry) = all_nodes.get_mut(&id) {
+            let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
+            entry.backmatter_cache = Some(new_cache);
+            render_order.push(id);
+        }
+    }
+
+    let site_context = minijinja::context! {
+        root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
+        trailing_slash => config.trailing_slash,
+        index_node => config.index_node.as_str(),
+        domain => config.domain.as_str(),
+    };
+    let transclusion_template = config
+        .environment
+        .get_template(crate::config::TRANSCLUSION_TEMPLATE)
+        .expect("bug: transclusion.html template missing");
+    let link_template = config
+        .environment
+        .get_template(crate::config::LINK_TEMPLATE)
+        .expect("bug: link.html template missing");
+    let node_template = config
+        .environment
+        .get_template(crate::config::NODE_TEMPLATE)
+        .expect("bug: node.html template missing");
+    let backmatter_template = config
+        .environment
+        .get_template(crate::config::BACKMATTER_TEMPLATE)
+        .expect("bug: backmatter.html template missing");
+
+    for &id in &render_order {
+        let rendered_body = render_body(
+            id,
+            &all_nodes,
+            &interner,
+            &link_template,
+            &transclusion_template,
+            config,
+            &site_context,
+        )?;
+        all_nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
+        let rendered_backmatter = render_backmatter(
+            id,
+            &all_nodes,
+            &interner,
+            &backmatter_template,
+            config,
+            &site_context,
+        )?;
+        all_nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
+    }
+
+    render_order
+        .iter()
+        .map(|&id| -> anyhow::Result<(String, String)> {
+            let name = interner.name(id);
+            let entry = &all_nodes[&id];
+            let body = entry
+                .rendered_body
+                .as_deref()
+                .expect("bug: no rendered_body after pass 2");
+            let backmatter = entry
+                .rendered_backmatter
+                .as_deref()
+                .expect("bug: no rendered_backmatter after pass 2");
+            let html = render_node(
+                name,
+                entry,
+                body,
+                backmatter,
+                &node_template,
+                config,
+                &site_context,
+            )?;
+            Ok((name.to_owned(), html))
+        })
+        .collect::<anyhow::Result<_>>()
 }
