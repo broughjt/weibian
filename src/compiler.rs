@@ -11,10 +11,10 @@ use crate::config::{
 };
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
+use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Bfs, Reversed};
-use petgraph::Direction;
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::foundations::{Dict, NativeElement, Packed, Repr, Value};
@@ -58,8 +58,7 @@ impl Compiler {
         // yet.
         let nodes_result = result.and_then(|output| {
             extract(output, &mut self.interner, |node_id| {
-                self.nodes.contains_key(&node_id)
-                    && self.node_to_file.get(&node_id) != Some(&id)
+                self.nodes.contains_key(&node_id) && self.node_to_file.get(&node_id) != Some(&id)
             })
         });
 
@@ -381,8 +380,7 @@ impl Compiler {
                 continue;
             }
 
-            let mut outlinks: BTreeSet<NodeId> =
-                self.links.neighbors(id).collect();
+            let mut outlinks: BTreeSet<NodeId> = self.links.neighbors(id).collect();
             for target in self.transclusions.neighbors(id) {
                 if let Some(acc) = outlinks_accum.get(&target) {
                     outlinks.extend(acc.iter().copied());
@@ -405,7 +403,10 @@ impl Compiler {
                 outlinks,
             };
 
-            let entry = self.nodes.get_mut(&id).expect("bug: node in scc has no entry");
+            let entry = self
+                .nodes
+                .get_mut(&id)
+                .expect("bug: node in scc has no entry");
             let needs_rerender = match &entry.backmatter_cache {
                 None => true,
                 Some(old) => {
@@ -446,8 +447,15 @@ impl Compiler {
                 .links
                 .neighbors_directed(id, Direction::Incoming)
                 .collect();
-            let new_cache = BackmatterCache { contexts, backlinks, outlinks };
-            let entry = self.nodes.get_mut(&id).expect("bug: dirty node has no entry");
+            let new_cache = BackmatterCache {
+                contexts,
+                backlinks,
+                outlinks,
+            };
+            let entry = self
+                .nodes
+                .get_mut(&id)
+                .expect("bug: dirty node has no entry");
             let needs_rerender = match &entry.backmatter_cache {
                 None => true,
                 Some(old) => {
@@ -686,7 +694,8 @@ impl Compiler {
                     .rendered_body
                     .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
-                let backmatter = entry.rendered_backmatter.as_deref().unwrap_or("");
+                // TODO: We should panic if rendered backmatter is missing at this point, right?
+                let backmatter = entry.rendered_backmatter.as_deref().unwrap_or_default();
                 let html = node_template
                     .render(minijinja::context! {
                         node => minijinja::context! {
@@ -1278,8 +1287,8 @@ fn collect_metadata<I: Introspector>(
                     }
 
                     match node_result.entry(identifier) {
-                        Entry::Vacant(e) => {
-                            e.insert(normalize_metadata(dictionary));
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
                         }
                         Entry::Occupied(e) => {
                             errors.push(SourceDiagnostic::error(
