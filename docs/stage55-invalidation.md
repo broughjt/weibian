@@ -1,8 +1,8 @@
 Consider a node $a$. The following sets of nodes contribute to its backmatter:
 
-- $Contexts(a) = \{ b | b \text{transcludes} a \}$
-- $Backlinks(a) = \{ b | b \text{links to} a \}$
-- $TranscludedLinks = \{ c | \exists b, a \text{transcludes} b \land b \text{links to} c \}$
+- $Contexts(a) = \{ b \mid b \text{transcludes} a \}$
+- $Backlinks(a) = \{ b \mid b \text{links to} a \}$
+- $TranscludedLinks = \{ c \mid \exists b \in {a} \cup Desc(a), b \text{links to} c \}$
 
 If we prevent inline body rendering in backmatter, I claim that we can know
 whether to rerender a node's backmatter using the following condition. We should
