@@ -2,17 +2,19 @@
 mod tests;
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 
 use crate::config::{
-    BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE,
+    BACKMATTER_TEMPLATE, BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig,
+    TRANSCLUSION_TEMPLATE,
 };
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Bfs, Reversed};
+use petgraph::Direction;
 use typst::World;
 use typst::diag::{Severity, SourceDiagnostic, Warned};
 use typst::foundations::{Dict, NativeElement, Packed, Repr, Value};
@@ -36,6 +38,7 @@ pub struct Compiler {
     interner: NodeInterner,
     dirty: HashSet<NodeId>,
     removed: HashSet<NodeId>,
+    metadata_dirty: HashSet<NodeId>,
 }
 
 impl Compiler {
@@ -45,23 +48,39 @@ impl Compiler {
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
     pub fn update<C: Compile>(&mut self, compiler: &C, id: FileId) {
-        // Orphan all nodes from the previous compilation; nodes that reappear
-        // are de-orphaned in the `Ok` branch below.
-        self.remove(id);
-
         let Warned {
             output: result,
             warnings,
         } = compiler.compile(id);
 
+        // Exclude nodes belonging to this file from the duplicate check: they
+        // are being replaced, not duplicated, and remove() hasn't been called
+        // yet.
         let nodes_result = result.and_then(|output| {
-            extract(output, &mut self.interner, |id| {
-                self.nodes.contains_key(&id)
+            extract(output, &mut self.interner, |node_id| {
+                self.nodes.contains_key(&node_id)
+                    && self.node_to_file.get(&node_id) != Some(&id)
             })
         });
 
         match nodes_result {
             Ok(nodes) => {
+                // Compare new title/metadata against old entries before
+                // remove() clears them, so we can track which nodes had their
+                // displayable backmatter information change.
+                for (&node_id, (entry, _, _)) in &nodes {
+                    if self.nodes.get(&node_id).is_some_and(|old| {
+                        old.title != entry.title || old.metadata != entry.metadata
+                    }) {
+                        self.metadata_dirty.insert(node_id);
+                    }
+                    // New nodes are not added to metadata_dirty: no existing
+                    // BackmatterCache can reference a node that didn't exist.
+                }
+
+                // Now safe to orphan the old compilation.
+                self.remove(id);
+
                 for (&node_id, (_, transclusions, links)) in &nodes {
                     self.node_to_file.insert(node_id, id);
                     self.removed.remove(&node_id);
@@ -86,6 +105,7 @@ impl Compiler {
                 }
             }
             Err(errors) => {
+                self.remove(id);
                 self.compile_diagnostics.insert(id, (warnings, errors));
             }
         }
@@ -110,6 +130,18 @@ impl Compiler {
         }
 
         self.compile_diagnostics.remove(&id);
+    }
+
+    /// Returns true if any node produced by the file with the given ID exists
+    /// in the current node store.
+    ///
+    /// Used in tests to check whether a node is present before querying it.
+    #[cfg(test)]
+    pub fn has_node(&self, id: std::num::NonZeroU16) -> bool {
+        let node_id_str = format!("n{id}");
+        self.interner
+            .get(&node_id_str)
+            .is_some_and(|node_id| self.nodes.contains_key(&node_id))
     }
 
     /// Returns all compile-time diagnostics, keyed by source [`FileId`].
@@ -234,6 +266,7 @@ impl Compiler {
 
         let dirty = std::mem::take(&mut self.dirty);
         let removed = std::mem::take(&mut self.removed);
+        let metadata_dirty = std::mem::take(&mut self.metadata_dirty);
         let reversed = Reversed(&self.transclusions);
         let mut render: HashSet<NodeId> = HashSet::new();
 
@@ -327,6 +360,127 @@ impl Compiler {
             }
         }
 
+        // Backmatter computation (part of Pass 1).
+        //
+        // Compute backmatter sets for every node in the transclusion graph,
+        // then diff against the cached sets to determine which nodes need their
+        // backmatter re-rendered.
+        //
+        // `outlinks_accum[a]` = direct links from `a` ∪ outlinks of every
+        // node that `a` transitively transcludes. Because `sccs` is in reverse
+        // topological order (leaves first), each transclusion target's entry is
+        // already present when we visit the parent.
+        let mut outlinks_accum: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+        let mut backmatter_render: HashSet<NodeId> = HashSet::new();
+
+        for scc in &sccs {
+            let id = scc[0];
+            // Removed nodes remain as targets in the transclusion graph until
+            // the edge from their parent is cleared; skip them here.
+            if !self.nodes.contains_key(&id) || unrenderable.contains(&id) {
+                continue;
+            }
+
+            let mut outlinks: BTreeSet<NodeId> =
+                self.links.neighbors(id).collect();
+            for target in self.transclusions.neighbors(id) {
+                if let Some(acc) = outlinks_accum.get(&target) {
+                    outlinks.extend(acc.iter().copied());
+                }
+            }
+            outlinks_accum.insert(id, outlinks.clone());
+
+            let contexts: BTreeSet<NodeId> = self
+                .transclusions
+                .neighbors_directed(id, Direction::Incoming)
+                .collect();
+            let backlinks: BTreeSet<NodeId> = self
+                .links
+                .neighbors_directed(id, Direction::Incoming)
+                .collect();
+
+            let new_cache = BackmatterCache {
+                contexts,
+                backlinks,
+                outlinks,
+            };
+
+            let entry = self.nodes.get_mut(&id).expect("bug: node in scc has no entry");
+            let needs_rerender = match &entry.backmatter_cache {
+                None => true,
+                Some(old) => {
+                    old.contexts != new_cache.contexts
+                        || old.backlinks != new_cache.backlinks
+                        || old.outlinks != new_cache.outlinks
+                        || new_cache
+                            .contexts
+                            .iter()
+                            .chain(new_cache.backlinks.iter())
+                            .chain(new_cache.outlinks.iter())
+                            .any(|member| {
+                                metadata_dirty.contains(member) || removed.contains(member)
+                            })
+                }
+            };
+
+            entry.backmatter_cache = Some(new_cache);
+
+            if needs_rerender {
+                backmatter_render.insert(id);
+            }
+        }
+
+        // Also check isolated nodes (not in the transclusion graph) that are
+        // in the render set. Their contexts and backlinks may have changed even
+        // though they have no transclusion edges.
+        for &id in &dirty {
+            if self.transclusions.contains_node(id) || unrenderable.contains(&id) {
+                continue;
+            }
+            let outlinks: BTreeSet<NodeId> = self.links.neighbors(id).collect();
+            let contexts: BTreeSet<NodeId> = self
+                .transclusions
+                .neighbors_directed(id, Direction::Incoming)
+                .collect();
+            let backlinks: BTreeSet<NodeId> = self
+                .links
+                .neighbors_directed(id, Direction::Incoming)
+                .collect();
+            let new_cache = BackmatterCache { contexts, backlinks, outlinks };
+            let entry = self.nodes.get_mut(&id).expect("bug: dirty node has no entry");
+            let needs_rerender = match &entry.backmatter_cache {
+                None => true,
+                Some(old) => {
+                    old.contexts != new_cache.contexts
+                        || old.backlinks != new_cache.backlinks
+                        || old.outlinks != new_cache.outlinks
+                        || new_cache
+                            .contexts
+                            .iter()
+                            .chain(new_cache.backlinks.iter())
+                            .chain(new_cache.outlinks.iter())
+                            .any(|member| {
+                                metadata_dirty.contains(member) || removed.contains(member)
+                            })
+                }
+            };
+            entry.backmatter_cache = Some(new_cache);
+            if needs_rerender {
+                backmatter_render.insert(id);
+            }
+        }
+
+        // Nodes that need only backmatter re-rendered (body unchanged) are
+        // appended to render_order after the topo-ordered body nodes. Their
+        // relative order doesn't matter since backmatter rendering has no
+        // inter-node dependencies.
+        render_order.extend(
+            backmatter_render
+                .iter()
+                .copied()
+                .filter(|id| !render.contains(id) && !unrenderable.contains(id)),
+        );
+
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
         let site_context = minijinja::context! {
@@ -348,131 +502,179 @@ impl Compiler {
             .environment
             .get_template(NODE_TEMPLATE)
             .expect("bug: node.html template missing from environment");
+        let backmatter_template = config
+            .environment
+            .get_template(BACKMATTER_TEMPLATE)
+            .expect("bug: backmatter.html template missing from environment");
 
         for &id in &render_order {
-            let raw_html = self.nodes[&id].raw_html.as_str();
-            let document = Document::from(raw_html);
+            if render.contains(&id) {
+                let raw_html = self.nodes[&id].raw_html.as_str();
+                let document = Document::from(raw_html);
 
-            // Render internal links. Done before transclusion substitution so
-            // that links inside already-rendered transclusion bodies are not
-            // double-processed.
-            if self.links.neighbors(id).next().is_some() {
-                let links = document.select("a").iter().filter_map(|element| {
-                    element
-                        .attr("href")
-                        .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
-                        .map(|identifier| (element, identifier))
-                });
-                for (element, identifier) in links {
-                    let counter: u32 = element
-                        .attr("data-counter")
-                        .expect("bug: link is missing a data-counter")
-                        .parse()
-                        .expect("bug: link has invalid data-counter");
-                    let href = minijinja::Value::from_safe_string(config.href(&identifier));
-                    let content = element.inner_html().to_string();
-                    let link_metadata = self.nodes[&id]
-                        .link_metadata
-                        .get(&counter)
-                        .cloned()
-                        .unwrap_or_default();
-                    let context = if let Some(target_id) = self.interner.get(&identifier)
-                        && let Some(entry) = self.nodes.get(&target_id)
-                    {
-                        minijinja::context! {
-                            link => minijinja::context! {
-                                identifier => identifier,
-                                href => &href,
-                                content => content,
-                                resolved => true,
-                                title => entry.title.as_str(),
-                                title_text => entry.title_text.as_str(),
-                                metadata => entry.metadata,
-                                link_metadata => link_metadata,
-                            },
-                            site => site_context,
-                        }
-                    } else {
-                        minijinja::context! {
-                            link => minijinja::context! {
-                                identifier => identifier,
-                                href => href,
-                                content => content,
-                                resolved => false,
-                                link_metadata => link_metadata,
-                            },
-                            site => site_context,
-                        }
-                    };
-                    let replacement = link_template.render(context).map_err(|e| {
-                        anyhow::anyhow!("failed to render link template for {identifier}: {e}")
-                    })?;
+                // Render internal links. Done before transclusion substitution so
+                // that links inside already-rendered transclusion bodies are not
+                // double-processed.
+                if self.links.neighbors(id).next().is_some() {
+                    let links = document.select("a").iter().filter_map(|element| {
+                        element
+                            .attr("href")
+                            .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
+                            .map(|identifier| (element, identifier))
+                    });
+                    for (element, identifier) in links {
+                        let counter: u32 = element
+                            .attr("data-counter")
+                            .expect("bug: link is missing a data-counter")
+                            .parse()
+                            .expect("bug: link has invalid data-counter");
+                        let href = minijinja::Value::from_safe_string(config.href(&identifier));
+                        let content = element.inner_html().to_string();
+                        let link_metadata = self.nodes[&id]
+                            .link_metadata
+                            .get(&counter)
+                            .cloned()
+                            .unwrap_or_default();
+                        let context = if let Some(target_id) = self.interner.get(&identifier)
+                            && let Some(entry) = self.nodes.get(&target_id)
+                        {
+                            minijinja::context! {
+                                link => minijinja::context! {
+                                    identifier => identifier,
+                                    href => &href,
+                                    content => content,
+                                    resolved => true,
+                                    title => entry.title.as_str(),
+                                    title_text => entry.title_text.as_str(),
+                                    metadata => entry.metadata,
+                                    link_metadata => link_metadata,
+                                },
+                                site => site_context,
+                            }
+                        } else {
+                            minijinja::context! {
+                                link => minijinja::context! {
+                                    identifier => identifier,
+                                    href => href,
+                                    content => content,
+                                    resolved => false,
+                                    link_metadata => link_metadata,
+                                },
+                                site => site_context,
+                            }
+                        };
+                        let replacement = link_template.render(context).map_err(|e| {
+                            anyhow::anyhow!("failed to render link template for {identifier}: {e}")
+                        })?;
 
-                    element.replace_with_html(replacement);
+                        element.replace_with_html(replacement);
+                    }
                 }
+
+                if self.transclusions.neighbors(id).next().is_some() {
+                    for element in document.select("wb-transclude").iter() {
+                        let identifier = element
+                            .attr("identifier")
+                            .expect("bug: wb-transclude is missing an identifier");
+                        let counter: u32 = element
+                            .attr("counter")
+                            .expect("bug: wb-transclude is missing a counter")
+                            .parse()
+                            .expect("bug: wb-transclude has invalid counter");
+                        let transclusion_metadata = self.nodes[&id]
+                            .transclusion_metadata
+                            .get(&counter)
+                            .cloned()
+                            .unwrap_or_default();
+                        let transclude_id = self
+                            .interner
+                            .get(identifier.as_ref())
+                            .expect("bug: wb-transclude identifier was not interned");
+                        let context = if let Some(entry) = self.nodes.get(&transclude_id) {
+                            let body = entry
+                                .rendered_body
+                                .as_deref()
+                                .expect("bug: wb-transclude target has no rendered_body");
+
+                            minijinja::context! {
+                                transclusion => minijinja::context! {
+                                    identifier => identifier.as_ref(),
+                                    href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
+                                    resolved => true,
+                                    title => entry.title.as_str(),
+                                    title_text => entry.title_text.as_str(),
+                                    body => body,
+                                    metadata => entry.metadata,
+                                    transclusion_metadata => transclusion_metadata,
+                                },
+                                site => site_context,
+                            }
+                        } else {
+                            minijinja::context! {
+                                transclusion => minijinja::context! {
+                                    identifier => identifier.as_ref(),
+                                    resolved => false,
+                                    transclusion_metadata => transclusion_metadata,
+                                },
+                                site => site_context,
+                            }
+                        };
+                        let replacement = transclusion_template.render(context).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to render transclusion template for {identifier}: {e}"
+                            )
+                        })?;
+
+                        element.replace_with_html(replacement);
+                    }
+                }
+
+                let rendered_body = document.select("body").first().inner_html().to_string();
+                self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
             }
 
-            if self.transclusions.neighbors(id).next().is_some() {
-                for element in document.select("wb-transclude").iter() {
-                    let identifier = element
-                        .attr("identifier")
-                        .expect("bug: wb-transclude is missing an identifier");
-                    let counter: u32 = element
-                        .attr("counter")
-                        .expect("bug: wb-transclude is missing a counter")
-                        .parse()
-                        .expect("bug: wb-transclude has invalid counter");
-                    let transclusion_metadata = self.nodes[&id]
-                        .transclusion_metadata
-                        .get(&counter)
-                        .cloned()
-                        .unwrap_or_default();
-                    let id = self
-                        .interner
-                        .get(identifier.as_ref())
-                        .expect("bug: wb-transclude identifier was not interned");
-                    let context = if let Some(entry) = self.nodes.get(&id) {
-                        let body = entry
-                            .rendered_body
-                            .as_deref()
-                            .expect("bug: wb-transclude target has no rendered_body");
+            if backmatter_render.contains(&id) {
+                let cache = self.nodes[&id]
+                    .backmatter_cache
+                    .as_ref()
+                    .expect("bug: backmatter_render node has no backmatter_cache");
 
-                        minijinja::context! {
-                            transclusion => minijinja::context! {
-                                identifier => identifier.as_ref(),
-                                href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
-                                resolved => true,
-                                title => entry.title.as_str(),
-                                title_text => entry.title_text.as_str(),
-                                body => body,
-                                metadata => entry.metadata,
-                                transclusion_metadata => transclusion_metadata,
-                            },
-                            site => site_context,
-                        }
-                    } else {
-                        minijinja::context! {
-                            transclusion => minijinja::context! {
-                                identifier => identifier.as_ref(),
-                                resolved => false,
-                                transclusion_metadata => transclusion_metadata,
-                            },
-                            site => site_context,
-                        }
-                    };
-                    let replacement = transclusion_template.render(context).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to render transclusion template for {identifier}: {e}"
-                        )
+                let node_info = |node_id: NodeId| {
+                    let name = self.interner.name(node_id);
+                    let entry = self.nodes.get(&node_id);
+                    minijinja::context! {
+                        id => name,
+                        href => minijinja::Value::from_safe_string(config.href(name)),
+                        title => entry.map(|e| e.title.as_str()).unwrap_or(""),
+                        title_text => entry.map(|e| e.title_text.as_str()).unwrap_or(""),
+                        metadata => entry.map(|e| &e.metadata),
+                    }
+                };
+
+                let contexts: Vec<_> = cache.contexts.iter().copied().map(&node_info).collect();
+                let backlinks: Vec<_> = cache.backlinks.iter().copied().map(&node_info).collect();
+                let outlinks: Vec<_> = cache.outlinks.iter().copied().map(&node_info).collect();
+
+                let name = self.interner.name(id);
+                let rendered_backmatter = backmatter_template
+                    .render(minijinja::context! {
+                        backmatter => minijinja::context! {
+                            contexts => contexts,
+                            backlinks => backlinks,
+                            outlinks => outlinks,
+                        },
+                        node => minijinja::context! {
+                            id => name,
+                            href => minijinja::Value::from_safe_string(config.href(name)),
+                        },
+                        site => site_context,
+                    })
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to render backmatter template for {name}: {e}")
                     })?;
 
-                    element.replace_with_html(replacement);
-                }
+                self.nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
             }
-
-            let rendered_body = document.select("body").first().inner_html().to_string();
-
-            self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
         }
 
         let writes = render_order
@@ -484,6 +686,7 @@ impl Compiler {
                     .rendered_body
                     .as_deref()
                     .expect("bug: renderable node has no rendered_body after pass 2");
+                let backmatter = entry.rendered_backmatter.as_deref().unwrap_or("");
                 let html = node_template
                     .render(minijinja::context! {
                         node => minijinja::context! {
@@ -492,6 +695,7 @@ impl Compiler {
                             title => entry.title.as_str(),
                             title_text => entry.title_text.as_str(),
                             body => body,
+                            backmatter => backmatter,
                             metadata => entry.metadata,
                         },
                         site => site_context,
@@ -613,6 +817,14 @@ impl NodeInterner {
     }
 }
 
+/// Cached backmatter sets for a node, used to determine whether backmatter
+/// needs to be re-rendered on the next [`Compiler::process`] call.
+pub struct BackmatterCache {
+    pub contexts: BTreeSet<NodeId>,
+    pub backlinks: BTreeSet<NodeId>,
+    pub outlinks: BTreeSet<NodeId>,
+}
+
 pub struct NodeEntry {
     pub raw_html: String,
     pub title: String,
@@ -625,6 +837,7 @@ pub struct NodeEntry {
     pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     pub rendered_body: Option<String>,
     pub rendered_backmatter: Option<String>,
+    pub backmatter_cache: Option<BackmatterCache>,
 }
 
 impl Default for NodeEntry {
@@ -639,6 +852,7 @@ impl Default for NodeEntry {
             link_metadata: HashMap::new(),
             rendered_body: None,
             rendered_backmatter: None,
+            backmatter_cache: None,
         }
     }
 }

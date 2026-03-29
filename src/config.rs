@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer};
 pub const NODE_TEMPLATE: &str = "node.html";
 pub const TRANSCLUSION_TEMPLATE: &str = "transclusion.html";
 pub const LINK_TEMPLATE: &str = "link.html";
+pub const BACKMATTER_TEMPLATE: &str = "backmatter.html";
 
 const DEFAULT_CONFIG_NAME: &str = "weibian.toml";
 
@@ -106,6 +107,7 @@ pub struct TemplatesConfig {
     pub node: PathBuf,
     pub transclusion: PathBuf,
     pub link: PathBuf,
+    pub backmatter: PathBuf,
 }
 
 impl Default for TemplatesConfig {
@@ -114,6 +116,7 @@ impl Default for TemplatesConfig {
             node: PathBuf::from(NODE_TEMPLATE),
             transclusion: PathBuf::from(TRANSCLUSION_TEMPLATE),
             link: PathBuf::from(LINK_TEMPLATE),
+            backmatter: PathBuf::from(BACKMATTER_TEMPLATE),
         }
     }
 }
@@ -270,6 +273,27 @@ impl BuildConfig {
                 anyhow!(
                     "failed to parse link template {}: {e}",
                     link_template_path.display()
+                )
+            })?;
+
+        let backmatter_template_path = if config.templates.backmatter.is_absolute() {
+            config.templates.backmatter
+        } else {
+            root.join(config.templates.backmatter)
+        };
+        let backmatter_template_source =
+            fs::read_to_string(&backmatter_template_path).map_err(|e| {
+                anyhow!(
+                    "failed to read backmatter template {}: {e}",
+                    backmatter_template_path.display()
+                )
+            })?;
+        environment
+            .add_template_owned(BACKMATTER_TEMPLATE, backmatter_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse backmatter template {}: {e}",
+                    backmatter_template_path.display()
                 )
             })?;
 

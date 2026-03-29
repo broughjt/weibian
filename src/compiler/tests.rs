@@ -8,7 +8,9 @@ use proptest::prelude::*;
 use proptest::sample::subsequence;
 
 use crate::compiler::{Compile, CompileOutput, Compiler, OutputPlan};
-use crate::config::{LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE};
+use crate::config::{
+    BACKMATTER_TEMPLATE, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE,
+};
 use ecow::EcoVec;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
@@ -110,6 +112,64 @@ proptest! {
         let second = compiler.process(&config).unwrap();
         prop_assert!(second.writes.is_empty(), "expected no writes on second process call, got {:?}", second.writes.keys().collect::<Vec<_>>());
         prop_assert!(second.deletes.is_empty(), "expected no deletes on second process call, got {:?}", second.deletes);
+    }
+
+    /// A title-only change to node B must cause any node whose backmatter
+    /// references B (via contexts, backlinks, or outlinks) to appear in the
+    /// next OutputPlan's writes.
+    #[test]
+    fn metadata_change_triggers_backmatter_rerender(
+        events in arbitrary_events(&EventConfig::from_environment()),
+        changed_id in any::<NonZeroU16>(),
+    ) {
+        let config = render_config();
+        let mut compiler = Compiler::default();
+
+        for event in &events {
+            match event {
+                Event::Update(id, node) => compiler.update(node, file_id(*id)),
+                Event::Remove(id) => compiler.remove(file_id(*id)),
+            }
+        }
+        let first = compiler.process(&config).unwrap();
+        let mut files: HashMap<String, String> = HashMap::new();
+        apply(first, &mut files);
+
+        // Emit a title-only update for changed_id (no edge changes).
+        let node_id_str = format_id(changed_id);
+        let changed_file = file_id(changed_id);
+        if !compiler.has_node(changed_id) {
+            // Node doesn't exist yet; insert a fresh one with no edges.
+            let node = MockNode { id: changed_id, title: "before".into(), body: String::new(), transcludes: vec![], links: vec![] };
+            compiler.update(&node, changed_file);
+            compiler.process(&config).unwrap();
+        }
+
+        // Update with a new title, keeping edges identical.
+        let new_node = MockNode { id: changed_id, title: "after".into(), body: String::new(), transcludes: vec![], links: vec![] };
+        compiler.update(&new_node, changed_file);
+        let second = compiler.process(&config).unwrap();
+
+        // changed_id itself must be rewritten (body dirty).
+        if second.writes.contains_key(&node_id_str) || files.contains_key(&node_id_str) {
+            prop_assert!(second.writes.contains_key(&node_id_str),
+                "node {node_id_str} was not rewritten after title change");
+        }
+
+        // Every node whose rendered output previously contained changed_id in
+        // its backmatter must be rewritten.
+        for (name, old_html) in &files {
+            let references_changed =
+                old_html.contains(&format!("<ctx>{node_id_str}</ctx>"))
+                || old_html.contains(&format!("<bl>{node_id_str}</bl>"))
+                || old_html.contains(&format!("<ol>{node_id_str}</ol>"));
+            if references_changed {
+                prop_assert!(
+                    second.writes.contains_key(name.as_str()),
+                    "node {name} references {node_id_str} in backmatter but was not rewritten"
+                );
+            }
+        }
     }
 
 }
@@ -348,6 +408,15 @@ fn render_config() -> RenderConfig {
     )
     .to_string();
 
+    // Backmatter template: renders contexts, backlinks, outlinks as plain ID
+    // lists so the property tests can observe backmatter content changes.
+    let backmatter_template = concat!(
+        "{%- for n in backmatter.contexts -%}<ctx>{{ n.id }}</ctx>{%- endfor -%}",
+        "{%- for n in backmatter.backlinks -%}<bl>{{ n.id }}</bl>{%- endfor -%}",
+        "{%- for n in backmatter.outlinks -%}<ol>{{ n.id }}</ol>{%- endfor -%}",
+    )
+    .to_string();
+
     let mut environment = minijinja::Environment::new();
     environment
         .add_template_owned(NODE_TEMPLATE, node_template)
@@ -357,6 +426,9 @@ fn render_config() -> RenderConfig {
         .unwrap();
     environment
         .add_template_owned(LINK_TEMPLATE, link_template)
+        .unwrap();
+    environment
+        .add_template_owned(BACKMATTER_TEMPLATE, backmatter_template)
         .unwrap();
     RenderConfig {
         root_directory: "/".to_string(),
