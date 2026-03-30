@@ -13,8 +13,8 @@ use crate::compiler::{
 use crate::config::RenderConfig;
 
 use super::super::{
-    cycle_diagnostics, dangling_link_diagnostic, dangling_transclusion_diagnostic, extract,
-    render_backmatter, render_body, render_node,
+    Renderer, cycle_diagnostics, dangling_link_diagnostic, dangling_transclusion_diagnostic,
+    extract,
 };
 use super::mock::MockNode;
 
@@ -162,62 +162,23 @@ pub(super) fn process_stateless(
         .rev()
         .collect();
 
-    let site_context = minijinja::context! {
-        root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
-        trailing_slash => config.trailing_slash,
-        index_node => config.index_node.as_str(),
-        domain => config.domain.as_str(),
-    };
-    let transclusion_template = config
-        .environment
-        .get_template(crate::config::TRANSCLUSION_TEMPLATE)
-        .expect("bug: transclusion.html template missing");
-    let link_template = config
-        .environment
-        .get_template(crate::config::LINK_TEMPLATE)
-        .expect("bug: link.html template missing");
-    let node_template = config
-        .environment
-        .get_template(crate::config::NODE_TEMPLATE)
-        .expect("bug: node.html template missing");
-    let backmatter_template = config
-        .environment
-        .get_template(crate::config::BACKMATTER_TEMPLATE)
-        .expect("bug: backmatter.html template missing");
-
     let mut output = HashMap::new();
     let mut rendered_bodies: HashMap<NodeId, String> = HashMap::new();
     let mut rendered_backmatters: HashMap<NodeId, String> = HashMap::new();
+    let renderer = Renderer::new(&nodes, &interner, config);
 
     for &id in &render_order {
         let backmatter = collect_backmatter(id, &links, &transclusions);
 
-        let rendered_body = render_body(
-            id,
-            &nodes,
-            &rendered_bodies,
-            &interner,
-            &link_template,
-            &transclusion_template,
-            config,
-            &site_context,
-        )?;
+        let rendered_body = renderer.render_body(id, &rendered_bodies)?;
         rendered_bodies.insert(id, rendered_body);
 
-        let rendered_backmatter = render_backmatter(
-            id,
-            &backmatter,
-            &nodes,
-            &interner,
-            &backmatter_template,
-            config,
-            &site_context,
-        )?;
+        let rendered_backmatter = renderer.render_backmatter(id, &backmatter)?;
         rendered_backmatters.insert(id, rendered_backmatter);
 
         let name = interner.name(id);
         let entry = &nodes[&id];
-        let html = render_node(
+        let html = renderer.render_node(
             name,
             entry,
             rendered_bodies
@@ -228,9 +189,6 @@ pub(super) fn process_stateless(
                 .get(&id)
                 .map(String::as_str)
                 .expect("bug: stateless rendered backmatter missing after render_backmatter"),
-            &node_template,
-            config,
-            &site_context,
         )?;
 
         output.insert(name.to_owned(), html);

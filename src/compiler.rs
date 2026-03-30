@@ -15,11 +15,8 @@ use typst::syntax::{FileId, Span};
 
 use self::extract::extract;
 pub use self::extract::{Compile, CompileOutput, TypstCompile};
-use self::render::{render_backmatter, render_body, render_node};
-use crate::config::{
-    BACKMATTER_TEMPLATE, BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig,
-    TRANSCLUSION_TEMPLATE,
-};
+use self::render::Renderer;
+use crate::config::{BuildConfig, RenderConfig};
 
 pub type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
 pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
@@ -354,55 +351,19 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
-        let site_context = minijinja::context! {
-            root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
-            trailing_slash => config.trailing_slash,
-            index_node => config.index_node.as_str(),
-            domain => config.domain.as_str(),
-        };
-
-        let transclusion_template = config
-            .environment
-            .get_template(TRANSCLUSION_TEMPLATE)
-            .expect("bug: transclusion.html template missing from environment");
-        let link_template = config
-            .environment
-            .get_template(LINK_TEMPLATE)
-            .expect("bug: link.html template missing from environment");
-        let node_template = config
-            .environment
-            .get_template(NODE_TEMPLATE)
-            .expect("bug: node.html template missing from environment");
-        let backmatter_template = config
-            .environment
-            .get_template(BACKMATTER_TEMPLATE)
-            .expect("bug: backmatter.html template missing from environment");
+        let renderer = Renderer::new(&self.nodes, &self.interner, config);
 
         for &id in &render_order {
             if body_affected.contains(&id) {
-                let rendered_body = render_body(
-                    id,
-                    &self.nodes,
-                    &self.rendered_bodies,
-                    &self.interner,
-                    &link_template,
-                    &transclusion_template,
-                    config,
-                    &site_context,
-                )?;
+                let rendered_body = renderer.render_body(id, &self.rendered_bodies)?;
                 self.rendered_bodies.insert(id, rendered_body);
             }
             if backmatter_affected.contains(&id) {
-                let rendered_backmatter = render_backmatter(
+                let rendered_backmatter = renderer.render_backmatter(
                     id,
                     self.backmatters
                         .get(&id)
                         .expect("bug: renderable node has no backmatter after pass 1"),
-                    &self.nodes,
-                    &self.interner,
-                    &backmatter_template,
-                    config,
-                    &site_context,
                 )?;
                 self.rendered_backmatters.insert(id, rendered_backmatter);
             }
@@ -423,15 +384,7 @@ impl Compiler {
                     .get(&id)
                     .map(String::as_str)
                     .expect("bug: renderable node has no rendered backmatter after pass 2");
-                let html = render_node(
-                    name,
-                    entry,
-                    body,
-                    backmatter,
-                    &node_template,
-                    config,
-                    &site_context,
-                )?;
+                let html = renderer.render_node(name, entry, body, backmatter)?;
 
                 Ok((name.to_owned(), html))
             })
