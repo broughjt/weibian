@@ -1,10 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ecow::EcoVec;
+use petgraph::algo::tarjan_scc;
+use petgraph::prelude::DiGraphMap;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::FileId;
 
-use crate::compiler::{Compile, NodeEntry, NodeId, NodeInterner};
+use crate::compiler::{
+    Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
+};
 use crate::config::RenderConfig;
 
 use super::super::{
@@ -12,9 +16,6 @@ use super::super::{
     dangling_transclusion_diagnostic, extract, render_backmatter, render_body, render_node,
 };
 use super::mock::MockNode;
-
-type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
-type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 
 /// Stateless reference implementation: compiles `mock_nodes` from scratch and
 /// returns the complete rendered filesystem, compile diagnostics, and process
@@ -31,11 +32,6 @@ pub(super) fn process_stateless(
     CompileDiagnostics,
     ProcessDiagnostics,
 )> {
-    use std::collections::BTreeSet;
-
-    use petgraph::algo::tarjan_scc;
-    use petgraph::graphmap::DiGraphMap;
-
     let mut interner = NodeInterner::default();
     let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
@@ -126,7 +122,7 @@ pub(super) fn process_stateless(
         let is_cyclic = scc.len() > 1 || transclusions.contains_edge(id, id);
 
         if is_cyclic {
-            unrenderable.extend(scc.iter().copied());
+            unrenderable.extend(scc.iter());
             for (fid, diag) in cycle_diagnostics(scc.iter().map(|&id| {
                 let fid = *node_to_file
                     .get(&id)

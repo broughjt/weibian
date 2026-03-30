@@ -21,6 +21,9 @@ use crate::config::{
     TRANSCLUSION_TEMPLATE,
 };
 
+pub type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
+pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
+
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
 #[derive(Default)]
@@ -28,8 +31,8 @@ pub struct Compiler {
     file_to_nodes: HashMap<FileId, Vec<NodeId>>,
     node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, NodeEntry>,
-    compile_diagnostics: HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>,
-    process_diagnostics: HashMap<FileId, EcoVec<SourceDiagnostic>>,
+    compile_diagnostics: CompileDiagnostics,
+    process_diagnostics: ProcessDiagnostics,
     links: DiGraphMap<NodeId, ()>,
     transclusions: DiGraphMap<NodeId, ()>,
     interner: NodeInterner,
@@ -136,9 +139,7 @@ impl Compiler {
     /// Returns all compile-time diagnostics, keyed by source [`FileId`].
     ///
     /// Each entry is a `(warnings, errors)` pair of [`SourceDiagnostic`] vecs.
-    pub fn compile_diagnostics(
-        &self,
-    ) -> &HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)> {
+    pub fn compile_diagnostics(&self) -> &CompileDiagnostics {
         &self.compile_diagnostics
     }
 
@@ -148,7 +149,7 @@ impl Compiler {
     /// These are errors detected across the full node graph (e.g. transclusion
     /// cycles) and are recomputed from scratch on every [`Compiler::process`]
     /// call.
-    pub fn process_diagnostics(&self) -> &HashMap<FileId, EcoVec<SourceDiagnostic>> {
+    pub fn process_diagnostics(&self) -> &ProcessDiagnostics {
         &self.process_diagnostics
     }
 
@@ -494,6 +495,7 @@ pub struct NodeEntry {
     pub backmatter_cache: Option<BackmatterCache>,
 }
 
+// TODO: Get rid of this
 impl Default for NodeEntry {
     fn default() -> Self {
         Self {
