@@ -105,7 +105,7 @@ impl<'a> Renderer<'a> {
                 href => minijinja::Value::from_safe_string(self.config.href(name)),
                 title => entry.map(|e| e.title.as_str()).unwrap_or_default(),
                 title_text => entry.map(|e| e.title_text.as_str()).unwrap_or_default(),
-                metadata => entry.map(|e| &e.metadata),
+                metadata => entry.map(|e| &e.node_metadata),
             }
         };
 
@@ -151,7 +151,7 @@ impl<'a> Renderer<'a> {
                     title_text => entry.title_text.as_str(),
                     body => body,
                     backmatter => backmatter,
-                    metadata => entry.metadata,
+                    metadata => entry.node_metadata,
                 },
                 site => &self.site_context,
             })
@@ -189,7 +189,7 @@ impl<'a> Renderer<'a> {
                     resolved => true,
                     title => target.title.as_str(),
                     title_text => target.title_text.as_str(),
-                    metadata => target.metadata,
+                    metadata => target.node_metadata,
                     link_metadata => link_metadata,
                 },
                 site => &self.site_context,
@@ -248,7 +248,7 @@ impl<'a> Renderer<'a> {
                     title => target.title.as_str(),
                     title_text => target.title_text.as_str(),
                     body => body,
-                    metadata => target.metadata,
+                    metadata => target.node_metadata,
                     transclusion_metadata => transclusion_metadata,
                 },
                 site => &self.site_context,

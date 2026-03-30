@@ -71,7 +71,7 @@ impl Compiler {
                 // backmatter can reference a node that didn't exist.
                 for (&node_id, (entry, _, _)) in &nodes {
                     if self.nodes.get(&node_id).is_some_and(|old| {
-                        old.title != entry.title || old.metadata != entry.metadata
+                        old.title != entry.title || old.node_metadata != entry.node_metadata
                     }) {
                         self.metadata_dirty.insert(node_id);
                     }
@@ -451,7 +451,7 @@ struct NodeEntry {
     pub span: Span,
     // TODO: Should we intern metadata strings and output? Is that nuts? Would
     // it cause incorrectness?
-    pub metadata: HashMap<String, Vec<String>>,
+    pub node_metadata: HashMap<String, Vec<String>>,
     pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
 }

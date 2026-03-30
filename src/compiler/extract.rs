@@ -158,7 +158,7 @@ pub(super) fn extract(
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            transclusion_metadata.insert(counter, entry.0.metadata.clone());
+            transclusion_metadata.insert(counter, entry.0.node_metadata.clone());
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
             ));
@@ -381,7 +381,7 @@ fn extract_node_content(
                 title,
                 title_text,
                 span,
-                metadata: node_metadata,
+                node_metadata,
                 transclusion_metadata: node_transclusion_metadata,
                 link_metadata: node_link_metadata,
             },
