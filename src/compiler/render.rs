@@ -4,11 +4,13 @@ use dom_query::Document;
 
 use crate::config::RenderConfig;
 
-use super::{NodeEntry, NodeId, NodeInterner};
+use super::{Backmatter, NodeEntry, NodeId, NodeInterner};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_body(
     id: NodeId,
     nodes: &HashMap<NodeId, NodeEntry>,
+    rendered_bodies: &HashMap<NodeId, String>,
     interner: &NodeInterner,
     link_template: &minijinja::Template<'_, '_>,
     transclusion_template: &minijinja::Template<'_, '_>,
@@ -16,7 +18,7 @@ pub(super) fn render_body(
     site_context: &minijinja::Value,
 ) -> anyhow::Result<String> {
     let entry = &nodes[&id];
-    let document = Document::from(entry.raw_html.as_str());
+    let document = Document::from(entry.body_html.as_str());
 
     // Render internal links. Done before transclusion substitution so that
     // links inside already-rendered transclusion bodies are not double-processed.
@@ -90,9 +92,9 @@ pub(super) fn render_body(
             .get(identifier.as_ref())
             .expect("bug: wb-transclude identifier was not interned");
         let context = if let Some(target) = nodes.get(&transclude_id) {
-            let body = target
-                .rendered_body
-                .as_deref()
+            let body = rendered_bodies
+                .get(&transclude_id)
+                .map(String::as_str)
                 .expect("bug: wb-transclude target has no rendered_body");
             minijinja::context! {
                 transclusion => minijinja::context! {
@@ -128,17 +130,13 @@ pub(super) fn render_body(
 
 pub(super) fn render_backmatter(
     id: NodeId,
+    backmatter: &Backmatter,
     nodes: &HashMap<NodeId, NodeEntry>,
     interner: &NodeInterner,
     backmatter_template: &minijinja::Template<'_, '_>,
     config: &RenderConfig,
     site_context: &minijinja::Value,
 ) -> anyhow::Result<String> {
-    let cache = nodes[&id]
-        .backmatter_cache
-        .as_ref()
-        .expect("bug: backmatter_render node has no backmatter_cache");
-
     let node_info = |node_id: NodeId| {
         let name = interner.name(node_id);
         let entry = nodes.get(&node_id);
@@ -151,15 +149,15 @@ pub(super) fn render_backmatter(
         }
     };
 
-    let mut contexts_ids: Vec<NodeId> = cache.contexts.iter().copied().collect();
+    let mut contexts_ids: Vec<NodeId> = backmatter.contexts.iter().copied().collect();
     contexts_ids.sort_by_key(|&nid| interner.name(nid));
     let contexts: Vec<_> = contexts_ids.into_iter().map(&node_info).collect();
 
-    let mut backlinks_ids: Vec<NodeId> = cache.backlinks.iter().copied().collect();
+    let mut backlinks_ids: Vec<NodeId> = backmatter.backlinks.iter().copied().collect();
     backlinks_ids.sort_by_key(|&nid| interner.name(nid));
     let backlinks: Vec<_> = backlinks_ids.into_iter().map(&node_info).collect();
 
-    let mut outlinks_ids: Vec<NodeId> = cache.outlinks.iter().copied().collect();
+    let mut outlinks_ids: Vec<NodeId> = backmatter.outlinks.iter().copied().collect();
     outlinks_ids.sort_by_key(|&nid| interner.name(nid));
     let outlinks: Vec<_> = outlinks_ids.into_iter().map(&node_info).collect();
 

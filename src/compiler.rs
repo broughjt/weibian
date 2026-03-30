@@ -3,7 +3,7 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use ecow::{EcoVec, eco_format};
@@ -31,6 +31,9 @@ pub struct Compiler {
     file_to_nodes: HashMap<FileId, Vec<NodeId>>,
     node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, NodeEntry>,
+    backmatters: HashMap<NodeId, Backmatter>,
+    rendered_bodies: HashMap<NodeId, String>,
+    rendered_backmatters: HashMap<NodeId, String>,
     compile_diagnostics: CompileDiagnostics,
     process_diagnostics: ProcessDiagnostics,
     links: DiGraphMap<NodeId, ()>,
@@ -53,16 +56,14 @@ impl Compiler {
             warnings,
         } = compiler.compile(id);
 
-        // Exclude nodes belonging to this file from the duplicate check: they
-        // are being replaced, not duplicated, and remove() hasn't been called
-        // yet. The `extract` helper handles intra-file duplicates.
-        let nodes_result = result.and_then(|output| {
+        match result.and_then(|output| {
             extract(output, &mut self.interner, |node_id| {
+                // Exclude nodes belonging to this file from the duplicate check: they
+                // are being replaced, not duplicated, and remove() hasn't been called
+                // yet. The `extract` helper handles intra-file duplicates.
                 self.nodes.contains_key(&node_id) && self.node_to_file.get(&node_id) != Some(&id)
             })
-        });
-
-        match nodes_result {
+        }) {
             Ok(nodes) => {
                 // Compare new title/metadata against old entries before
                 // remove() clears them, so we can track which nodes had their
@@ -70,7 +71,7 @@ impl Compiler {
                 // `metadata_dirty`.
                 //
                 // New nodes are not added to `metadata_dirty`: no existing
-                // BackmatterCache can reference a node that didn't exist.
+                // backmatter can reference a node that didn't exist.
                 for (&node_id, (entry, _, _)) in &nodes {
                     if self.nodes.get(&node_id).is_some_and(|old| {
                         old.title != entry.title || old.metadata != entry.metadata
@@ -124,6 +125,9 @@ impl Compiler {
             for old_id in old_ids {
                 self.node_to_file.remove(&old_id);
                 self.nodes.remove(&old_id);
+                self.backmatters.remove(&old_id);
+                self.rendered_bodies.remove(&old_id);
+                self.rendered_backmatters.remove(&old_id);
                 self.dirty.remove(&old_id);
                 self.metadata_dirty.remove(&old_id);
                 self.removed.insert(old_id);
@@ -214,7 +218,7 @@ impl Compiler {
         let mut body_affected: HashSet<NodeId> = HashSet::new();
         let mut backmatter_affected: HashSet<NodeId> = HashSet::new();
         let mut unrenderable: HashSet<NodeId> = HashSet::new();
-        let mut outlinks_accumulator: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+        let mut outlinks_accumulator: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
         let mut render_order: Vec<NodeId> = Vec::new();
 
         let sccs = tarjan_scc(&self.transclusions);
@@ -295,22 +299,22 @@ impl Compiler {
                     // are in the removed set, since they might have been
                     // dangling in many previous calls to `process`. We check
                     // for dangling transclusions in a loop above.
-                    if let Some(entry) = self.nodes.get_mut(&id) {
-                        let new_cache = backmatter_cache(
+                    if self.nodes.contains_key(&id) {
+                        let new_backmatter = collect_backmatter(
                             id,
                             &self.links,
                             &self.transclusions,
                             &outlinks_accumulator,
                         );
-                        outlinks_accumulator.insert(id, new_cache.outlinks.clone());
+                        outlinks_accumulator.insert(id, new_backmatter.outlinks.clone());
 
                         if should_backmatter_render(
-                            entry.backmatter_cache.as_ref(),
-                            &new_cache,
+                            self.backmatters.get(&id),
+                            &new_backmatter,
                             &metadata_dirty,
                             &removed,
                         ) {
-                            entry.backmatter_cache = Some(new_cache);
+                            self.backmatters.insert(id, new_backmatter);
                             backmatter_affected.insert(id);
                         }
                     }
@@ -321,25 +325,25 @@ impl Compiler {
                 }
             }
         }
-        for (&id, entry) in self
+        for &id in self
             .nodes
-            .iter_mut()
-            .filter(|(id, _)| !self.transclusions.contains_node(**id))
+            .keys()
+            .filter(|id| !self.transclusions.contains_node(**id))
         {
             if dirty.contains(&id) {
                 body_affected.insert(id);
             }
 
-            let new_cache =
-                backmatter_cache(id, &self.links, &self.transclusions, &outlinks_accumulator);
+            let new_backmatter =
+                collect_backmatter(id, &self.links, &self.transclusions, &outlinks_accumulator);
 
             if should_backmatter_render(
-                entry.backmatter_cache.as_ref(),
-                &new_cache,
+                self.backmatters.get(&id),
+                &new_backmatter,
                 &metadata_dirty,
                 &removed,
             ) {
-                entry.backmatter_cache = Some(new_cache);
+                self.backmatters.insert(id, new_backmatter);
                 backmatter_affected.insert(id);
             }
 
@@ -379,24 +383,28 @@ impl Compiler {
                 let rendered_body = render_body(
                     id,
                     &self.nodes,
+                    &self.rendered_bodies,
                     &self.interner,
                     &link_template,
                     &transclusion_template,
                     config,
                     &site_context,
                 )?;
-                self.nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
+                self.rendered_bodies.insert(id, rendered_body);
             }
             if backmatter_affected.contains(&id) {
                 let rendered_backmatter = render_backmatter(
                     id,
+                    self.backmatters
+                        .get(&id)
+                        .expect("bug: renderable node has no backmatter after pass 1"),
                     &self.nodes,
                     &self.interner,
                     &backmatter_template,
                     config,
                     &site_context,
                 )?;
-                self.nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
+                self.rendered_backmatters.insert(id, rendered_backmatter);
             }
         }
 
@@ -405,13 +413,15 @@ impl Compiler {
             .map(|&id| -> anyhow::Result<(String, String)> {
                 let name = self.interner.name(id);
                 let entry = &self.nodes[&id];
-                let body = entry
-                    .rendered_body
-                    .as_deref()
+                let body = self
+                    .rendered_bodies
+                    .get(&id)
+                    .map(String::as_str)
                     .expect("bug: renderable node has no rendered_body after pass 2");
-                let backmatter = entry
-                    .rendered_backmatter
-                    .as_deref()
+                let backmatter = self
+                    .rendered_backmatters
+                    .get(&id)
+                    .map(String::as_str)
                     .expect("bug: renderable node has no rendered backmatter after pass 2");
                 let html = render_node(
                     name,
@@ -422,6 +432,7 @@ impl Compiler {
                     config,
                     &site_context,
                 )?;
+
                 Ok((name.to_owned(), html))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -436,18 +447,18 @@ impl Compiler {
 }
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
-pub struct NodeId(u32);
+struct NodeId(u32);
 
 /// Interns node name strings to compact [`NodeId`] handles.
 #[derive(Default)]
-pub struct NodeInterner {
+struct NodeInterner {
     forward: HashMap<String, NodeId>,
     reverse: Vec<String>,
 }
 
 impl NodeInterner {
     /// Returns the [`NodeId`] for `name`, interning it if not already present.
-    pub fn intern<S: Into<String> + AsRef<str>>(&mut self, name: S) -> NodeId {
+    fn intern<S: Into<String> + AsRef<str>>(&mut self, name: S) -> NodeId {
         if let Some(&id) = self.forward.get(name.as_ref()) {
             return id;
         }
@@ -459,29 +470,29 @@ impl NodeInterner {
     }
 
     /// Returns the [`NodeId`] for `name` if it has been interned.
-    pub fn get(&self, name: &str) -> Option<NodeId> {
+    fn get(&self, name: &str) -> Option<NodeId> {
         self.forward.get(name).copied()
     }
 
     /// Returns the name string for a [`NodeId`].
     ///
     /// Panics if `id` was not produced by this interner.
-    pub fn name(&self, id: NodeId) -> &str {
+    fn name(&self, id: NodeId) -> &str {
         &self.reverse[id.0 as usize]
     }
 }
 
 /// Cached backmatter sets for a node, used to determine whether backmatter
 /// needs to be re-rendered on the next [`Compiler::process`] call.
-#[derive(PartialEq, Eq)]
-pub struct BackmatterCache {
-    pub contexts: BTreeSet<NodeId>,
-    pub backlinks: BTreeSet<NodeId>,
-    pub outlinks: BTreeSet<NodeId>,
+#[derive(Default, PartialEq, Eq)]
+struct Backmatter {
+    pub contexts: HashSet<NodeId>,
+    pub backlinks: HashSet<NodeId>,
+    pub outlinks: HashSet<NodeId>,
 }
 
-pub struct NodeEntry {
-    pub raw_html: String,
+struct NodeEntry {
+    pub body_html: String,
     pub title: String,
     pub title_text: String,
     pub span: Span,
@@ -490,27 +501,6 @@ pub struct NodeEntry {
     pub metadata: HashMap<String, Vec<String>>,
     pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    pub rendered_body: Option<String>,
-    pub rendered_backmatter: Option<String>,
-    pub backmatter_cache: Option<BackmatterCache>,
-}
-
-// TODO: Get rid of this
-impl Default for NodeEntry {
-    fn default() -> Self {
-        Self {
-            raw_html: String::new(),
-            title: String::new(),
-            title_text: String::new(),
-            span: Span::detached(),
-            metadata: HashMap::new(),
-            transclusion_metadata: HashMap::new(),
-            link_metadata: HashMap::new(),
-            rendered_body: None,
-            rendered_backmatter: None,
-            backmatter_cache: None,
-        }
-    }
 }
 
 /// The set of writes and deletes to apply to the output directory after a
@@ -557,24 +547,24 @@ fn cycle_diagnostics<'a>(
         .collect()
 }
 
-fn backmatter_cache(
+fn collect_backmatter(
     id: NodeId,
     links: &DiGraphMap<NodeId, ()>,
     transclusions: &DiGraphMap<NodeId, ()>,
-    outlinks_accumulator: &HashMap<NodeId, BTreeSet<NodeId>>,
-) -> BackmatterCache {
-    let mut outlinks: BTreeSet<NodeId> = links.neighbors(id).collect();
+    outlinks_accumulator: &HashMap<NodeId, HashSet<NodeId>>,
+) -> Backmatter {
+    let mut outlinks: HashSet<NodeId> = links.neighbors(id).collect();
     for target in transclusions.neighbors(id) {
         if let Some(target_outlinks) = outlinks_accumulator.get(&target) {
-            outlinks.extend(target_outlinks.iter());
+            outlinks.extend(target_outlinks.iter().copied());
         }
     }
-    let contexts: BTreeSet<NodeId> = transclusions
+    let contexts: HashSet<NodeId> = transclusions
         .neighbors_directed(id, Direction::Incoming)
         .collect();
-    let backlinks: BTreeSet<NodeId> = links.neighbors_directed(id, Direction::Incoming).collect();
+    let backlinks: HashSet<NodeId> = links.neighbors_directed(id, Direction::Incoming).collect();
 
-    BackmatterCache {
+    Backmatter {
         contexts,
         backlinks,
         outlinks,
@@ -582,8 +572,8 @@ fn backmatter_cache(
 }
 
 fn should_backmatter_render(
-    option_old: Option<&BackmatterCache>,
-    new: &BackmatterCache,
+    option_old: Option<&Backmatter>,
+    new: &Backmatter,
     metadata_dirty: &HashSet<NodeId>,
     removed: &HashSet<NodeId>,
 ) -> bool {

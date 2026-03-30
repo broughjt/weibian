@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use ecow::EcoVec;
 use petgraph::Direction;
@@ -8,8 +8,7 @@ use typst::diag::Warned;
 use typst::syntax::FileId;
 
 use crate::compiler::{
-    BackmatterCache, Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner,
-    ProcessDiagnostics,
+    Backmatter, Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
 };
 use crate::config::RenderConfig;
 
@@ -18,12 +17,6 @@ use super::super::{
     render_backmatter, render_body, render_node,
 };
 use super::mock::MockNode;
-
-struct Backmatter {
-    contexts: BTreeSet<NodeId>,
-    backlinks: BTreeSet<NodeId>,
-    outlinks: BTreeSet<NodeId>,
-}
 
 /// Stateless reference implementation: compiles `mock_nodes` from scratch and
 /// returns the complete rendered filesystem, compile diagnostics, and process
@@ -193,53 +186,53 @@ pub(super) fn process_stateless(
         .expect("bug: backmatter.html template missing");
 
     let mut output = HashMap::new();
+    let mut rendered_bodies: HashMap<NodeId, String> = HashMap::new();
+    let mut rendered_backmatters: HashMap<NodeId, String> = HashMap::new();
 
     for &id in &render_order {
         let backmatter = collect_backmatter(id, &links, &transclusions);
-        nodes.get_mut(&id).unwrap().backmatter_cache = Some(BackmatterCache {
-            contexts: backmatter.contexts,
-            backlinks: backmatter.backlinks,
-            outlinks: backmatter.outlinks,
-        });
 
         let rendered_body = render_body(
             id,
             &nodes,
+            &rendered_bodies,
             &interner,
             &link_template,
             &transclusion_template,
             config,
             &site_context,
         )?;
-        nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
+        rendered_bodies.insert(id, rendered_body);
 
         let rendered_backmatter = render_backmatter(
             id,
+            &backmatter,
             &nodes,
             &interner,
             &backmatter_template,
             config,
             &site_context,
         )?;
-        nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
+        rendered_backmatters.insert(id, rendered_backmatter);
 
         let name = interner.name(id);
         let entry = &nodes[&id];
         let html = render_node(
             name,
             entry,
-            entry
-                .rendered_body
-                .as_deref()
+            rendered_bodies
+                .get(&id)
+                .map(String::as_str)
                 .expect("bug: stateless render body missing after render_body"),
-            entry
-                .rendered_backmatter
-                .as_deref()
+            rendered_backmatters
+                .get(&id)
+                .map(String::as_str)
                 .expect("bug: stateless rendered backmatter missing after render_backmatter"),
             &node_template,
             config,
             &site_context,
         )?;
+
         output.insert(name.to_owned(), html);
     }
 
@@ -264,10 +257,10 @@ fn collect_outlinks(
     id: NodeId,
     links: &DiGraphMap<NodeId, ()>,
     transclusions: &DiGraphMap<NodeId, ()>,
-) -> BTreeSet<NodeId> {
+) -> HashSet<NodeId> {
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut stack = vec![id];
-    let mut outlinks = BTreeSet::new();
+    let mut outlinks = HashSet::new();
 
     while let Some(current) = stack.pop() {
         if !visited.insert(current) {

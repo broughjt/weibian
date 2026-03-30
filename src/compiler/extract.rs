@@ -241,7 +241,7 @@ pub(super) fn extract(
 }
 
 /// Extracts the content of a `wb-node` or `wb-subnode` element into a
-/// [`NodeEntry`], collecting its transclusions and links and consuming its
+/// [`SourceNode`], collecting its transclusions and links and consuming its
 /// metadata from the provided map.
 ///
 /// Returns `None` (pushing an error) if the identifier attribute is missing or
@@ -377,14 +377,13 @@ fn extract_node_content(
         identifier,
         (
             NodeEntry {
-                raw_html,
+                body_html: raw_html,
                 title,
                 title_text,
                 span,
                 metadata: node_metadata,
                 transclusion_metadata: node_transclusion_metadata,
                 link_metadata: node_link_metadata,
-                ..Default::default()
             },
             transclusions,
             links,
