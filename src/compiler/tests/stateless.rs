@@ -16,7 +16,7 @@ use super::super::{
     Renderer, cycle_diagnostics, dangling_link_diagnostic, dangling_transclusion_diagnostic,
     extract,
 };
-use super::mock::MockNode;
+use super::mock::MockFile;
 
 /// Stateless reference implementation: compiles `mock_nodes` from scratch and
 /// returns the complete rendered filesystem, compile diagnostics, and process
@@ -26,7 +26,7 @@ use super::mock::MockNode;
 /// Every call recomputes everything. Used as a test oracle against the
 /// incremental `Compiler`.
 pub(super) fn process_stateless(
-    mock_nodes: &[MockNode],
+    ordered_files: &[(FileId, MockFile)],
     config: &RenderConfig,
 ) -> anyhow::Result<(
     HashMap<String, String>,
@@ -40,21 +40,12 @@ pub(super) fn process_stateless(
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
     let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
 
-    for mock_node in mock_nodes {
-        let file_id = FileId::from_raw(mock_node.id);
+    for (file_id, mock_file) in ordered_files {
         let Warned {
             output: result,
             warnings,
-        } = mock_node.compile(file_id);
+        } = mock_file.compile(*file_id);
 
-        // TODO: This correctly rejects cross-file duplicate node names, but
-        // `process_stateless` processes files in HashMap iteration order while
-        // the incremental compiler respects update() call order. These can
-        // disagree on which file "wins" when a duplicate exists. This doesn't
-        // matter currently because each MockNode produces exactly one node
-        // whose name is derived from its own file ID, making cross-file
-        // duplicates impossible. Revisit if subnodes are added to the mock
-        // test data.
         match result.and_then(|output| {
             extract(output, &mut interner, |node_id| {
                 nodes.contains_key(&node_id)
@@ -62,7 +53,7 @@ pub(super) fn process_stateless(
         }) {
             Ok(extracted) => {
                 for (id, (entry, ts, ls)) in extracted {
-                    node_to_file.insert(id, file_id);
+                    node_to_file.insert(id, *file_id);
                     for &t in &ts {
                         transclusions.add_edge(id, t, ());
                     }
@@ -73,11 +64,11 @@ pub(super) fn process_stateless(
                 }
 
                 if !warnings.is_empty() {
-                    compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
+                    compile_diagnostics.insert(*file_id, (warnings, EcoVec::new()));
                 }
             }
             Err(errors) => {
-                compile_diagnostics.insert(file_id, (warnings, errors));
+                compile_diagnostics.insert(*file_id, (warnings, errors));
             }
         }
     }

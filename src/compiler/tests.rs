@@ -1,19 +1,89 @@
 mod mock;
 mod stateless;
 
-use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU16;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proptest::prelude::*;
+use typst::diag::SourceDiagnostic;
 use typst::syntax::FileId;
 
-use crate::compiler::{Compiler, OutputPlan};
+use crate::compiler::{CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics};
 use crate::config::{
     BACKMATTER_TEMPLATE, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE,
 };
 
-use self::mock::{Event, EventConfig, MockNode, arbitrary_event_batches, arbitrary_events};
+use self::mock::{Event, EventConfig, MockFile, arbitrary_event_batches, arbitrary_events};
 use self::stateless::process_stateless;
+
+#[derive(Debug, Default, Clone)]
+struct ProjectState {
+    order: Vec<FileId>,
+    files: HashMap<FileId, MockFile>,
+}
+
+impl ProjectState {
+    fn apply_event(&mut self, event: &Event) {
+        match event {
+            Event::CreateFile(raw_id, file) | Event::ReplaceFile(raw_id, file) => {
+                let id = FileId::from_raw(*raw_id);
+                self.files.insert(id, file.clone());
+                self.normalize_file(id);
+                self.touch(id);
+            }
+            Event::UpdateFile(raw_id, mutation) => {
+                let id = FileId::from_raw(*raw_id);
+                let file = self
+                    .files
+                    .get_mut(&id)
+                    .expect("bug: generated update event targeted a missing file");
+                file.apply_mutation(mutation);
+                self.normalize_file(id);
+                self.touch(id);
+            }
+            Event::RemoveFile(raw_id) => {
+                let id = FileId::from_raw(*raw_id);
+                self.files.remove(&id);
+                self.order.retain(|existing| *existing != id);
+            }
+        }
+    }
+
+    fn get(&self, id: FileId) -> Option<&MockFile> {
+        self.files.get(&id)
+    }
+
+    fn ordered_files(&self) -> Vec<(FileId, MockFile)> {
+        self.order
+            .iter()
+            .filter_map(|id| self.files.get(id).cloned().map(|file| (*id, file)))
+            .collect()
+    }
+
+    fn touch(&mut self, id: FileId) {
+        self.order.retain(|existing| *existing != id);
+        self.order.push(id);
+    }
+
+    fn normalize_file(&mut self, id: FileId) {
+        let reserved = self
+            .files
+            .iter()
+            .filter(|(other_id, _)| **other_id != id)
+            .flat_map(|(_, file)| node_identifiers(file))
+            .collect::<HashSet<_>>();
+
+        if let Some(file) = self.files.get_mut(&id) {
+            file.normalize_identifiers_against(&reserved);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Observation {
+    fs: HashMap<String, String>,
+    compile_diagnostics: BTreeMap<u16, (Vec<String>, Vec<String>)>,
+    process_diagnostics: BTreeMap<u16, Vec<String>>,
+}
 
 proptest! {
     #[test]
@@ -23,28 +93,26 @@ proptest! {
         let config = render_config();
 
         let scratch = {
-            let mut compiler = Compiler::default();
-            for (id, node) in reduce_events(batches.iter().flatten()) {
-                compiler.update(node, FileId::from_raw(id));
+            let mut project = ProjectState::default();
+            for event in batches.iter().flatten() {
+                project.apply_event(event);
             }
-            let mut files = HashMap::new();
-            apply(compiler.process(&config).unwrap(), &mut files);
-            files
+            observe_scratch(&project, &config)
         };
 
         let incremental = {
+            let mut project = ProjectState::default();
             let mut compiler = Compiler::default();
-            let mut files = HashMap::new();
+            let mut fs = HashMap::new();
+
             for batch in &batches {
                 for event in batch {
-                    match event {
-                        Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
-                        Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
-                    }
+                    apply_event_to_compiler(event, &mut project, &mut compiler);
                 }
-                apply(compiler.process(&config).unwrap(), &mut files);
+                apply(compiler.process(&config).unwrap(), &mut fs);
             }
-            files
+
+            observe_incremental(&compiler, fs)
         };
 
         prop_assert_eq!(scratch, incremental);
@@ -57,26 +125,24 @@ proptest! {
         let config = render_config();
 
         let scratch = {
-            let mut compiler = Compiler::default();
-            for (id, node) in reduce_events(events.iter()) {
-                compiler.update(node, FileId::from_raw(id));
+            let mut project = ProjectState::default();
+            for event in &events {
+                project.apply_event(event);
             }
-            let mut files = HashMap::new();
-            apply(compiler.process(&config).unwrap(), &mut files);
-            files
+            observe_scratch(&project, &config)
         };
 
         let incremental = {
+            let mut project = ProjectState::default();
             let mut compiler = Compiler::default();
-            let mut files = HashMap::new();
+            let mut fs = HashMap::new();
+
             for event in &events {
-                match event {
-                    Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
-                    Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
-                }
-                apply(compiler.process(&config).unwrap(), &mut files);
+                apply_event_to_compiler(event, &mut project, &mut compiler);
+                apply(compiler.process(&config).unwrap(), &mut fs);
             }
-            files
+
+            observe_incremental(&compiler, fs)
         };
 
         prop_assert_eq!(scratch, incremental);
@@ -87,14 +153,13 @@ proptest! {
         events in arbitrary_events(&EventConfig::from_environment())
     ) {
         let config = render_config();
+        let mut project = ProjectState::default();
         let mut compiler = Compiler::default();
 
         for event in &events {
-            match event {
-                Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
-                Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
-            }
+            apply_event_to_compiler(event, &mut project, &mut compiler);
         }
+
         let plan = compiler.process(&config).unwrap();
         let writes: HashSet<&str> = plan.writes.keys().map(String::as_str).collect();
         let deletes: HashSet<&str> = plan.deletes.iter().map(String::as_str).collect();
@@ -105,13 +170,11 @@ proptest! {
     #[test]
     fn process_is_idempotent(events in arbitrary_events(&EventConfig::from_environment())) {
         let config = render_config();
+        let mut project = ProjectState::default();
         let mut compiler = Compiler::default();
 
         for event in &events {
-            match event {
-                Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
-                Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
-            }
+            apply_event_to_compiler(event, &mut project, &mut compiler);
         }
         compiler.process(&config).unwrap();
 
@@ -120,112 +183,128 @@ proptest! {
         prop_assert!(second.deletes.is_empty(), "expected no deletes on second process call, got {:?}", second.deletes);
     }
 
-    // TODO:
-    // #[test]
-    // fn metadata_change_triggers_backmatter_rerender(
-    //     events in arbitrary_events(&EventConfig::from_environment()),
-    //     changed_id in any::<NonZeroU16>(),
-    // ) {
-    //     let config = render_config();
-    //     let mut compiler = Compiler::default();
-
-    //     for event in &events {
-    //         match event {
-    //             Event::Update(id, node) => compiler.update(node, FileId::from_raw(*id)),
-    //             Event::Remove(id) => compiler.remove(FileId::from_raw(*id)),
-    //         }
-    //     }
-    //     let first = compiler.process(&config).unwrap();
-    //     let mut files: HashMap<String, String> = HashMap::new();
-    //     apply(first, &mut files);
-
-    //     // Emit a title-only update for changed_id (no edge changes).
-    //     let node_id_str = format_id(changed_id);
-    //     let changed_file = FileId::from_raw(changed_id);
-    //     if !compiler.has_node(changed_id) {
-    //         // Node doesn't exist yet; insert a fresh one with no edges.
-    //         let node = MockNode { id: changed_id, title: "before".into(), body: String::new(), transcludes: vec![], links: vec![] };
-    //         compiler.update(&node, changed_file);
-    //         compiler.process(&config).unwrap();
-    //     }
-
-    //     // Update with a new title, keeping edges identical.
-    //     let new_node = MockNode { id: changed_id, title: "after".into(), body: String::new(), transcludes: vec![], links: vec![] };
-    //     compiler.update(&new_node, changed_file);
-    //     let second = compiler.process(&config).unwrap();
-
-    //     // changed_id itself must be rewritten (body dirty).
-    //     if second.writes.contains_key(&node_id_str) || files.contains_key(&node_id_str) {
-    //         prop_assert!(second.writes.contains_key(&node_id_str),
-    //             "node {node_id_str} was not rewritten after title change");
-    //     }
-
-    //     // Every node whose rendered output previously contained changed_id in
-    //     // its backmatter must be rewritten.
-    //     for (name, old_html) in &files {
-    //         let references_changed =
-    //             old_html.contains(&format!("<ctx>{node_id_str}</ctx>"))
-    //             || old_html.contains(&format!("<bl>{node_id_str}</bl>"))
-    //             || old_html.contains(&format!("<ol>{node_id_str}</ol>"));
-    //         if references_changed {
-    //             prop_assert!(
-    //                 second.writes.contains_key(name.as_str()),
-    //                 "node {name} references {node_id_str} in backmatter but was not rewritten"
-    //             );
-    //         }
-    //     }
-    // }
-
-    /// After each event, the incremental compiler's filesystem state must
-    /// exactly match `process_stateless` applied to the current node set.
-    ///
-    /// This catches mid-sequence bugs (e.g. skipped backmatter rerenders) that
-    /// the scratch-vs-incremental tests miss because those tests only compare
-    /// the final state after collapsing all events via `reduce_events`.
     #[test]
     fn compile_incremental_matches_reference(
         events in arbitrary_events(&EventConfig::from_environment())
     ) {
         let config = render_config();
+        let mut project = ProjectState::default();
         let mut incremental = Compiler::default();
-        let mut inc_fs: HashMap<String, String> = HashMap::new();
-        let mut current_nodes: HashMap<FileId, MockNode> = HashMap::new();
+        let mut incremental_fs = HashMap::new();
 
         for event in &events {
-            match event {
-                Event::Update(id, node) => {
-                    incremental.update(node, FileId::from_raw(*id));
-                    current_nodes.insert(FileId::from_raw(*id), node.clone());
-                }
-                Event::Remove(id) => {
-                    incremental.remove(FileId::from_raw(*id));
-                    current_nodes.remove(&FileId::from_raw(*id));
-                }
-            }
-            apply(incremental.process(&config).unwrap(), &mut inc_fs);
-            let (ref_fs, ..) = process_stateless(
-                &current_nodes.values().cloned().collect::<Vec<_>>(),
-                &config,
-            )
-            .unwrap();
-            prop_assert_eq!(&inc_fs, &ref_fs);
+            apply_event_to_compiler(event, &mut project, &mut incremental);
+            apply(incremental.process(&config).unwrap(), &mut incremental_fs);
+
+            let incremental_observation = observe_incremental(&incremental, incremental_fs.clone());
+            let reference_observation = observe_reference(&project, &config);
+            prop_assert_eq!(incremental_observation, reference_observation);
         }
     }
 }
 
-fn reduce_events<'a>(events: impl Iterator<Item = &'a Event>) -> HashMap<NonZeroU16, &'a MockNode> {
-    let mut result = HashMap::new();
-    for event in events {
-        match event {
-            Event::Update(id, node) => {
-                result.insert(*id, node);
-            }
-            Event::Remove(id) => {
-                result.remove(id);
-            }
+fn apply_event_to_compiler(event: &Event, project: &mut ProjectState, compiler: &mut Compiler) {
+    match event {
+        Event::CreateFile(raw_id, _)
+        | Event::UpdateFile(raw_id, _)
+        | Event::ReplaceFile(raw_id, _) => {
+            let id = FileId::from_raw(*raw_id);
+            project.apply_event(event);
+            let file = project
+                .get(id)
+                .expect("bug: project state lost file immediately after create/update/replace");
+            compiler.update(file, id);
+        }
+        Event::RemoveFile(raw_id) => {
+            let id = FileId::from_raw(*raw_id);
+            project.apply_event(event);
+            compiler.remove(id);
         }
     }
-    result
+}
+
+fn observe_scratch(project: &ProjectState, config: &RenderConfig) -> Observation {
+    let mut compiler = Compiler::default();
+    let mut fs = HashMap::new();
+
+    for (id, file) in project.ordered_files() {
+        compiler.update(&file, id);
+    }
+    apply(compiler.process(config).unwrap(), &mut fs);
+
+    observe_incremental(&compiler, fs)
+}
+
+fn observe_reference(project: &ProjectState, config: &RenderConfig) -> Observation {
+    let (fs, compile_diagnostics, process_diagnostics) =
+        process_stateless(&project.ordered_files(), config).unwrap();
+
+    Observation {
+        fs,
+        compile_diagnostics: canonical_compile_diagnostics(&compile_diagnostics),
+        process_diagnostics: canonical_process_diagnostics(&process_diagnostics),
+    }
+}
+
+fn observe_incremental(compiler: &Compiler, fs: HashMap<String, String>) -> Observation {
+    Observation {
+        fs,
+        compile_diagnostics: canonical_compile_diagnostics(compiler.compile_diagnostics()),
+        process_diagnostics: canonical_process_diagnostics(compiler.process_diagnostics()),
+    }
+}
+
+fn canonical_compile_diagnostics(
+    diagnostics: &CompileDiagnostics,
+) -> BTreeMap<u16, (Vec<String>, Vec<String>)> {
+    diagnostics
+        .iter()
+        .map(|(file_id, (warnings, errors))| {
+            let mut warnings = warnings
+                .iter()
+                .map(canonical_diagnostic)
+                .collect::<Vec<_>>();
+            warnings.sort();
+
+            let mut errors = errors.iter().map(canonical_diagnostic).collect::<Vec<_>>();
+            errors.sort();
+
+            (file_id.into_raw().get(), (warnings, errors))
+        })
+        .collect()
+}
+
+fn canonical_process_diagnostics(diagnostics: &ProcessDiagnostics) -> BTreeMap<u16, Vec<String>> {
+    diagnostics
+        .iter()
+        .map(|(file_id, diagnostics)| {
+            let mut diagnostics = diagnostics
+                .iter()
+                .map(canonical_diagnostic)
+                .collect::<Vec<_>>();
+            diagnostics.sort();
+            (file_id.into_raw().get(), diagnostics)
+        })
+        .collect()
+}
+
+fn canonical_diagnostic(diagnostic: &SourceDiagnostic) -> String {
+    let mut message = diagnostic.message.to_string();
+    if let Some(names) = message.strip_prefix("transclusion cycle: ") {
+        let mut names = names.split(", ").collect::<Vec<_>>();
+        names.sort();
+        message = format!("transclusion cycle: {}", names.join(", "));
+    }
+
+    format!("{:?}: {message}", diagnostic.severity)
+}
+
+fn node_identifiers(file: &MockFile) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(file.primary.identifier.clone()).chain(
+        file.subnodes
+            .iter()
+            .map(|subnode| subnode.identifier.clone()),
+    )
 }
 
 fn apply(plan: OutputPlan, fs: &mut HashMap<String, String>) {
@@ -238,9 +317,18 @@ fn apply(plan: OutputPlan, fs: &mut HashMap<String, String>) {
 }
 
 fn render_config() -> RenderConfig {
-    let node_template = "{{ node.body | safe }}{{ node.backmatter | safe }}".to_string();
+    let node_template = concat!(
+        "<node-title>{{ node.title_text }}</node-title>",
+        "<node-tag>{{ node.metadata[\"tag\"] | join(\",\") }}</node-tag>",
+        "{{ node.body | safe }}",
+        "{{ node.backmatter | safe }}",
+    )
+    .to_string();
     let transclusion_template = concat!(
+        "<transclude-tag>{{ transclusion.transclusion_metadata[\"tag\"] | join(\",\") }}</transclude-tag>",
         "{%- if transclusion.resolved -%}",
+        "<transclude-title>{{ transclusion.title_text }}</transclude-title>",
+        "<transclude-node-tag>{{ transclusion.metadata[\"tag\"] | join(\",\") }}</transclude-node-tag>",
         "{{ transclusion.body | safe }}",
         "{%- else -%}",
         r#"<wb-missing identifier="{{ transclusion.identifier }}"></wb-missing>"#,
@@ -248,7 +336,10 @@ fn render_config() -> RenderConfig {
     )
     .to_string();
     let link_template = concat!(
+        "<link-tag>{{ link.link_metadata[\"tag\"] | join(\",\") }}</link-tag>",
         "{%- if link.resolved -%}",
+        "<link-title>{{ link.title_text }}</link-title>",
+        "<link-node-tag>{{ link.metadata[\"tag\"] | join(\",\") }}</link-node-tag>",
         r#"<span class="link local"><a href="{{ link.href }}">"#,
         "{%- if link.content %}{{ link.content | safe }}{%- else %}{{ link.title | safe }}{%- endif %}",
         "</a></span>",
@@ -257,13 +348,16 @@ fn render_config() -> RenderConfig {
         "{%- endif -%}",
     )
     .to_string();
-
-    // Backmatter template: renders contexts, backlinks, outlinks as plain ID
-    // lists so the property tests can observe backmatter content changes.
     let backmatter_template = concat!(
-        "{%- for n in backmatter.contexts -%}<ctx>{{ n.id }}</ctx>{%- endfor -%}",
-        "{%- for n in backmatter.backlinks -%}<bl>{{ n.id }}</bl>{%- endfor -%}",
-        "{%- for n in backmatter.outlinks -%}<ol>{{ n.id }}</ol>{%- endfor -%}",
+        "{%- for n in backmatter.contexts -%}",
+        "<ctx>{{ n.id }}|{{ n.title_text }}</ctx>",
+        "{%- endfor -%}",
+        "{%- for n in backmatter.backlinks -%}",
+        "<bl>{{ n.id }}|{{ n.title_text }}</bl>",
+        "{%- endfor -%}",
+        "{%- for n in backmatter.outlinks -%}",
+        "<ol>{{ n.id }}|{{ n.title_text }}</ol>",
+        "{%- endfor -%}",
     )
     .to_string();
 
@@ -280,6 +374,7 @@ fn render_config() -> RenderConfig {
     environment
         .add_template_owned(BACKMATTER_TEMPLATE, backmatter_template)
         .unwrap();
+
     RenderConfig {
         root_directory: "/".to_string(),
         trailing_slash: false,
