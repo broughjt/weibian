@@ -144,9 +144,9 @@ impl MockFile {
                 subnodes.push(subnode);
             }
             FileUpdate::RemoveSubnode(path) => {
-                let (parent_path, index) = path.split_last();
-                let subnodes = self.get_subnodes_mut(&parent_path.into());
-                subnodes.remove(index);
+                let (last, rest) = path.0.split_last().expect("SubnodePath must not be empty");
+                let subnodes = self.get_subnodes_mut(&NodePath::Subnode(SubnodePath(rest.to_vec())));
+                subnodes.remove(*last);
             }
             FileUpdate::SetSubnodeTransclude { target, transclude } => {
                 let subnode = self.get_subnode_mut(&target);
@@ -177,13 +177,6 @@ impl MockFile {
             NodePath::Primary => &mut self.subnodes,
             NodePath::Subnode(p) => &mut self.get_subnode_mut(p).subnodes,
         }
-    }
-}
-
-impl SubnodePath {
-    fn split_last(&self) -> (SubnodePath, usize) {
-        let (last, rest) = self.0.split_last().expect("SubnodePath must not be empty");
-        (SubnodePath(rest.to_vec()), *last)
     }
 }
 
