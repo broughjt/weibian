@@ -10,18 +10,16 @@ use ecow::{EcoVec, eco_format};
 use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
-use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
 
-use self::extract::{compile_output, extract};
+use self::extract::extract;
+pub use self::extract::{Compile, CompileOutput, TypstCompile};
 use self::render::{render_backmatter, render_body, render_node};
 use crate::config::{
     BACKMATTER_TEMPLATE, BuildConfig, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig,
     TRANSCLUSION_TEMPLATE,
 };
-
-const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
@@ -133,18 +131,6 @@ impl Compiler {
         }
 
         self.compile_diagnostics.remove(&id);
-    }
-
-    /// Returns true if any node produced by the file with the given ID exists
-    /// in the current node store.
-    ///
-    /// Used in tests to check whether a node is present before querying it.
-    #[cfg(test)]
-    pub fn has_node(&self, id: std::num::NonZeroU16) -> bool {
-        let node_id_str = format!("n{id}");
-        self.interner
-            .get(&node_id_str)
-            .is_some_and(|node_id| self.nodes.contains_key(&node_id))
     }
 
     /// Returns all compile-time diagnostics, keyed by source [`FileId`].
@@ -448,40 +434,6 @@ impl Compiler {
     }
 }
 
-/// The output of a successful file compilation.
-pub struct CompileOutput {
-    /// The HTML body of the compiled file.
-    pub html: String,
-    /// Spans for each node identifier within the document, used for diagnostic reporting.
-    pub spans: HashMap<String, Span>,
-    /// Node metadata keyed by node identifier.
-    pub metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    /// Transclusion metadata keyed by counter.
-    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    /// Link metadata keyed by counter.
-    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    /// Diagnostics collected during span and metadata extraction.
-    pub errors: EcoVec<SourceDiagnostic>,
-}
-
-/// Compiles a source file into [`CompileOutput`].
-///
-/// The `id` parameter identifies which file is being compiled. Implementations
-/// backed by a Typst [`World`] may ignore it since the world already encodes
-/// the target file; test implementations use it to look up canned output.
-pub trait Compile {
-    fn compile(&self, id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
-}
-
-/// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
-pub struct TypstCompile<W>(pub W);
-
-impl<W: World> Compile for TypstCompile<W> {
-    fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
-        compile_output(&self.0)
-    }
-}
-
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub struct NodeId(u32);
 
@@ -676,5 +628,3 @@ impl OutputPlan {
         Ok(())
     }
 }
-
-type ExtractOutput = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
