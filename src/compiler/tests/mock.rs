@@ -22,6 +22,7 @@ pub struct MockNode {
 pub struct MockSubnode {
     pub node: MockNode,
     pub transclude: bool,
+    pub subnodes: Vec<MockSubnode>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,10 +45,13 @@ pub struct MockTransclusion {
     pub metadata: Metadata,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeTarget {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubnodePath(pub Vec<usize>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodePath {
     Primary,
-    Subnode(usize),
+    Subnode(SubnodePath),
 }
 
 #[derive(Debug, Clone)]
@@ -106,13 +110,16 @@ pub enum NodeUpdate {
 #[derive(Debug, Clone)]
 pub enum FileUpdate {
     UpdateNode {
-        target: NodeTarget,
+        target: NodePath,
         update: NodeUpdate,
     },
-    AddSubnode(MockSubnode),
-    RemoveSubnode(usize),
+    AddSubnode {
+        parent: NodePath,
+        subnode: MockSubnode,
+    },
+    RemoveSubnode(SubnodePath),
     SetSubnodeTransclude {
-        index: usize,
+        target: SubnodePath,
         transclude: bool,
     },
 }
@@ -136,7 +143,7 @@ Next pieces to reintroduce incrementally:
 2. event generation
    - correct `MockFile` generation
    - small focused `...Update` generation
-   - later: raw target/index resolution for generators
+   - later: raw target/path resolution for generators
 
 3. property tests
    - scratch vs incremental
@@ -147,4 +154,9 @@ fine-grained changes like:
 - adding or removing a single link/transclusion
 - editing metadata on one link/transclusion occurrence
 - reordering text and inline references
+
+Nested subnodes are addressed structurally:
+- `NodePath::Primary`
+- `NodePath::Subnode(SubnodePath(vec![i]))` for a top-level subnode
+- `NodePath::Subnode(SubnodePath(vec![i, j, k]))` for a deeply nested subnode
 */

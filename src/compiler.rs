@@ -62,6 +62,7 @@ impl Compiler {
             })
         }) {
             Ok(nodes) => {
+                let mut metadata_dirty_from_update = HashSet::new();
                 // Compare new title/metadata against old entries before
                 // remove() clears them, so we can track which nodes had their
                 // displayable backmatter information change, adding them to
@@ -73,12 +74,13 @@ impl Compiler {
                     if self.nodes.get(&node_id).is_some_and(|old| {
                         old.title != entry.title || old.node_metadata != entry.node_metadata
                     }) {
-                        self.metadata_dirty.insert(node_id);
+                        metadata_dirty_from_update.insert(node_id);
                     }
                 }
 
                 // Now safe to orphan the old compilation.
                 self.remove(id);
+                self.metadata_dirty.extend(metadata_dirty_from_update);
 
                 for (&node_id, (_, transclusions, links)) in &nodes {
                     self.node_to_file.insert(node_id, id);
@@ -246,7 +248,12 @@ impl Compiler {
                         .flat_map(|&m| self.transclusions.neighbors(m))
                         .filter(|t| !scc_set.contains(t))
                         .any(|t| body_affected.contains(&t) || removed.contains(&t));
-                if any_affected {
+                let any_link_affected = scc.iter().any(|&m| {
+                    self.links.neighbors(m).any(|t| {
+                        dirty.contains(&t) || metadata_dirty.contains(&t) || removed.contains(&t)
+                    })
+                });
+                if any_affected || any_link_affected {
                     body_affected.extend(scc.iter().copied());
                 }
 
@@ -279,7 +286,10 @@ impl Compiler {
                     || self
                         .transclusions
                         .neighbors(id)
-                        .any(|t| body_affected.contains(&t) || removed.contains(&t));
+                        .any(|t| body_affected.contains(&t) || removed.contains(&t))
+                    || self.links.neighbors(id).any(|t| {
+                        dirty.contains(&t) || metadata_dirty.contains(&t) || removed.contains(&t)
+                    });
                 if is_body_affected {
                     body_affected.insert(id);
                 }
@@ -308,6 +318,7 @@ impl Compiler {
                         if should_backmatter_render(
                             self.backmatters.get(&id),
                             &new_backmatter,
+                            &dirty,
                             &metadata_dirty,
                             &removed,
                         ) {
@@ -330,6 +341,13 @@ impl Compiler {
             if dirty.contains(&id) {
                 body_affected.insert(id);
             }
+            if self
+                .links
+                .neighbors(id)
+                .any(|t| dirty.contains(&t) || metadata_dirty.contains(&t) || removed.contains(&t))
+            {
+                body_affected.insert(id);
+            }
 
             let new_backmatter =
                 collect_backmatter(id, &self.links, &self.transclusions, &outlinks_accumulator);
@@ -337,6 +355,7 @@ impl Compiler {
             if should_backmatter_render(
                 self.backmatters.get(&id),
                 &new_backmatter,
+                &dirty,
                 &metadata_dirty,
                 &removed,
             ) {
@@ -444,6 +463,8 @@ struct Backmatter {
     pub outlinks: HashSet<NodeId>,
 }
 
+type Metadata = HashMap<String, Vec<String>>;
+
 struct NodeEntry {
     pub body_html: String,
     pub title: String,
@@ -451,9 +472,9 @@ struct NodeEntry {
     pub span: Span,
     // TODO: Should we intern metadata strings and output? Is that nuts? Would
     // it cause incorrectness?
-    pub node_metadata: HashMap<String, Vec<String>>,
-    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    pub node_metadata: Metadata,
+    pub transclusion_metadata: HashMap<u32, Metadata>,
+    pub link_metadata: HashMap<u32, Metadata>,
 }
 
 /// The set of writes and deletes to apply to the output directory after a
@@ -527,6 +548,7 @@ fn collect_backmatter(
 fn should_backmatter_render(
     option_old: Option<&Backmatter>,
     new: &Backmatter,
+    dirty: &HashSet<NodeId>,
     metadata_dirty: &HashSet<NodeId>,
     removed: &HashSet<NodeId>,
 ) -> bool {
@@ -537,7 +559,7 @@ fn should_backmatter_render(
                 .iter()
                 .chain(new.backlinks.iter())
                 .chain(new.outlinks.iter())
-                .any(|id| metadata_dirty.contains(id) || removed.contains(id))
+                .any(|id| dirty.contains(id) || metadata_dirty.contains(id) || removed.contains(id))
     })
 }
 
