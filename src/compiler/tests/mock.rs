@@ -201,7 +201,7 @@ impl MockNode {
             BodyUpdate::Insert { index, element } => self.body.insert(index, element),
             BodyUpdate::Remove(index) => { self.body.remove(index); }
             BodyUpdate::Update { index, update } => {
-                apply_element_update(&mut self.body[index], update);
+                self.body[index].apply_update(update);
             }
         }
     }
@@ -222,22 +222,24 @@ fn apply_metadata_update(metadata: &mut crate::compiler::Metadata, update: Metad
     }
 }
 
-fn apply_element_update(element: &mut MockElement, update: ElementUpdate) {
-    match update {
-        ElementUpdate::SetText(text) => *element = MockElement::Text(text),
-        ElementUpdate::UpdateLink(u) => {
-            let MockElement::Link(link) = element else { panic!("element is not a link") };
-            match u {
-                LinkUpdate::SetTarget(t) => link.target = t,
-                LinkUpdate::SetContent(c) => link.content = c,
-                LinkUpdate::UpdateMetadata(u) => apply_metadata_update(&mut link.metadata, u),
+impl MockElement {
+    fn apply_update(&mut self, update: ElementUpdate) {
+        match update {
+            ElementUpdate::SetText(text) => *self = MockElement::Text(text),
+            ElementUpdate::UpdateLink(u) => {
+                let MockElement::Link(link) = self else { panic!("element is not a link") };
+                match u {
+                    LinkUpdate::SetTarget(t) => link.target = t,
+                    LinkUpdate::SetContent(c) => link.content = c,
+                    LinkUpdate::UpdateMetadata(u) => apply_metadata_update(&mut link.metadata, u),
+                }
             }
-        }
-        ElementUpdate::UpdateTransclusion(u) => {
-            let MockElement::Transclusion(t) = element else { panic!("element is not a transclusion") };
-            match u {
-                TransclusionUpdate::SetTarget(target) => t.target = target,
-                TransclusionUpdate::UpdateMetadata(u) => apply_metadata_update(&mut t.metadata, u),
+            ElementUpdate::UpdateTransclusion(u) => {
+                let MockElement::Transclusion(t) = self else { panic!("element is not a transclusion") };
+                match u {
+                    TransclusionUpdate::SetTarget(target) => t.target = target,
+                    TransclusionUpdate::UpdateMetadata(u) => apply_metadata_update(&mut t.metadata, u),
+                }
             }
         }
     }
