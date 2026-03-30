@@ -12,24 +12,24 @@ use typst::syntax::{FileId, Span};
 use crate::compiler::{Compile, CompileOutput, Metadata};
 
 #[derive(Debug, Clone)]
-pub(super) struct MockNode {
-    pub(super) identifier: String,
-    pub(super) title: String,
-    pub(super) metadata: Metadata,
-    pub(super) body: Vec<MockElement>,
+pub struct MockNode {
+    pub identifier: String,
+    pub title: String,
+    pub metadata: Metadata,
+    pub body: Vec<MockElement>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct MockSubnode {
-    pub(super) identifier: String,
-    pub(super) title: String,
-    pub(super) metadata: Metadata,
-    pub(super) body: Vec<MockElement>,
-    pub(super) transclude: bool,
+pub struct MockSubnode {
+    pub identifier: String,
+    pub title: String,
+    pub metadata: Metadata,
+    pub body: Vec<MockElement>,
+    pub transclude: bool,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum MockElement {
+pub enum MockElement {
     Text(String),
     Link {
         target: String,
@@ -43,7 +43,7 @@ pub(super) enum MockElement {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum MockFileMode {
+pub enum MockFileMode {
     WellFormed,
     MissingPrimaryNode,
     DuplicatePrimaryNode,
@@ -53,15 +53,15 @@ pub(super) enum MockFileMode {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct MockFile {
-    pub(super) primary: MockNode,
-    pub(super) subnodes: Vec<MockSubnode>,
-    pub(super) warnings: Vec<String>,
-    pub(super) mode: MockFileMode,
+pub struct MockFile {
+    pub primary: MockNode,
+    pub subnodes: Vec<MockSubnode>,
+    pub warnings: Vec<String>,
+    pub mode: MockFileMode,
 }
 
 impl MockFile {
-    pub(super) fn apply_mutation(&mut self, mutation: &FileMutation) {
+    pub fn apply_mutation(&mut self, mutation: &FileMutation) {
         match mutation {
             FileMutation::ChangePrimaryTitle(title) => {
                 self.primary.title = title.clone();
@@ -240,7 +240,7 @@ impl MockFile {
         self.normalize_identifiers_against(&HashSet::new());
     }
 
-    pub(super) fn normalize_identifiers_against(&mut self, reserved: &HashSet<String>) {
+    pub fn normalize_identifiers_against(&mut self, reserved: &HashSet<String>) {
         let mut used = reserved.clone();
 
         self.primary.identifier = unique_identifier(&self.primary.identifier, &mut used, "node");
@@ -349,7 +349,7 @@ impl Compile for MockFile {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Event {
+pub enum Event {
     CreateFile(NonZeroU16, MockFile),
     UpdateFile(NonZeroU16, FileMutation),
     ReplaceFile(NonZeroU16, MockFile),
@@ -357,7 +357,7 @@ pub(super) enum Event {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum FileMutation {
+pub enum FileMutation {
     ChangePrimaryTitle(String),
     ChangePrimaryMetadata(Metadata),
     ChangePrimaryBody(Vec<MockElement>),
@@ -370,7 +370,7 @@ pub(super) enum FileMutation {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum SubnodeMutation {
+pub enum SubnodeMutation {
     Rename(String),
     ChangeTitle(String),
     ChangeMetadata(Metadata),
@@ -378,7 +378,7 @@ pub(super) enum SubnodeMutation {
     ToggleTransclude,
 }
 
-pub(super) struct EventConfig {
+pub struct EventConfig {
     pool_size: RangeInclusive<usize>,
     name_pool_size: RangeInclusive<usize>,
     sequence_length: RangeInclusive<usize>,
@@ -392,7 +392,7 @@ pub(super) struct EventConfig {
 }
 
 impl EventConfig {
-    pub(super) fn from_environment() -> Self {
+    pub fn from_environment() -> Self {
         Self {
             pool_size: std::env::var("TEST_POOL_SIZE")
                 .ok()
@@ -504,9 +504,7 @@ impl RawMutation {
     }
 }
 
-pub(super) fn arbitrary_event_batches(
-    config: &EventConfig,
-) -> impl Strategy<Value = Vec<Vec<Event>>> {
+pub fn arbitrary_event_batches(config: &EventConfig) -> impl Strategy<Value = Vec<Vec<Event>>> {
     arbitrary_events(config).prop_flat_map(move |events| {
         let length = events.len();
         config
@@ -529,7 +527,7 @@ pub(super) fn arbitrary_event_batches(
     })
 }
 
-pub(super) fn arbitrary_events(config: &EventConfig) -> impl Strategy<Value = Vec<Event>> {
+pub fn arbitrary_events(config: &EventConfig) -> impl Strategy<Value = Vec<Event>> {
     let max_subnodes = config.max_subnodes;
     let max_body_items = config.max_body_items;
     let max_metadata_keys = config.max_metadata_keys;
