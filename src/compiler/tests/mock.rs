@@ -50,13 +50,46 @@ pub struct MockTransclusion {
     pub metadata: Metadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubnodePath(pub Vec<usize>);
+#[derive(Debug, Clone)]
+pub enum Event {
+    Create(u16, MockCompile),
+    Update(u16, FileUpdate),
+    Replace(u16, MockCompile),
+    Remove(u16),
+}
+
+#[derive(Debug, Clone)]
+pub enum FileUpdate {
+    UpdateNode {
+        target: NodePath,
+        update: NodeUpdate,
+    },
+    AddSubnode {
+        parent: NodePath,
+        subnode: MockSubnode,
+    },
+    RemoveSubnode(SubnodePath),
+    SetSubnodeTransclude {
+        target: SubnodePath,
+        transclude: bool,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodePath {
     Primary,
     Subnode(SubnodePath),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubnodePath(pub Vec<usize>);
+
+#[derive(Debug, Clone)]
+pub enum NodeUpdate {
+    Rename(String),
+    ChangeTitle(String),
+    UpdateMetadata(MetadataUpdate),
+    UpdateBody(BodyUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -91,13 +124,6 @@ pub enum TransclusionUpdate {
 }
 
 #[derive(Debug, Clone)]
-pub enum ElementUpdate {
-    SetText(String),
-    UpdateLink(LinkUpdate),
-    UpdateTransclusion(TransclusionUpdate),
-}
-
-#[derive(Debug, Clone)]
 pub enum BodyUpdate {
     Insert { index: usize, element: MockElement },
     Remove(usize),
@@ -105,36 +131,10 @@ pub enum BodyUpdate {
 }
 
 #[derive(Debug, Clone)]
-pub enum NodeUpdate {
-    Rename(String),
-    ChangeTitle(String),
-    UpdateMetadata(MetadataUpdate),
-    UpdateBody(BodyUpdate),
-}
-
-#[derive(Debug, Clone)]
-pub enum FileUpdate {
-    UpdateNode {
-        target: NodePath,
-        update: NodeUpdate,
-    },
-    AddSubnode {
-        parent: NodePath,
-        subnode: MockSubnode,
-    },
-    RemoveSubnode(SubnodePath),
-    SetSubnodeTransclude {
-        target: SubnodePath,
-        transclude: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum Event {
-    Create(u16, MockCompile),
-    Update(u16, FileUpdate),
-    Replace(u16, MockCompile),
-    Remove(u16),
+pub enum ElementUpdate {
+    SetText(String),
+    UpdateLink(LinkUpdate),
+    UpdateTransclusion(TransclusionUpdate),
 }
 
 impl MockFile {
@@ -150,7 +150,8 @@ impl MockFile {
             }
             FileUpdate::RemoveSubnode(path) => {
                 let (last, rest) = path.0.split_last().expect("SubnodePath must not be empty");
-                let subnodes = self.get_subnodes_mut(&NodePath::Subnode(SubnodePath(rest.to_vec())));
+                let subnodes =
+                    self.get_subnodes_mut(&NodePath::Subnode(SubnodePath(rest.to_vec())));
                 subnodes.remove(*last);
             }
             FileUpdate::SetSubnodeTransclude { target, transclude } => {
@@ -204,7 +205,9 @@ impl MockNode {
     fn apply_body_update(&mut self, update: BodyUpdate) {
         match update {
             BodyUpdate::Insert { index, element } => self.body.insert(index, element),
-            BodyUpdate::Remove(index) => { self.body.remove(index); }
+            BodyUpdate::Remove(index) => {
+                self.body.remove(index);
+            }
             BodyUpdate::Update { index, update } => {
                 self.body[index].apply_update(update);
             }
@@ -214,8 +217,12 @@ impl MockNode {
 
 fn apply_metadata_update(metadata: &mut crate::compiler::Metadata, update: MetadataUpdate) {
     match update {
-        MetadataUpdate::SetValues { key, values } => { metadata.insert(key, values); }
-        MetadataUpdate::RemoveKey(key) => { metadata.remove(&key); }
+        MetadataUpdate::SetValues { key, values } => {
+            metadata.insert(key, values);
+        }
+        MetadataUpdate::RemoveKey(key) => {
+            metadata.remove(&key);
+        }
         MetadataUpdate::InsertValue { key, index, value } => {
             metadata.entry(key).or_default().insert(index, value);
         }
@@ -232,7 +239,9 @@ impl MockElement {
         match update {
             ElementUpdate::SetText(text) => *self = MockElement::Text(text),
             ElementUpdate::UpdateLink(u) => {
-                let MockElement::Link(link) = self else { panic!("element is not a link") };
+                let MockElement::Link(link) = self else {
+                    panic!("element is not a link")
+                };
                 match u {
                     LinkUpdate::SetTarget(t) => link.target = t,
                     LinkUpdate::SetContent(c) => link.content = c,
@@ -240,10 +249,14 @@ impl MockElement {
                 }
             }
             ElementUpdate::UpdateTransclusion(u) => {
-                let MockElement::Transclusion(t) = self else { panic!("element is not a transclusion") };
+                let MockElement::Transclusion(t) = self else {
+                    panic!("element is not a transclusion")
+                };
                 match u {
                     TransclusionUpdate::SetTarget(target) => t.target = target,
-                    TransclusionUpdate::UpdateMetadata(u) => apply_metadata_update(&mut t.metadata, u),
+                    TransclusionUpdate::UpdateMetadata(u) => {
+                        apply_metadata_update(&mut t.metadata, u)
+                    }
                 }
             }
         }
@@ -321,7 +334,12 @@ fn render_node(
 
     let mut html = format!(r#"<wb-node identifier="{}">"#, node.identifier);
     html.push_str(&format!("<wb-title>{}</wb-title>", node.title));
-    html.push_str(&render_body(&node.body, counter, transclusion_metadata, link_metadata));
+    html.push_str(&render_body(
+        &node.body,
+        counter,
+        transclusion_metadata,
+        link_metadata,
+    ));
     html.push_str("</wb-node>");
     html
 }
@@ -336,7 +354,10 @@ fn render_subnode(
 ) -> String {
     spans.insert(subnode.node.identifier.clone(), Span::detached());
     if !subnode.node.metadata.is_empty() {
-        metadata.insert(subnode.node.identifier.clone(), subnode.node.metadata.clone());
+        metadata.insert(
+            subnode.node.identifier.clone(),
+            subnode.node.metadata.clone(),
+        );
     }
 
     let transclude = if subnode.transclude { "true" } else { "false" };
@@ -345,9 +366,21 @@ fn render_subnode(
         subnode.node.identifier,
     );
     html.push_str(&format!("<wb-title>{}</wb-title>", subnode.node.title));
-    html.push_str(&render_body(&subnode.node.body, counter, transclusion_metadata, link_metadata));
+    html.push_str(&render_body(
+        &subnode.node.body,
+        counter,
+        transclusion_metadata,
+        link_metadata,
+    ));
     for child in &subnode.subnodes {
-        html.push_str(&render_subnode(child, counter, spans, metadata, transclusion_metadata, link_metadata));
+        html.push_str(&render_subnode(
+            child,
+            counter,
+            spans,
+            metadata,
+            transclusion_metadata,
+            link_metadata,
+        ));
     }
     html.push_str("</wb-subnode>");
     html
