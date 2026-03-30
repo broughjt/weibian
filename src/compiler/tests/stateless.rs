@@ -1,21 +1,29 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ecow::EcoVec;
-use petgraph::algo::tarjan_scc;
+use petgraph::Direction;
+use petgraph::algo::{tarjan_scc, toposort};
 use petgraph::prelude::DiGraphMap;
-use typst::diag::{SourceDiagnostic, Warned};
+use typst::diag::Warned;
 use typst::syntax::FileId;
 
 use crate::compiler::{
-    Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
+    BackmatterCache, Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner,
+    ProcessDiagnostics,
 };
 use crate::config::RenderConfig;
 
 use super::super::{
-    backmatter_cache, cycle_diagnostics, dangling_link_diagnostic,
-    dangling_transclusion_diagnostic, extract, render_backmatter, render_body, render_node,
+    cycle_diagnostics, dangling_link_diagnostic, dangling_transclusion_diagnostic, extract,
+    render_backmatter, render_body, render_node,
 };
 use super::mock::MockNode;
+
+struct Backmatter {
+    contexts: BTreeSet<NodeId>,
+    backlinks: BTreeSet<NodeId>,
+    outlinks: BTreeSet<NodeId>,
+}
 
 /// Stateless reference implementation: compiles `mock_nodes` from scratch and
 /// returns the complete rendered filesystem, compile diagnostics, and process
@@ -60,15 +68,15 @@ pub(super) fn process_stateless(
             })
         }) {
             Ok(extracted) => {
-                for (node_id, (entry, trans, lnks)) in extracted {
-                    node_to_file.insert(node_id, file_id);
-                    for &t in &trans {
-                        transclusions.add_edge(node_id, t, ());
+                for (id, (entry, ts, ls)) in extracted {
+                    node_to_file.insert(id, file_id);
+                    for &t in &ts {
+                        transclusions.add_edge(id, t, ());
                     }
-                    for &l in &lnks {
-                        links.add_edge(node_id, l, ());
+                    for &l in &ls {
+                        links.add_edge(id, l, ());
                     }
-                    nodes.insert(node_id, entry);
+                    nodes.insert(id, entry);
                 }
 
                 if !warnings.is_empty() {
@@ -87,78 +95,79 @@ pub(super) fn process_stateless(
         .all_edges()
         .filter(|&(_, dst, _)| !nodes.contains_key(&dst))
     {
-        let fid = *node_to_file
+        let file_id = *node_to_file
             .get(&source)
             .expect("bug: node in transclusion graph has no file entry");
         let name = interner.name(destination);
         process_diagnostics
-            .entry(fid)
+            .entry(file_id)
             .or_default()
             .push(dangling_transclusion_diagnostic(name));
     }
-
     for (source, destination, _) in links
         .all_edges()
         .filter(|&(_, dst, _)| !nodes.contains_key(&dst))
     {
-        let fid = *node_to_file
+        let file_id = *node_to_file
             .get(&source)
             .expect("bug: node in link graph has no file entry");
         let name = interner.name(destination);
         process_diagnostics
-            .entry(fid)
+            .entry(file_id)
             .or_default()
             .push(dangling_link_diagnostic(name));
     }
 
-    let mut unrenderable: HashSet<NodeId> = HashSet::new();
-    let mut outlinks_accumulator: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
-    let mut render_order: Vec<NodeId> = Vec::new();
-
-    let sccs = tarjan_scc(&transclusions);
-
-    for scc in &sccs {
+    let mut cyclic_nodes: HashSet<NodeId> = HashSet::new();
+    for scc in tarjan_scc(&transclusions) {
         let id = scc[0];
-        let is_cyclic = scc.len() > 1 || transclusions.contains_edge(id, id);
+        if scc.len() > 1 || transclusions.contains_edge(id, id) {
+            cyclic_nodes.extend(scc.iter());
 
-        if is_cyclic {
-            unrenderable.extend(scc.iter());
-            for (fid, diag) in cycle_diagnostics(scc.iter().map(|&id| {
-                let fid = *node_to_file
+            let pairs = scc.iter().map(|&id| {
+                let file_id = *node_to_file
                     .get(&id)
                     .expect("bug: node in transclusion cycle has no file entry");
-                (fid, interner.name(id))
-            })) {
-                process_diagnostics.entry(fid).or_default().push(diag);
+
+                (file_id, interner.name(id))
+            });
+            for (file_id, diag) in cycle_diagnostics(pairs) {
+                process_diagnostics.entry(file_id).or_default().push(diag);
             }
-        } else if transclusions
-            .neighbors(id)
-            .any(|t| unrenderable.contains(&t))
-        {
-            unrenderable.insert(id);
-        } else if let Some(entry) = nodes.get_mut(&id) {
-            let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
-            outlinks_accumulator.insert(id, new_cache.outlinks.clone());
-            entry.backmatter_cache = Some(new_cache);
-            render_order.push(id);
         }
     }
 
-    // Nodes that appear in no transclusion edge (neither source nor target) are
-    // not visited by the SCC loop. Process them separately.
-    let isolated: Vec<NodeId> = nodes
+    let mut unrenderable = cyclic_nodes.clone();
+    let mut stack: Vec<NodeId> = cyclic_nodes.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        for source in transclusions.neighbors_directed(id, Direction::Incoming) {
+            if unrenderable.insert(source) {
+                stack.push(source);
+            }
+        }
+    }
+
+    let renderable: HashSet<NodeId> = nodes
         .keys()
         .copied()
-        .filter(|&id| !transclusions.contains_node(id))
+        .filter(|id| !unrenderable.contains(id))
         .collect();
 
-    for id in isolated {
-        if let Some(entry) = nodes.get_mut(&id) {
-            let new_cache = backmatter_cache(id, &links, &transclusions, &outlinks_accumulator);
-            entry.backmatter_cache = Some(new_cache);
-            render_order.push(id);
+    let mut renderable_transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
+    for &id in &renderable {
+        renderable_transclusions.add_node(id);
+    }
+    for (source, destination, _) in transclusions.all_edges() {
+        if renderable.contains(&source) && renderable.contains(&destination) {
+            renderable_transclusions.add_edge(source, destination, ());
         }
     }
+
+    let render_order: Vec<NodeId> = toposort(&renderable_transclusions, None)
+        .expect("bug: renderable stateless transclusion graph must be acyclic")
+        .into_iter()
+        .rev()
+        .collect();
 
     let site_context = minijinja::context! {
         root_directory => minijinja::Value::from_safe_string(config.root_directory.clone()),
@@ -183,7 +192,16 @@ pub(super) fn process_stateless(
         .get_template(crate::config::BACKMATTER_TEMPLATE)
         .expect("bug: backmatter.html template missing");
 
+    let mut output = HashMap::new();
+
     for &id in &render_order {
+        let backmatter = collect_backmatter(id, &links, &transclusions);
+        nodes.get_mut(&id).unwrap().backmatter_cache = Some(BackmatterCache {
+            contexts: backmatter.contexts,
+            backlinks: backmatter.backlinks,
+            outlinks: backmatter.outlinks,
+        });
+
         let rendered_body = render_body(
             id,
             &nodes,
@@ -194,6 +212,7 @@ pub(super) fn process_stateless(
             &site_context,
         )?;
         nodes.get_mut(&id).unwrap().rendered_body = Some(rendered_body);
+
         let rendered_backmatter = render_backmatter(
             id,
             &nodes,
@@ -203,33 +222,61 @@ pub(super) fn process_stateless(
             &site_context,
         )?;
         nodes.get_mut(&id).unwrap().rendered_backmatter = Some(rendered_backmatter);
-    }
 
-    let fs = render_order
-        .iter()
-        .map(|&id| -> anyhow::Result<(String, String)> {
-            let name = interner.name(id);
-            let entry = &nodes[&id];
-            let body = entry
+        let name = interner.name(id);
+        let entry = &nodes[&id];
+        let html = render_node(
+            name,
+            entry,
+            entry
                 .rendered_body
                 .as_deref()
-                .expect("bug: no rendered_body after pass 2");
-            let backmatter = entry
+                .expect("bug: stateless render body missing after render_body"),
+            entry
                 .rendered_backmatter
                 .as_deref()
-                .expect("bug: no rendered_backmatter after pass 2");
-            let html = render_node(
-                name,
-                entry,
-                body,
-                backmatter,
-                &node_template,
-                config,
-                &site_context,
-            )?;
-            Ok((name.to_owned(), html))
-        })
-        .collect::<anyhow::Result<_>>()?;
+                .expect("bug: stateless rendered backmatter missing after render_backmatter"),
+            &node_template,
+            config,
+            &site_context,
+        )?;
+        output.insert(name.to_owned(), html);
+    }
 
-    Ok((fs, compile_diagnostics, process_diagnostics))
+    Ok((output, compile_diagnostics, process_diagnostics))
+}
+
+fn collect_backmatter(
+    id: NodeId,
+    links: &DiGraphMap<NodeId, ()>,
+    transclusions: &DiGraphMap<NodeId, ()>,
+) -> Backmatter {
+    Backmatter {
+        contexts: transclusions
+            .neighbors_directed(id, Direction::Incoming)
+            .collect(),
+        backlinks: links.neighbors_directed(id, Direction::Incoming).collect(),
+        outlinks: collect_outlinks(id, links, transclusions),
+    }
+}
+
+fn collect_outlinks(
+    id: NodeId,
+    links: &DiGraphMap<NodeId, ()>,
+    transclusions: &DiGraphMap<NodeId, ()>,
+) -> BTreeSet<NodeId> {
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut stack = vec![id];
+    let mut outlinks = BTreeSet::new();
+
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+
+        outlinks.extend(links.neighbors(current));
+        stack.extend(transclusions.neighbors(current));
+    }
+
+    outlinks
 }
