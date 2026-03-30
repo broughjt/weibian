@@ -54,7 +54,7 @@ pub enum MockFileMode {
 
 #[derive(Debug, Clone)]
 pub struct MockFile {
-    pub primary: MockNode,
+    pub node: MockNode,
     pub subnodes: Vec<MockSubnode>,
     pub warnings: Vec<String>,
     pub mode: MockFileMode,
@@ -64,16 +64,16 @@ impl MockFile {
     pub fn apply_mutation(&mut self, mutation: &FileMutation) {
         match mutation {
             FileMutation::ChangePrimaryTitle(title) => {
-                self.primary.title = title.clone();
+                self.node.title = title.clone();
             }
             FileMutation::ChangePrimaryMetadata(metadata) => {
-                self.primary.metadata = metadata.clone();
+                self.node.metadata = metadata.clone();
             }
             FileMutation::ChangePrimaryBody(body) => {
-                self.primary.body = body.clone();
+                self.node.body = body.clone();
             }
             FileMutation::RenamePrimary(identifier) => {
-                self.primary.identifier = identifier.clone();
+                self.node.identifier = identifier.clone();
             }
             FileMutation::AddSubnode(subnode) => {
                 self.subnodes.push(subnode.clone());
@@ -125,7 +125,7 @@ impl MockFile {
 
         let html = match &normalized.mode {
             MockFileMode::WellFormed => normalized.render_primary(
-                &normalized.primary,
+                &normalized.node,
                 &normalized.subnodes,
                 true,
                 None,
@@ -156,7 +156,7 @@ impl MockFile {
             }
             MockFileMode::DuplicatePrimaryNode => {
                 let mut html = normalized.render_primary(
-                    &normalized.primary,
+                    &normalized.node,
                     &normalized.subnodes,
                     true,
                     None,
@@ -167,21 +167,18 @@ impl MockFile {
                     &mut counter,
                 );
                 spans.insert(
-                    format!("{}-duplicate", normalized.primary.identifier),
+                    format!("{}-duplicate", normalized.node.identifier),
                     Span::detached(),
                 );
                 html.push_str(&format!(
                     r#"<wb-node identifier="{}-duplicate"><wb-title>{}</wb-title></wb-node>"#,
-                    normalized.primary.identifier, normalized.primary.title
+                    normalized.node.identifier, normalized.node.title
                 ));
                 html
             }
             MockFileMode::MissingPrimaryTitle => {
-                spans.insert(normalized.primary.identifier.clone(), Span::detached());
-                let mut html = format!(
-                    r#"<wb-node identifier="{}">"#,
-                    normalized.primary.identifier
-                );
+                spans.insert(normalized.node.identifier.clone(), Span::detached());
+                let mut html = format!(r#"<wb-node identifier="{}">"#, normalized.node.identifier);
                 for subnode in &normalized.subnodes {
                     let subnode = MockSubnode {
                         transclude: false,
@@ -204,15 +201,15 @@ impl MockFile {
                 let mut subnodes = normalized.subnodes.clone();
                 if subnodes.is_empty() {
                     subnodes.push(MockSubnode {
-                        identifier: format!("{}-sub", normalized.primary.identifier),
-                        title: normalized.primary.title.clone(),
-                        metadata: normalized.primary.metadata.clone(),
-                        body: normalized.primary.body.clone(),
+                        identifier: format!("{}-sub", normalized.node.identifier),
+                        title: normalized.node.title.clone(),
+                        metadata: normalized.node.metadata.clone(),
+                        body: normalized.node.body.clone(),
                         transclude: true,
                     });
                 }
                 normalized.render_primary(
-                    &normalized.primary,
+                    &normalized.node,
                     &subnodes,
                     true,
                     Some("maybe"),
@@ -243,7 +240,7 @@ impl MockFile {
     pub fn normalize_identifiers_against(&mut self, reserved: &HashSet<String>) {
         let mut used = reserved.clone();
 
-        self.primary.identifier = unique_identifier(&self.primary.identifier, &mut used, "node");
+        self.node.identifier = unique_identifier(&self.node.identifier, &mut used, "node");
         for (index, subnode) in self.subnodes.iter_mut().enumerate() {
             subnode.identifier =
                 unique_identifier(&subnode.identifier, &mut used, &format!("subnode-{index}"));
@@ -350,10 +347,10 @@ impl Compile for MockFile {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    CreateFile(NonZeroU16, MockFile),
-    UpdateFile(NonZeroU16, FileMutation),
-    ReplaceFile(NonZeroU16, MockFile),
-    RemoveFile(NonZeroU16),
+    Create(NonZeroU16, MockFile),
+    Update(NonZeroU16, FileMutation),
+    Replace(NonZeroU16, MockFile),
+    Remove(NonZeroU16),
 }
 
 #[derive(Debug, Clone)]
@@ -675,7 +672,7 @@ fn arbitrary_mock_file(
 
     (primary, vec(subnode, 0..=max_subnodes), warnings, mode).prop_map(
         |(primary, subnodes, warnings, mode)| MockFile {
-            primary,
+            node: primary,
             subnodes,
             warnings,
             mode,
@@ -877,27 +874,27 @@ fn realize_steps(steps: Vec<RawStep>) -> Vec<Event> {
                 if let Some(existing) = current.get_mut(&file_id) {
                     let realized = mutation.realize(existing);
                     existing.apply_mutation(&realized);
-                    events.push(Event::UpdateFile(file_id, realized));
+                    events.push(Event::Update(file_id, realized));
                 } else {
                     current.insert(file_id, created_file.clone());
-                    events.push(Event::CreateFile(file_id, created_file));
+                    events.push(Event::Create(file_id, created_file));
                 }
             }
             RawStep::Replace { file_id, file } => {
                 let event = if current.contains_key(&file_id) {
-                    Event::ReplaceFile(file_id, file.clone())
+                    Event::Replace(file_id, file.clone())
                 } else {
-                    Event::CreateFile(file_id, file.clone())
+                    Event::Create(file_id, file.clone())
                 };
                 current.insert(file_id, file);
                 events.push(event);
             }
             RawStep::TogglePresence { file_id, file } => {
                 if current.remove(&file_id).is_some() {
-                    events.push(Event::RemoveFile(file_id));
+                    events.push(Event::Remove(file_id));
                 } else {
                     current.insert(file_id, file.clone());
-                    events.push(Event::CreateFile(file_id, file));
+                    events.push(Event::Create(file_id, file));
                 }
             }
         }

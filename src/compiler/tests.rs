@@ -24,13 +24,13 @@ struct ProjectState {
 impl ProjectState {
     fn apply_event(&mut self, event: &Event) {
         match event {
-            Event::CreateFile(raw_id, file) | Event::ReplaceFile(raw_id, file) => {
+            Event::Create(raw_id, file) | Event::Replace(raw_id, file) => {
                 let id = FileId::from_raw(*raw_id);
                 self.files.insert(id, file.clone());
                 self.normalize_file(id);
                 self.touch(id);
             }
-            Event::UpdateFile(raw_id, mutation) => {
+            Event::Update(raw_id, mutation) => {
                 let id = FileId::from_raw(*raw_id);
                 let file = self
                     .files
@@ -40,7 +40,7 @@ impl ProjectState {
                 self.normalize_file(id);
                 self.touch(id);
             }
-            Event::RemoveFile(raw_id) => {
+            Event::Remove(raw_id) => {
                 let id = FileId::from_raw(*raw_id);
                 self.files.remove(&id);
                 self.order.retain(|existing| *existing != id);
@@ -205,9 +205,7 @@ proptest! {
 
 fn apply_event_to_compiler(event: &Event, project: &mut ProjectState, compiler: &mut Compiler) {
     match event {
-        Event::CreateFile(raw_id, _)
-        | Event::UpdateFile(raw_id, _)
-        | Event::ReplaceFile(raw_id, _) => {
+        Event::Create(raw_id, _) | Event::Update(raw_id, _) | Event::Replace(raw_id, _) => {
             let id = FileId::from_raw(*raw_id);
             project.apply_event(event);
             let file = project
@@ -215,7 +213,7 @@ fn apply_event_to_compiler(event: &Event, project: &mut ProjectState, compiler: 
                 .expect("bug: project state lost file immediately after create/update/replace");
             compiler.update(file, id);
         }
-        Event::RemoveFile(raw_id) => {
+        Event::Remove(raw_id) => {
             let id = FileId::from_raw(*raw_id);
             project.apply_event(event);
             compiler.remove(id);
@@ -300,7 +298,7 @@ fn canonical_diagnostic(diagnostic: &SourceDiagnostic) -> String {
 }
 
 fn node_identifiers(file: &MockFile) -> impl Iterator<Item = String> + '_ {
-    std::iter::once(file.primary.identifier.clone()).chain(
+    std::iter::once(file.node.identifier.clone()).chain(
         file.subnodes
             .iter()
             .map(|subnode| subnode.identifier.clone()),
