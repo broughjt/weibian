@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dom_query::Document;
+use dom_query::{Document, Selection};
 
 use crate::config::RenderConfig;
 
@@ -28,104 +28,148 @@ pub(super) fn render_body(
             .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
             .map(|identifier| (element, identifier))
     }) {
-        let counter: u32 = element
-            .attr("data-counter")
-            .expect("bug: link is missing a data-counter")
-            .parse()
-            .expect("bug: link has invalid data-counter");
-        let href = minijinja::Value::from_safe_string(config.href(&identifier));
-        let content = element.inner_html().to_string();
-        let link_metadata = entry
-            .link_metadata
-            .get(&counter)
-            .cloned()
-            .unwrap_or_default();
-        let context = if let Some(target_id) = interner.get(&identifier)
-            && let Some(target) = nodes.get(&target_id)
-        {
-            minijinja::context! {
-                link => minijinja::context! {
-                    identifier => identifier,
-                    href => &href,
-                    content => content,
-                    resolved => true,
-                    title => target.title.as_str(),
-                    title_text => target.title_text.as_str(),
-                    metadata => target.metadata,
-                    link_metadata => link_metadata,
-                },
-                site => site_context,
-            }
-        } else {
-            minijinja::context! {
-                link => minijinja::context! {
-                    identifier => identifier,
-                    href => href,
-                    content => content,
-                    resolved => false,
-                    link_metadata => link_metadata,
-                },
-                site => site_context,
-            }
-        };
-        let replacement = link_template
-            .render(context)
-            .map_err(|e| anyhow::anyhow!("failed to render link template for {identifier}: {e}"))?;
-        element.replace_with_html(replacement);
+        element.replace_with_html(render_link(
+            &element,
+            &identifier,
+            entry,
+            nodes,
+            interner,
+            link_template,
+            config,
+            site_context,
+        )?);
     }
 
     for element in document.select("wb-transclude").iter() {
-        let identifier = element
-            .attr("identifier")
-            .expect("bug: wb-transclude is missing an identifier");
-        let counter: u32 = element
-            .attr("counter")
-            .expect("bug: wb-transclude is missing a counter")
-            .parse()
-            .expect("bug: wb-transclude has invalid counter");
-        let transclusion_metadata = entry
-            .transclusion_metadata
-            .get(&counter)
-            .cloned()
-            .unwrap_or_default();
-        let transclude_id = interner
-            .get(identifier.as_ref())
-            .expect("bug: wb-transclude identifier was not interned");
-        let context = if let Some(target) = nodes.get(&transclude_id) {
-            let body = rendered_bodies
-                .get(&transclude_id)
-                .map(String::as_str)
-                .expect("bug: wb-transclude target has no rendered_body");
-            minijinja::context! {
-                transclusion => minijinja::context! {
-                    identifier => identifier.as_ref(),
-                    href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
-                    resolved => true,
-                    title => target.title.as_str(),
-                    title_text => target.title_text.as_str(),
-                    body => body,
-                    metadata => target.metadata,
-                    transclusion_metadata => transclusion_metadata,
-                },
-                site => site_context,
-            }
-        } else {
-            minijinja::context! {
-                transclusion => minijinja::context! {
-                    identifier => identifier.as_ref(),
-                    resolved => false,
-                    transclusion_metadata => transclusion_metadata,
-                },
-                site => site_context,
-            }
-        };
-        let replacement = transclusion_template.render(context).map_err(|e| {
-            anyhow::anyhow!("failed to render transclusion template for {identifier}: {e}")
-        })?;
-        element.replace_with_html(replacement);
+        element.replace_with_html(render_transclusion(
+            &element,
+            entry,
+            nodes,
+            rendered_bodies,
+            interner,
+            transclusion_template,
+            config,
+            site_context,
+        )?);
     }
 
     Ok(document.select("body").first().inner_html().to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_link(
+    element: &Selection,
+    identifier: &str,
+    entry: &NodeEntry,
+    nodes: &HashMap<NodeId, NodeEntry>,
+    interner: &NodeInterner,
+    link_template: &minijinja::Template<'_, '_>,
+    config: &RenderConfig,
+    site_context: &minijinja::Value,
+) -> anyhow::Result<String> {
+    let counter: u32 = element
+        .attr("data-counter")
+        .expect("bug: link is missing a data-counter")
+        .parse()
+        .expect("bug: link has invalid data-counter");
+    let href = minijinja::Value::from_safe_string(config.href(identifier));
+    let content = element.inner_html().to_string();
+    let link_metadata = entry
+        .link_metadata
+        .get(&counter)
+        .cloned()
+        .unwrap_or_default();
+    let context = if let Some(target_id) = interner.get(identifier)
+        && let Some(target) = nodes.get(&target_id)
+    {
+        minijinja::context! {
+            link => minijinja::context! {
+                identifier => identifier,
+                href => &href,
+                content => content,
+                resolved => true,
+                title => target.title.as_str(),
+                title_text => target.title_text.as_str(),
+                metadata => target.metadata,
+                link_metadata => link_metadata,
+            },
+            site => site_context,
+        }
+    } else {
+        minijinja::context! {
+            link => minijinja::context! {
+                identifier => identifier,
+                href => href,
+                content => content,
+                resolved => false,
+                link_metadata => link_metadata,
+            },
+            site => site_context,
+        }
+    };
+    link_template
+        .render(context)
+        .map_err(|e| anyhow::anyhow!("failed to render link template for {identifier}: {e}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_transclusion(
+    element: &Selection,
+    entry: &NodeEntry,
+    nodes: &HashMap<NodeId, NodeEntry>,
+    rendered_bodies: &HashMap<NodeId, String>,
+    interner: &NodeInterner,
+    transclusion_template: &minijinja::Template<'_, '_>,
+    config: &RenderConfig,
+    site_context: &minijinja::Value,
+) -> anyhow::Result<String> {
+    let identifier = element
+        .attr("identifier")
+        .expect("bug: wb-transclude is missing an identifier");
+    let counter: u32 = element
+        .attr("counter")
+        .expect("bug: wb-transclude is missing a counter")
+        .parse()
+        .expect("bug: wb-transclude has invalid counter");
+    let transclusion_metadata = entry
+        .transclusion_metadata
+        .get(&counter)
+        .cloned()
+        .unwrap_or_default();
+    let transclude_id = interner
+        .get(identifier.as_ref())
+        .expect("bug: wb-transclude identifier was not interned");
+    let context = if let Some(target) = nodes.get(&transclude_id) {
+        let body = rendered_bodies
+            .get(&transclude_id)
+            .map(String::as_str)
+            .expect("bug: wb-transclude target has no rendered_body");
+        minijinja::context! {
+            transclusion => minijinja::context! {
+                identifier => identifier.as_ref(),
+                href => minijinja::Value::from_safe_string(config.href(identifier.as_ref())),
+                resolved => true,
+                title => target.title.as_str(),
+                title_text => target.title_text.as_str(),
+                body => body,
+                metadata => target.metadata,
+                transclusion_metadata => transclusion_metadata,
+            },
+            site => site_context,
+        }
+    } else {
+        minijinja::context! {
+            transclusion => minijinja::context! {
+                identifier => identifier.as_ref(),
+                resolved => false,
+                transclusion_metadata => transclusion_metadata,
+            },
+            site => site_context,
+        }
+    };
+    transclusion_template.render(context).map_err(|e| {
+        anyhow::anyhow!("failed to render transclusion template for {identifier}: {e}")
+    })
 }
 
 pub(super) fn render_backmatter(
