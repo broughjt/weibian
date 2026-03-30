@@ -1,8 +1,13 @@
-use typst::diag::Warned;
+use std::collections::HashMap;
 
-use crate::compiler::Metadata;
+use ecow::EcoVec;
+use typst::diag::{SourceDiagnostic, Warned};
+use typst::syntax::{FileId, Span};
 
-pub type MockCompile = Warned<Result<MockFile, Vec<String>>>;
+use crate::compiler::{Compile, CompileOutput, Metadata};
+
+#[derive(Debug, Clone)]
+pub struct MockCompile(pub Warned<Result<MockFile, Vec<String>>>);
 
 #[derive(Debug, Clone)]
 pub struct MockFile {
@@ -245,20 +250,156 @@ impl MockElement {
     }
 }
 
+impl Compile for MockCompile {
+    fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
+        let Warned { output, warnings } = &self.0;
+        let warnings = warnings
+            .iter()
+            .map(|m| SourceDiagnostic::warning(Span::detached(), m.as_str().into()))
+            .collect();
+        let output = match output {
+            Ok(file) => Ok(file.render()),
+            Err(errors) => Err(errors
+                .iter()
+                .map(|m| SourceDiagnostic::error(Span::detached(), m.as_str().into()))
+                .collect()),
+        };
+        Warned { output, warnings }
+    }
+}
+
+impl MockFile {
+    pub fn render(&self) -> CompileOutput {
+        let mut counter = 0u32;
+        let mut spans = HashMap::new();
+        let mut metadata = HashMap::new();
+        let mut transclusion_metadata = HashMap::new();
+        let mut link_metadata = HashMap::new();
+
+        let mut html = render_node(
+            &self.primary,
+            &mut counter,
+            &mut spans,
+            &mut metadata,
+            &mut transclusion_metadata,
+            &mut link_metadata,
+        );
+        for subnode in &self.subnodes {
+            html.push_str(&render_subnode(
+                subnode,
+                &mut counter,
+                &mut spans,
+                &mut metadata,
+                &mut transclusion_metadata,
+                &mut link_metadata,
+            ));
+        }
+
+        CompileOutput {
+            html,
+            spans,
+            metadata,
+            transclusion_metadata,
+            link_metadata,
+            errors: EcoVec::new(),
+        }
+    }
+}
+
+fn render_node(
+    node: &MockNode,
+    counter: &mut u32,
+    spans: &mut HashMap<String, Span>,
+    metadata: &mut HashMap<String, Metadata>,
+    transclusion_metadata: &mut HashMap<u32, Metadata>,
+    link_metadata: &mut HashMap<u32, Metadata>,
+) -> String {
+    spans.insert(node.identifier.clone(), Span::detached());
+    if !node.metadata.is_empty() {
+        metadata.insert(node.identifier.clone(), node.metadata.clone());
+    }
+
+    let mut html = format!(r#"<wb-node identifier="{}">"#, node.identifier);
+    html.push_str(&format!("<wb-title>{}</wb-title>", node.title));
+    html.push_str(&render_body(&node.body, counter, transclusion_metadata, link_metadata));
+    html.push_str("</wb-node>");
+    html
+}
+
+fn render_subnode(
+    subnode: &MockSubnode,
+    counter: &mut u32,
+    spans: &mut HashMap<String, Span>,
+    metadata: &mut HashMap<String, Metadata>,
+    transclusion_metadata: &mut HashMap<u32, Metadata>,
+    link_metadata: &mut HashMap<u32, Metadata>,
+) -> String {
+    spans.insert(subnode.node.identifier.clone(), Span::detached());
+    if !subnode.node.metadata.is_empty() {
+        metadata.insert(subnode.node.identifier.clone(), subnode.node.metadata.clone());
+    }
+
+    let transclude = if subnode.transclude { "true" } else { "false" };
+    let mut html = format!(
+        r#"<wb-subnode identifier="{}" transclude="{transclude}">"#,
+        subnode.node.identifier,
+    );
+    html.push_str(&format!("<wb-title>{}</wb-title>", subnode.node.title));
+    html.push_str(&render_body(&subnode.node.body, counter, transclusion_metadata, link_metadata));
+    for child in &subnode.subnodes {
+        html.push_str(&render_subnode(child, counter, spans, metadata, transclusion_metadata, link_metadata));
+    }
+    html.push_str("</wb-subnode>");
+    html
+}
+
+fn render_body(
+    body: &[MockElement],
+    counter: &mut u32,
+    transclusion_metadata: &mut HashMap<u32, Metadata>,
+    link_metadata: &mut HashMap<u32, Metadata>,
+) -> String {
+    let mut html = String::new();
+    for element in body {
+        match element {
+            MockElement::Text(text) => html.push_str(&format!("<p>{text}</p>")),
+            MockElement::Link(link) => {
+                let c = *counter;
+                *counter += 1;
+                if !link.metadata.is_empty() {
+                    link_metadata.insert(c, link.metadata.clone());
+                }
+                let content = link.content.as_deref().unwrap_or("");
+                html.push_str(&format!(
+                    r#"<a href="wb:{}" data-counter="{c}">{content}</a>"#,
+                    link.target,
+                ));
+            }
+            MockElement::Transclusion(t) => {
+                let c = *counter;
+                *counter += 1;
+                if !t.metadata.is_empty() {
+                    transclusion_metadata.insert(c, t.metadata.clone());
+                }
+                html.push_str(&format!(
+                    r#"<wb-transclude identifier="{}" counter="{c}"></wb-transclude>"#,
+                    t.target,
+                ));
+            }
+        }
+    }
+    html
+}
+
 /*
 Next pieces to reintroduce incrementally:
 
-1. `impl MockFile`
-   - `apply_update`
-   - identifier normalization
-   - html lowering / `Compile` impl support
-
-2. event generation
+1. event generation
    - correct `MockFile` generation
    - small focused `...Update` generation
    - later: raw target/path resolution for generators
 
-3. property tests
+2. property tests
    - scratch vs incremental
    - incremental vs stateless reference
 
