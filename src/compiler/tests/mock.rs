@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::fmt::Write;
 
 use ecow::EcoVec;
 use typst::diag::{SourceDiagnostic, Warned};
@@ -252,164 +252,158 @@ impl MockElement {
 
 impl Compile for MockCompile {
     fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
-        self.0.map(|result| {
-            result
-                .map(|file| MockFile::render(&file))
-                .map_err(EcoVec::from)
-        })
+        self.0
+            .map(|result| result.map(MockFile::render).map_err(EcoVec::from))
     }
 }
 
 impl MockFile {
-    pub fn render(&self) -> CompileOutput {
+    pub fn render(self) -> CompileOutput {
         let mut transclusion_counter = 0u32;
         let mut link_counter = 0u32;
         let mut spans = HashMap::new();
-        let mut metadata = HashMap::new();
+        let mut node_metadata = HashMap::new();
         let mut transclusion_metadata = HashMap::new();
         let mut link_metadata = HashMap::new();
+        let mut html = String::new();
 
-        let mut html = render_node(
-            &self.primary,
-            &mut transclusion_counter,
-            &mut link_counter,
-            &mut spans,
-            &mut metadata,
-            &mut transclusion_metadata,
-            &mut link_metadata,
-        );
-        for subnode in &self.subnodes {
-            html.push_str(&render_subnode(
-                subnode,
+        let MockNode {
+            identifier,
+            title,
+            metadata,
+            body,
+        } = self.primary;
+
+        write!(html, r#"<wb-node identifier="{identifier}">"#).unwrap();
+        write!(html, "<wb-title>{title}</wb-title>").unwrap();
+        for element in body {
+            render_element(
+                element,
+                &mut html,
                 &mut transclusion_counter,
                 &mut link_counter,
-                &mut spans,
-                &mut metadata,
                 &mut transclusion_metadata,
                 &mut link_metadata,
-            ));
+            );
+        }
+        html.push_str("</wb-node>");
+
+        assert!(
+            node_metadata.insert(identifier.clone(), metadata).is_none(),
+            "duplicate node metadata: {identifier}"
+        );
+        assert!(
+            spans.insert(identifier, Span::detached()).is_none(),
+            "duplicate node span"
+        );
+
+        enum Work {
+            Open(MockSubnode),
+            Close,
+        }
+
+        let mut stack: Vec<Work> = self.subnodes.into_iter().rev().map(Work::Open).collect();
+        while let Some(work) = stack.pop() {
+            match work {
+                Work::Open(subnode) => {
+                    let MockSubnode {
+                        node:
+                            MockNode {
+                                identifier,
+                                title,
+                                metadata,
+                                body,
+                            },
+                        transclude,
+                        subnodes,
+                    } = subnode;
+                    let transclude = if transclude { "true" } else { "false" };
+
+                    write!(
+                        html,
+                        r#"<wb-subnode identifier="{identifier}" transclude="{transclude}">"#,
+                    )
+                    .unwrap();
+                    write!(html, "<wb-title>{title}</wb-title>").unwrap();
+                    for element in body {
+                        render_element(
+                            element,
+                            &mut html,
+                            &mut transclusion_counter,
+                            &mut link_counter,
+                            &mut transclusion_metadata,
+                            &mut link_metadata,
+                        );
+                    }
+
+                    assert!(
+                        node_metadata.insert(identifier.clone(), metadata).is_none(),
+                        "duplicate node metadata: {identifier}"
+                    );
+                    assert!(
+                        spans.insert(identifier, Span::detached()).is_none(),
+                        "duplicate node span"
+                    );
+
+                    stack.push(Work::Close);
+                    stack.extend(subnodes.into_iter().rev().map(Work::Open));
+                }
+                Work::Close => html.push_str("</wb-subnode>"),
+            }
         }
 
         CompileOutput {
             html,
             spans,
-            metadata,
+            node_metadata,
             transclusion_metadata,
             link_metadata,
-            errors: EcoVec::new(),
         }
     }
 }
 
-fn render_node(
-    node: &MockNode,
-    transclusion_counter: &mut u32,
-    link_counter: &mut u32,
-    spans: &mut HashMap<String, Span>,
-    metadata: &mut HashMap<String, Metadata>,
-    transclusion_metadata: &mut HashMap<u32, Metadata>,
-    link_metadata: &mut HashMap<u32, Metadata>,
-) -> String {
-    spans.insert(node.identifier.clone(), Span::detached());
-    if !node.metadata.is_empty() {
-        metadata.insert(node.identifier.clone(), node.metadata.clone());
-    }
-
-    let mut html = format!(r#"<wb-node identifier="{}">"#, node.identifier);
-    html.push_str(&format!("<wb-title>{}</wb-title>", node.title));
-    html.push_str(&render_body(
-        &node.body,
-        transclusion_counter,
-        link_counter,
-        transclusion_metadata,
-        link_metadata,
-    ));
-    html.push_str("</wb-node>");
-    html
-}
-
-fn render_subnode(
-    subnode: &MockSubnode,
-    transclusion_counter: &mut u32,
-    link_counter: &mut u32,
-    spans: &mut HashMap<String, Span>,
-    metadata: &mut HashMap<String, Metadata>,
-    transclusion_metadata: &mut HashMap<u32, Metadata>,
-    link_metadata: &mut HashMap<u32, Metadata>,
-) -> String {
-    spans.insert(subnode.node.identifier.clone(), Span::detached());
-    if !subnode.node.metadata.is_empty() {
-        metadata.insert(
-            subnode.node.identifier.clone(),
-            subnode.node.metadata.clone(),
-        );
-    }
-
-    let transclude = if subnode.transclude { "true" } else { "false" };
-    let mut html = format!(
-        r#"<wb-subnode identifier="{}" transclude="{transclude}">"#,
-        subnode.node.identifier,
-    );
-    html.push_str(&format!("<wb-title>{}</wb-title>", subnode.node.title));
-    html.push_str(&render_body(
-        &subnode.node.body,
-        transclusion_counter,
-        link_counter,
-        transclusion_metadata,
-        link_metadata,
-    ));
-    for child in &subnode.subnodes {
-        html.push_str(&render_subnode(
-            child,
-            transclusion_counter,
-            link_counter,
-            spans,
-            metadata,
-            transclusion_metadata,
-            link_metadata,
-        ));
-    }
-    html.push_str("</wb-subnode>");
-    html
-}
-
-fn render_body(
-    body: &[MockElement],
+fn render_element(
+    element: MockElement,
+    html: &mut String,
     transclusion_counter: &mut u32,
     link_counter: &mut u32,
     transclusion_metadata: &mut HashMap<u32, Metadata>,
     link_metadata: &mut HashMap<u32, Metadata>,
-) -> String {
-    let mut html = String::new();
-    for element in body {
-        match element {
-            MockElement::Text(text) => html.push_str(&format!("<p>{text}</p>")),
-            MockElement::Link(link) => {
-                let c = *link_counter;
-                *link_counter += 1;
-                if !link.metadata.is_empty() {
-                    link_metadata.insert(c, link.metadata.clone());
-                }
-                let content = link.content.as_deref().unwrap_or("");
-                html.push_str(&format!(
-                    r#"<a href="wb:{}" data-counter="{c}">{content}</a>"#,
-                    link.target,
-                ));
-            }
-            MockElement::Transclusion(t) => {
-                let c = *transclusion_counter;
-                *transclusion_counter += 1;
-                if !t.metadata.is_empty() {
-                    transclusion_metadata.insert(c, t.metadata.clone());
-                }
-                html.push_str(&format!(
-                    r#"<wb-transclude identifier="{}" counter="{c}"></wb-transclude>"#,
-                    t.target,
-                ));
-            }
+) {
+    match element {
+        MockElement::Text(text) => write!(html, "<p>{text}</p>").unwrap(),
+        MockElement::Link(link) => {
+            let count = *link_counter;
+            *link_counter += 1;
+            let content = link.content.as_deref().unwrap_or_default();
+            write!(
+                html,
+                r#"<a href="wb:{}" data-counter="{count}">{content}</a>"#,
+                link.target,
+            )
+            .unwrap();
+
+            assert!(
+                link_metadata.insert(count, link.metadata).is_none(),
+                "duplicate link counter: {count}"
+            );
+        }
+        MockElement::Transclusion(t) => {
+            let count = *transclusion_counter;
+            *transclusion_counter += 1;
+            write!(
+                html,
+                r#"<wb-transclude identifier="{}" counter="{count}"></wb-transclude>"#,
+                t.target,
+            )
+            .unwrap();
+
+            assert!(
+                transclusion_metadata.insert(count, t.metadata).is_none(),
+                "duplicate transclusion counter: {count}"
+            );
         }
     }
-    html
 }
 
 /*

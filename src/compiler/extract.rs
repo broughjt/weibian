@@ -26,13 +26,11 @@ pub struct CompileOutput {
     /// Spans for each node identifier within the document, used for diagnostic reporting.
     pub spans: HashMap<String, Span>,
     /// Node metadata keyed by node identifier.
-    pub metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    pub node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
     /// Transclusion metadata keyed by counter.
     pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
     /// Link metadata keyed by counter.
     pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    /// Diagnostics collected during span and metadata extraction.
-    pub errors: EcoVec<SourceDiagnostic>,
 }
 
 /// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
@@ -52,20 +50,23 @@ impl<W: World> Compile for TypstCompile<W> {
         });
 
         let output = result.and_then(|html_document| {
-            typst_html::html(&html_document).map(|html| {
+            typst_html::html(&html_document).and_then(|html| {
                 let (spans, span_errors) = collect_node_spans(&html_document);
                 let (metadata, transclusion_metadata, link_metadata, meta_errors) =
                     collect_metadata(html_document.introspector().as_ref(), &spans);
                 let mut errors = span_errors;
                 errors.extend(meta_errors);
 
-                CompileOutput {
-                    html,
-                    spans,
-                    metadata,
-                    transclusion_metadata,
-                    link_metadata,
-                    errors,
+                if errors.is_empty() {
+                    Ok(CompileOutput {
+                        html,
+                        spans,
+                        node_metadata: metadata,
+                        transclusion_metadata,
+                        link_metadata,
+                    })
+                } else {
+                    Err(errors)
                 }
             })
         });
@@ -92,11 +93,11 @@ pub(super) fn extract(
     let CompileOutput {
         html,
         spans,
-        mut metadata,
+        node_metadata: mut metadata,
         mut transclusion_metadata,
         mut link_metadata,
-        mut errors,
     } = output;
+    let mut errors = EcoVec::new();
     let document = Document::from(html);
     let mut nodes = HashMap::with_capacity(spans.len());
     let mut synthetic_counter: u32 = transclusion_metadata.keys().copied().max().map_or(0, |m| {
