@@ -254,7 +254,7 @@ impl Compile for MockCompile {
     fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         self.0.map(|result| {
             result
-                .map(|arg0: &MockFile| MockFile::render(arg0))
+                .map(|file| MockFile::render(&file))
                 .map_err(EcoVec::from)
         })
     }
@@ -262,7 +262,8 @@ impl Compile for MockCompile {
 
 impl MockFile {
     pub fn render(&self) -> CompileOutput {
-        let mut counter = 0u32;
+        let mut transclusion_counter = 0u32;
+        let mut link_counter = 0u32;
         let mut spans = HashMap::new();
         let mut metadata = HashMap::new();
         let mut transclusion_metadata = HashMap::new();
@@ -270,7 +271,8 @@ impl MockFile {
 
         let mut html = render_node(
             &self.primary,
-            &mut counter,
+            &mut transclusion_counter,
+            &mut link_counter,
             &mut spans,
             &mut metadata,
             &mut transclusion_metadata,
@@ -279,7 +281,8 @@ impl MockFile {
         for subnode in &self.subnodes {
             html.push_str(&render_subnode(
                 subnode,
-                &mut counter,
+                &mut transclusion_counter,
+                &mut link_counter,
                 &mut spans,
                 &mut metadata,
                 &mut transclusion_metadata,
@@ -300,7 +303,8 @@ impl MockFile {
 
 fn render_node(
     node: &MockNode,
-    counter: &mut u32,
+    transclusion_counter: &mut u32,
+    link_counter: &mut u32,
     spans: &mut HashMap<String, Span>,
     metadata: &mut HashMap<String, Metadata>,
     transclusion_metadata: &mut HashMap<u32, Metadata>,
@@ -315,7 +319,8 @@ fn render_node(
     html.push_str(&format!("<wb-title>{}</wb-title>", node.title));
     html.push_str(&render_body(
         &node.body,
-        counter,
+        transclusion_counter,
+        link_counter,
         transclusion_metadata,
         link_metadata,
     ));
@@ -325,7 +330,8 @@ fn render_node(
 
 fn render_subnode(
     subnode: &MockSubnode,
-    counter: &mut u32,
+    transclusion_counter: &mut u32,
+    link_counter: &mut u32,
     spans: &mut HashMap<String, Span>,
     metadata: &mut HashMap<String, Metadata>,
     transclusion_metadata: &mut HashMap<u32, Metadata>,
@@ -347,14 +353,16 @@ fn render_subnode(
     html.push_str(&format!("<wb-title>{}</wb-title>", subnode.node.title));
     html.push_str(&render_body(
         &subnode.node.body,
-        counter,
+        transclusion_counter,
+        link_counter,
         transclusion_metadata,
         link_metadata,
     ));
     for child in &subnode.subnodes {
         html.push_str(&render_subnode(
             child,
-            counter,
+            transclusion_counter,
+            link_counter,
             spans,
             metadata,
             transclusion_metadata,
@@ -367,7 +375,8 @@ fn render_subnode(
 
 fn render_body(
     body: &[MockElement],
-    counter: &mut u32,
+    transclusion_counter: &mut u32,
+    link_counter: &mut u32,
     transclusion_metadata: &mut HashMap<u32, Metadata>,
     link_metadata: &mut HashMap<u32, Metadata>,
 ) -> String {
@@ -376,8 +385,8 @@ fn render_body(
         match element {
             MockElement::Text(text) => html.push_str(&format!("<p>{text}</p>")),
             MockElement::Link(link) => {
-                let c = *counter;
-                *counter += 1;
+                let c = *link_counter;
+                *link_counter += 1;
                 if !link.metadata.is_empty() {
                     link_metadata.insert(c, link.metadata.clone());
                 }
@@ -388,8 +397,8 @@ fn render_body(
                 ));
             }
             MockElement::Transclusion(t) => {
-                let c = *counter;
-                *counter += 1;
+                let c = *transclusion_counter;
+                *transclusion_counter += 1;
                 if !t.metadata.is_empty() {
                     transclusion_metadata.insert(c, t.metadata.clone());
                 }
