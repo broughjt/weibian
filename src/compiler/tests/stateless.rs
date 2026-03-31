@@ -44,7 +44,7 @@ pub(super) fn process_stateless(
         let Warned {
             output: result,
             warnings,
-        } = mock_file.compile(*file_id);
+        } = mock_file.compile();
 
         match result.and_then(|output| {
             extract(output, &mut interner, |node_id| {

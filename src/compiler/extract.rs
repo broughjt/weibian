@@ -9,19 +9,14 @@ use typst::foundations::{Dict, NativeElement, Packed, Repr, Value};
 use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
-use typst_syntax::FileId;
 
 use super::{NodeEntry, NodeId, NodeInterner};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
 /// Compiles a source file into [`CompileOutput`].
-///
-/// The `id` parameter identifies which file is being compiled. Implementations
-/// backed by a Typst [`World`] may ignore it since the world already encodes
-/// the target file; test implementations use it to look up canned output.
 pub trait Compile {
-    fn compile(&self, id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
+    fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
 }
 
 /// The output of a successful file compilation.
@@ -44,7 +39,7 @@ pub struct CompileOutput {
 pub struct TypstCompile<W>(pub W);
 
 impl<W: World> Compile for TypstCompile<W> {
-    fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
+    fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         let Warned {
             output: result,
             mut warnings,

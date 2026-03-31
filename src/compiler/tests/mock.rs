@@ -1,13 +1,14 @@
 use std::collections::HashMap;
+use std::io::Write;
 
 use ecow::EcoVec;
 use typst::diag::{SourceDiagnostic, Warned};
-use typst::syntax::{FileId, Span};
+use typst::syntax::Span;
 
 use crate::compiler::{Compile, CompileOutput, Metadata};
 
 #[derive(Debug, Clone)]
-pub struct MockCompile(pub Warned<Result<MockFile, Vec<String>>>);
+pub struct MockCompile(pub Warned<Result<MockFile, Vec<SourceDiagnostic>>>);
 
 #[derive(Debug, Clone)]
 pub struct MockFile {
@@ -52,11 +53,13 @@ pub struct MockTransclusion {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Create(u16, MockCompile),
-    Update(u16, FileUpdate),
-    Replace(u16, MockCompile),
-    Remove(u16),
+    Create(FileId, MockCompile),
+    Update(FileId, FileUpdate),
+    Replace(FileId, MockCompile),
+    Remove(FileId),
 }
+
+pub type FileId = u16;
 
 #[derive(Debug, Clone)]
 pub enum FileUpdate {
@@ -68,26 +71,19 @@ pub enum FileUpdate {
         parent: NodePath,
         subnode: MockSubnode,
     },
-    RemoveSubnode(SubnodePath),
+    RemoveSubnode(NodePath),
     SetSubnodeTransclude {
-        target: SubnodePath,
+        target: NodePath,
         transclude: bool,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NodePath {
-    Primary,
-    Subnode(SubnodePath),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubnodePath(pub Vec<usize>);
+pub type NodePath = Vec<usize>;
 
 #[derive(Debug, Clone)]
 pub enum NodeUpdate {
-    Rename(String),
-    ChangeTitle(String),
+    UpdateIdentifier(String),
+    UpdateTitle(String),
     UpdateMetadata(MetadataUpdate),
     UpdateBody(BodyUpdate),
 }
@@ -149,10 +145,8 @@ impl MockFile {
                 subnodes.push(subnode);
             }
             FileUpdate::RemoveSubnode(path) => {
-                let (last, rest) = path.0.split_last().expect("SubnodePath must not be empty");
-                let subnodes =
-                    self.get_subnodes_mut(&NodePath::Subnode(SubnodePath(rest.to_vec())));
-                subnodes.remove(*last);
+                let (last, rest) = path.split_last().expect("NodePath must not be empty");
+                self.get_subnodes_mut(rest).remove(*last);
             }
             FileUpdate::SetSubnodeTransclude { target, transclude } => {
                 let subnode = self.get_subnode_mut(&target);
@@ -161,42 +155,35 @@ impl MockFile {
         }
     }
 
-    fn get_node_mut(&mut self, path: &NodePath) -> &mut MockNode {
-        match path {
-            NodePath::Primary => &mut self.primary,
-            NodePath::Subnode(p) => &mut self.get_subnode_mut(p).node,
+    fn get_node_mut(&mut self, path: &[usize]) -> &mut MockNode {
+        if path.is_empty() {
+            &mut self.primary
+        } else {
+            &mut self.get_subnode_mut(path).node
         }
     }
 
-    fn get_subnode_mut(&mut self, path: &SubnodePath) -> &mut MockSubnode {
-        let indices = &path.0;
-        assert!(!indices.is_empty(), "SubnodePath must not be empty");
-        let mut current = &mut self.subnodes[indices[0]];
-        for &i in &indices[1..] {
-            current = &mut current.subnodes[i];
-        }
-        current
+    fn get_subnode_mut(&mut self, path: &[usize]) -> &mut MockSubnode {
+        assert!(!path.is_empty(), "NodePath must not be empty");
+        path[1..]
+            .iter()
+            .fold(&mut self.subnodes[path[0]], |s, &i| &mut s.subnodes[i])
     }
 
-    fn get_subnodes_mut(&mut self, path: &NodePath) -> &mut Vec<MockSubnode> {
-        match path {
-            NodePath::Primary => &mut self.subnodes,
-            NodePath::Subnode(p) => &mut self.get_subnode_mut(p).subnodes,
+    fn get_subnodes_mut(&mut self, path: &[usize]) -> &mut Vec<MockSubnode> {
+        if path.is_empty() {
+            &mut self.subnodes
+        } else {
+            &mut self.get_subnode_mut(path).subnodes
         }
-    }
-}
-
-impl From<SubnodePath> for NodePath {
-    fn from(path: SubnodePath) -> Self {
-        NodePath::Subnode(path)
     }
 }
 
 impl MockNode {
     fn apply_update(&mut self, update: NodeUpdate) {
         match update {
-            NodeUpdate::Rename(id) => self.identifier = id,
-            NodeUpdate::ChangeTitle(title) => self.title = title,
+            NodeUpdate::UpdateIdentifier(id) => self.identifier = id,
+            NodeUpdate::UpdateTitle(title) => self.title = title,
             NodeUpdate::UpdateMetadata(u) => apply_metadata_update(&mut self.metadata, u),
             NodeUpdate::UpdateBody(u) => self.apply_body_update(u),
         }
@@ -264,20 +251,12 @@ impl MockElement {
 }
 
 impl Compile for MockCompile {
-    fn compile(&self, _id: FileId) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
-        let Warned { output, warnings } = &self.0;
-        let warnings = warnings
-            .iter()
-            .map(|m| SourceDiagnostic::warning(Span::detached(), m.as_str().into()))
-            .collect();
-        let output = match output {
-            Ok(file) => Ok(file.render()),
-            Err(errors) => Err(errors
-                .iter()
-                .map(|m| SourceDiagnostic::error(Span::detached(), m.as_str().into()))
-                .collect()),
-        };
-        Warned { output, warnings }
+    fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
+        self.0.map(|result| {
+            result
+                .map(|arg0: &MockFile| MockFile::render(arg0))
+                .map_err(EcoVec::from)
+        })
     }
 }
 
@@ -443,7 +422,7 @@ fine-grained changes like:
 - reordering text and inline references
 
 Nested subnodes are addressed structurally:
-- `NodePath::Primary`
-- `NodePath::Subnode(SubnodePath(vec![i]))` for a top-level subnode
-- `NodePath::Subnode(SubnodePath(vec![i, j, k]))` for a deeply nested subnode
+- `NodePath(vec![])` for the primary node
+- `NodePath(vec![i])` for a top-level subnode
+- `NodePath(vec![i, j, k])` for a deeply nested subnode
 */
