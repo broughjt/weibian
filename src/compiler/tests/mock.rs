@@ -5,7 +5,7 @@ use ecow::EcoVec;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::Span;
 
-use crate::compiler::{Compile, CompileOutput, Metadata};
+use crate::compiler::{Compile, Metadata};
 
 #[derive(Debug, Clone)]
 pub struct MockCompile(pub Warned<Result<MockFile, Vec<SourceDiagnostic>>>);
@@ -250,6 +250,7 @@ impl MockElement {
     }
 }
 
+/*
 impl Compile for MockCompile {
     fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
         self.0
@@ -405,6 +406,7 @@ fn render_element(
         }
     }
 }
+*/
 
 /*
 Next pieces to reintroduce incrementally:

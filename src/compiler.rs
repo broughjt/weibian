@@ -13,9 +13,9 @@ use petgraph::graphmap::DiGraphMap;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
 
-use self::extract::extract;
-pub use self::extract::{Compile, CompileOutput, TypstCompile};
+pub use self::extract::{Compile, TypstCompile};
 use self::render::Renderer;
+use crate::compiler::extract::NodeOutput;
 use crate::config::{BuildConfig, RenderConfig};
 
 pub type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
@@ -53,15 +53,39 @@ impl Compiler {
             warnings,
         } = compiler.compile();
 
-        match result.and_then(|output| {
-            extract(output, &mut self.interner, |node_id| {
-                // Exclude nodes belonging to this file from the duplicate check: they
-                // are being replaced, not duplicated, and remove() hasn't been called
-                // yet. The `extract` helper handles intra-file duplicates.
-                self.nodes.contains_key(&node_id) && self.node_to_file.get(&node_id) != Some(&id)
-            })
-        }) {
-            Ok(nodes) => {
+        match result {
+            Ok(extracted_nodes) => {
+                // TODO: Cross-file duplicate identifier check. Currently we
+                // accept all nodes from a file or reject all on error. Consider
+                // partial acceptance: let valid nodes through and only reject
+                // nodes that actually have duplicate identifiers.
+
+                // TODO:
+                let nodes: HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)> = extracted_nodes
+                    .into_iter()
+                    .map(
+                        |(
+                            name,
+                            NodeOutput {
+                                entry,
+                                transclusions,
+                                links,
+                            },
+                        )| {
+                            let node_id = self.interner.intern(name);
+                            let transclusions = transclusions
+                                .iter()
+                                .map(|t| self.interner.intern(t.as_str()))
+                                .collect();
+                            let links = links
+                                .iter()
+                                .map(|l| self.interner.intern(l.as_str()))
+                                .collect();
+                            (node_id, (entry, transclusions, links))
+                        },
+                    )
+                    .collect();
+
                 let mut metadata_dirty_from_update = HashSet::new();
                 // Compare new title/metadata against old entries before
                 // remove() clears them, so we can track which nodes had their
@@ -97,8 +121,6 @@ impl Compiler {
 
                 self.file_to_nodes
                     .insert(id, nodes.keys().copied().collect());
-                // TODO: Either move this into the for loop above or move the
-                // `node_to_file` to an extend down here.
                 self.nodes
                     .extend(nodes.into_iter().map(|(k, (v, _, _))| (k, v)));
 

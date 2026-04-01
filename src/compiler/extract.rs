@@ -10,34 +10,34 @@ use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
-use super::{NodeEntry, NodeId, NodeInterner};
+use super::NodeEntry;
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 
-/// Compiles a source file into [`CompileOutput`].
+/// Compiles a source file and extracts its nodes.
 pub trait Compile {
-    fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>>;
+    fn compile(self) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
 }
 
-/// The output of a successful file compilation.
-pub struct CompileOutput {
-    /// The HTML body of the compiled file.
-    pub html: String,
-    /// Spans for each node identifier within the document, used for diagnostic reporting.
-    pub spans: HashMap<String, Span>,
-    /// Node metadata keyed by node identifier.
-    pub node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    /// Transclusion metadata keyed by counter.
-    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    /// Link metadata keyed by counter.
-    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+pub struct NodeOutput {
+    pub(super) entry: NodeEntry,
+    pub transclusions: Vec<String>,
+    pub links: Vec<String>,
+}
+
+struct FileOutput {
+    html: String,
+    spans: HashMap<String, Span>,
+    node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
 }
 
 /// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
 pub struct TypstCompile<W>(pub W);
 
 impl<W: World> Compile for TypstCompile<W> {
-    fn compile(self) -> Warned<Result<CompileOutput, EcoVec<SourceDiagnostic>>> {
+    fn compile(self) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
         let Warned {
             output: result,
             mut warnings,
@@ -58,13 +58,15 @@ impl<W: World> Compile for TypstCompile<W> {
                 errors.extend(meta_errors);
 
                 if errors.is_empty() {
-                    Ok(CompileOutput {
+                    let compile_output = FileOutput {
                         html,
                         spans,
                         node_metadata: metadata,
                         transclusion_metadata,
                         link_metadata,
-                    })
+                    };
+
+                    extract(compile_output)
                 } else {
                     Err(errors)
                 }
@@ -75,22 +77,12 @@ impl<W: World> Compile for TypstCompile<W> {
     }
 }
 
-type ExtractOutput = (NodeEntry, Vec<NodeId>, Vec<NodeId>);
-
 /// Parses the HTML in `output` into a map of node IDs to node entries.
-///
-/// Subnodes are replaced with `<wb-transclude>` references (or removed) as a
-/// side effect of extraction. `node_exists` is called to detect cross-file
-/// duplicate identifiers.
 ///
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
-pub(super) fn extract(
-    output: CompileOutput,
-    interner: &mut NodeInterner,
-    node_exists: impl Fn(NodeId) -> bool,
-) -> Result<HashMap<NodeId, ExtractOutput>, EcoVec<SourceDiagnostic>> {
-    let CompileOutput {
+fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+    let FileOutput {
         html,
         spans,
         node_metadata: mut metadata,
@@ -104,24 +96,13 @@ pub(super) fn extract(
         m.checked_add(1).expect("transclusion counter overflow")
     });
 
-    // Check for global duplicate identifiers
-    errors.extend(
-        spans
-            .iter()
-            .filter(|(id, _)| node_exists(interner.intern(*id)))
-            .map(|(id, &span)| {
-                SourceDiagnostic::error(span, eco_format!("duplicate node identifier: {id:?}"))
-            }),
-    );
-
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((identifier, entry)) = extract_node_content(
+        let Some((identifier, output)) = extract_node_content(
             &subnode,
             true,
             &spans,
-            interner,
             &mut metadata,
             &mut transclusion_metadata,
             &mut link_metadata,
@@ -134,14 +115,14 @@ pub(super) fn extract(
             Some("false") => false,
             Some(other) => {
                 errors.push(SourceDiagnostic::error(
-                    entry.0.span,
+                    output.entry.span,
                     eco_format!("wb-subnode has invalid transclude value: {other:?}"),
                 ));
                 continue;
             }
             None => {
                 errors.push(SourceDiagnostic::error(
-                    entry.0.span,
+                    output.entry.span,
                     "wb-subnode is missing the transclude attribute",
                 ));
                 continue;
@@ -154,7 +135,7 @@ pub(super) fn extract(
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            transclusion_metadata.insert(counter, entry.0.node_metadata.clone());
+            transclusion_metadata.insert(counter, output.entry.node_metadata.clone());
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
             ));
@@ -162,10 +143,10 @@ pub(super) fn extract(
             subnode.remove();
         }
 
-        let displaced = nodes.insert(interner.intern(&identifier), entry);
+        let displaced = nodes.insert(identifier, output);
         assert!(
             displaced.is_none(),
-            "bug: duplicate node identifier slipped past collect_node_spans: {identifier:?}"
+            "bug: duplicate node identifier slipped past collect_node_spans"
         );
     }
 
@@ -180,20 +161,19 @@ pub(super) fn extract(
             ));
         }
         Some(wb_node) => {
-            if let Some((identifier, entry)) = extract_node_content(
+            if let Some((identifier, output)) = extract_node_content(
                 &wb_node,
                 false,
                 &spans,
-                interner,
                 &mut metadata,
                 &mut transclusion_metadata,
                 &mut link_metadata,
                 &mut errors,
             ) {
-                let displaced = nodes.insert(interner.intern(&identifier), entry);
+                let displaced = nodes.insert(identifier, output);
                 assert!(
                     displaced.is_none(),
-                    "bug: duplicate node identifier slipped past collect_node_spans: {identifier:?}"
+                    "bug: duplicate node identifier slipped past collect_node_spans"
                 );
             }
 
@@ -247,12 +227,11 @@ fn extract_node_content(
     element: &Selection,
     is_subnode: bool,
     spans: &HashMap<String, Span>,
-    interner: &mut NodeInterner,
     metadata: &mut HashMap<String, HashMap<String, Vec<String>>>,
     transclusion_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     link_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> Option<(String, ExtractOutput)> {
+) -> Option<(String, NodeOutput)> {
     let Some(identifier) = element.attr("identifier") else {
         errors.push(SourceDiagnostic::error(
             Span::detached(),
@@ -291,9 +270,9 @@ fn extract_node_content(
     let title_text = title_selection.text().to_string();
     title_selection.remove();
 
-    let raw_html = element.inner_html().to_string();
+    let body_html = element.inner_html().to_string();
 
-    let mut transclusions: Vec<NodeId> = Vec::new();
+    let mut transclusions: Vec<String> = Vec::new();
     let mut node_transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
     for wb_transclude in element.select("wb-transclude").iter() {
         let id = match wb_transclude.attr("identifier").as_deref() {
@@ -329,10 +308,10 @@ fn extract_node_content(
         if let Some(metadata) = transclusion_metadata.remove(&counter) {
             node_transclusion_metadata.insert(counter, metadata);
         }
-        transclusions.push(interner.intern(&id));
+        transclusions.push(id);
     }
 
-    let mut links: Vec<NodeId> = Vec::new();
+    let mut links: Vec<String> = Vec::new();
     let mut node_link_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
     let links_iter = element.select("a").iter().filter_map(|element| {
         element
@@ -364,16 +343,16 @@ fn extract_node_content(
         if let Some(metadata) = link_metadata.remove(&counter) {
             node_link_metadata.insert(counter, metadata);
         }
-        links.push(interner.intern(id));
+        links.push(id);
     }
 
     let node_metadata = metadata.remove(&identifier).unwrap_or_default();
 
     Some((
         identifier,
-        (
-            NodeEntry {
-                body_html: raw_html,
+        NodeOutput {
+            entry: NodeEntry {
+                body_html,
                 title,
                 title_text,
                 span,
@@ -383,7 +362,7 @@ fn extract_node_content(
             },
             transclusions,
             links,
-        ),
+        },
     ))
 }
 
