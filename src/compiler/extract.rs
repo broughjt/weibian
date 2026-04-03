@@ -25,12 +25,12 @@ pub struct NodeOutput {
     pub links: Vec<String>,
 }
 
-struct FileOutput {
-    html: String,
-    spans: HashMap<String, Span>,
-    node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+pub(super) struct FileOutput {
+    pub(super) html: String,
+    pub(super) spans: HashMap<String, Span>,
+    pub(super) node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    pub(super) transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    pub(super) link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
 }
 
 /// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
@@ -58,7 +58,7 @@ impl<W: World> Compile for TypstCompile<W> {
                 errors.extend(meta_errors);
 
                 if errors.is_empty() {
-                    let compile_output = FileOutput {
+                    let file_output = FileOutput {
                         html,
                         spans,
                         node_metadata: metadata,
@@ -66,7 +66,7 @@ impl<W: World> Compile for TypstCompile<W> {
                         link_metadata,
                     };
 
-                    extract(compile_output)
+                    extract(file_output)
                 } else {
                     Err(errors)
                 }
@@ -81,7 +81,7 @@ impl<W: World> Compile for TypstCompile<W> {
 ///
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
-fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+pub(super) fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
     let FileOutput {
         html,
         spans,
