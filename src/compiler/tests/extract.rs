@@ -66,6 +66,24 @@ struct ExpectedOutput {
 }
 
 impl MockFile {
+    fn assign_unique_identifiers(&mut self) {
+        let mut next_id = 0u32;
+        let mut stack = vec![&mut self.primary];
+
+        while let Some(node) = stack.pop() {
+            node.identifier = format!("n{next_id}");
+            next_id = next_id
+                .checked_add(1)
+                .expect("node identifier counter overflow");
+
+            for element in node.body.iter_mut().rev() {
+                if let MockElement::Subnode(subnode) = element {
+                    stack.push(&mut subnode.node);
+                }
+            }
+        }
+    }
+
     fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
         let mut html = String::new();
         let mut spans = HashMap::new();
@@ -313,18 +331,12 @@ fn leaf_element_strategy() -> impl Strategy<Value = MockElement> {
 }
 
 fn node_strategy(body: impl Strategy<Value = Vec<MockElement>>) -> impl Strategy<Value = MockNode> {
-    (
-        "[a-z0-9]{1,7}",
-        "[A-Za-z ]{0,12}",
-        metadata_strategy(),
+    ("[A-Za-z ]{0,12}", metadata_strategy(), body).prop_map(|(title, metadata, body)| MockNode {
+        identifier: String::new(),
+        title,
+        metadata,
         body,
-    )
-        .prop_map(|(identifier, title, metadata, body)| MockNode {
-            identifier,
-            title,
-            metadata,
-            body,
-        })
+    })
 }
 
 fn element_strategy() -> impl Strategy<Value = MockElement> {
@@ -353,8 +365,11 @@ fn mock_file_strategy() -> impl Strategy<Value = MockFile> {
         element_strategy(),
         0..=BODY_ELEMENTS_MAX,
     ))
-    .prop_map(|primary| MockFile { primary })
-    .prop_filter("unique node identifiers", |_| true)
+    .prop_map(|primary| {
+        let mut file = MockFile { primary };
+        file.assign_unique_identifiers();
+        file
+    })
 }
 
 proptest! {
