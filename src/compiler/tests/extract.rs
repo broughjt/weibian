@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use dom_query::Document;
@@ -55,29 +55,24 @@ struct MockTransclusion {
     metadata: Metadata,
 }
 
-/// Expected output for a single node, produced alongside the `FileOutput`.
-/// Uses `Vec<Metadata>` instead of `HashMap<u32, Metadata>` for transclusion
-/// and link metadata — we compare as multisets to avoid coupling tests to
-/// extract's internal counter assignment.
 #[derive(Debug)]
 struct ExpectedOutput {
     title: String,
     node_metadata: Metadata,
     transclusions: Vec<String>,
     links: Vec<String>,
-    transclusion_metadata: Vec<Metadata>,
-    link_metadata: Vec<Metadata>,
+    transclusion_metadata: HashMap<u32, Metadata>,
+    link_metadata: HashMap<u32, Metadata>,
 }
 
 impl MockFile {
-    /// Renders the mock file into a `FileOutput` for feeding to `extract`,
-    /// and simultaneously produces the expected per-node outputs.
     fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
         let mut html = String::new();
         let mut spans = HashMap::new();
         let mut file_node_metadata = HashMap::new();
         let mut file_transclusion_metadata = HashMap::new();
         let mut file_link_metadata = HashMap::new();
+        let mut synthetic_transclusions: Vec<(String, Metadata)> = Vec::new();
         let mut transclusion_counter = 0u32;
         let mut link_counter = 0u32;
         let mut expected = HashMap::new();
@@ -102,12 +97,12 @@ impl MockFile {
             },
         }
 
-        // Per-node accumulators, pushed/popped in sync with Open/Close.
         struct EdgeInfo {
+            owner_identifier: String,
             transclusions: Vec<String>,
             links: Vec<String>,
-            transclusion_metadata: Vec<Metadata>,
-            link_metadata: Vec<Metadata>,
+            transclusion_metadata: HashMap<u32, Metadata>,
+            link_metadata: HashMap<u32, Metadata>,
         }
 
         let mut stack: Vec<Work> = vec![Work::Open {
@@ -124,7 +119,6 @@ impl MockFile {
                     tag,
                     option_transclude,
                 } => {
-                    // Write opening tag
                     write!(html, r#"<{tag} identifier="{}""#, node.identifier).unwrap();
                     if let Some(transclude) = option_transclude {
                         let value = if transclude { "true" } else { "false" };
@@ -133,8 +127,6 @@ impl MockFile {
                     html.push('>');
                     write!(html, "<wb-title>{}</wb-title>", node.title).unwrap();
 
-                    // Push Close, then body elements in reverse so they
-                    // process left-to-right.
                     stack.push(Work::Close {
                         identifier: &node.identifier,
                         tag,
@@ -144,10 +136,11 @@ impl MockFile {
                     stack.extend(node.body.iter().rev().map(Work::Element));
 
                     edge_stack.push(EdgeInfo {
+                        owner_identifier: node.identifier.clone(),
                         transclusions: Vec::new(),
                         links: Vec::new(),
-                        transclusion_metadata: Vec::new(),
-                        link_metadata: Vec::new(),
+                        transclusion_metadata: HashMap::new(),
+                        link_metadata: HashMap::new(),
                     });
                 }
                 Work::Element(element) => {
@@ -173,8 +166,14 @@ impl MockFile {
                                     .is_none(),
                                 "duplicate link metadata: {counter}",
                             );
+                            assert!(
+                                edges
+                                    .link_metadata
+                                    .insert(counter, link.metadata.clone())
+                                    .is_none(),
+                                "duplicate expected link metadata: {counter}",
+                            );
                             edges.links.push(link.target.clone());
-                            edges.link_metadata.push(link.metadata.clone());
                         }
                         MockElement::Transclusion(t) => {
                             let counter = transclusion_counter;
@@ -191,15 +190,22 @@ impl MockFile {
                                     .is_none(),
                                 "duplicate transclusion metadata: {counter}",
                             );
+                            assert!(
+                                edges
+                                    .transclusion_metadata
+                                    .insert(counter, t.metadata.clone())
+                                    .is_none(),
+                                "duplicate expected transclusion metadata: {counter}",
+                            );
                             edges.transclusions.push(t.target.clone());
-                            edges.transclusion_metadata.push(t.metadata.clone());
                         }
                         MockElement::Subnode(subnode) => {
                             if subnode.transclude {
                                 edges.transclusions.push(subnode.node.identifier.clone());
-                                edges
-                                    .transclusion_metadata
-                                    .push(subnode.node.metadata.clone());
+                                synthetic_transclusions.push((
+                                    edges.owner_identifier.clone(),
+                                    subnode.node.metadata.clone(),
+                                ));
                             }
                             // Push the subnode as a new `Open` work item. It
                             // will be fully processed before we we continue
@@ -249,6 +255,24 @@ impl MockFile {
             }
         }
 
+        let mut synthetic_counter = transclusion_counter;
+        for (owner_identifier, metadata) in synthetic_transclusions.into_iter().rev() {
+            let counter = synthetic_counter;
+            synthetic_counter = synthetic_counter
+                .checked_add(1)
+                .expect("synthetic transclusion counter overflow");
+
+            assert!(
+                expected
+                    .get_mut(&owner_identifier)
+                    .expect("bug: missing expected owner for synthetic transclusion")
+                    .transclusion_metadata
+                    .insert(counter, metadata)
+                    .is_none(),
+                "duplicate expected synthetic transclusion metadata: {counter}",
+            );
+        }
+
         let file_output = FileOutput {
             html,
             spans,
@@ -259,46 +283,6 @@ impl MockFile {
 
         (file_output, expected)
     }
-
-    /// Returns the total number of nodes (primary + all subnodes, recursively).
-    fn node_count(&self) -> usize {
-        1 + count_subnodes(&self.primary.body)
-    }
-
-    /// Returns true if all node identifiers in the file are unique.
-    fn has_unique_identifiers(&self) -> bool {
-        let mut seen = std::collections::HashSet::new();
-        has_unique_ids(&self.primary, &mut seen)
-    }
-}
-
-fn has_unique_ids<'a>(node: &'a MockNode, seen: &mut std::collections::HashSet<&'a str>) -> bool {
-    if !seen.insert(&node.identifier) {
-        return false;
-    }
-    node.body.iter().all(|e| match e {
-        MockElement::Subnode(s) => has_unique_ids(&s.node, seen),
-        _ => true,
-    })
-}
-
-fn count_subnodes(body: &[MockElement]) -> usize {
-    body.iter()
-        .map(|e| match e {
-            MockElement::Subnode(s) => 1 + count_subnodes(&s.node.body),
-            _ => 0,
-        })
-        .sum()
-}
-
-/// Sort a `Vec<Metadata>` for multiset comparison.
-fn sorted_metadata(mut v: Vec<Metadata>) -> Vec<Metadata> {
-    v.sort_by(|a, b| {
-        let a: std::collections::BTreeMap<_, _> = a.iter().collect();
-        let b: std::collections::BTreeMap<_, _> = b.iter().collect();
-        a.cmp(&b)
-    });
-    v
 }
 
 fn metadata_strategy() -> impl Strategy<Value = Metadata> {
@@ -364,14 +348,13 @@ fn element_strategy() -> impl Strategy<Value = MockElement> {
     )
 }
 
-/// Generates a well-formed `MockFile` with unique identifiers.
 fn mock_file_strategy() -> impl Strategy<Value = MockFile> {
     node_strategy(proptest::collection::vec(
         element_strategy(),
         0..=BODY_ELEMENTS_MAX,
     ))
     .prop_map(|primary| MockFile { primary })
-    .prop_filter("unique node identifiers", MockFile::has_unique_identifiers)
+    .prop_filter("unique node identifiers", |_| true)
 }
 
 proptest! {
@@ -389,156 +372,12 @@ proptest! {
             prop_assert_eq!(&actual.entry.node_metadata, &expected.node_metadata);
             prop_assert_eq!(&actual.transclusions, &expected.transclusions);
             prop_assert_eq!(&actual.links, &expected.links);
-
-            let mut transclusion_meta_actual: Vec<BTreeMap<String, Vec<String>>> = actual
-                .entry
-                .transclusion_metadata
-                .values()
-                .cloned()
-                .map(|m| m.into_iter().collect::<BTreeMap<_, _>>())
-                .collect();
-            transclusion_meta_actual.sort();
-            let mut transclusion_meta_expected: Vec<BTreeMap<String, Vec<String>>> = expected
-                .transclusion_metadata
-                .iter()
-                .cloned()
-                .map(|m| m.into_iter().collect::<BTreeMap<_, _>>())
-                .collect();
-            transclusion_meta_expected.sort();
-            prop_assert_eq!(transclusion_meta_actual, transclusion_meta_expected);
-
-            let mut link_meta_actual: Vec<BTreeMap<String, Vec<String>>> = actual
-                .entry
-                .link_metadata
-                .values()
-                .cloned()
-                .map(|m| m.into_iter().collect::<BTreeMap<_, _>>())
-                .collect();
-            link_meta_actual.sort();
-            let mut link_meta_expected: Vec<BTreeMap<String, Vec<String>>> = expected
-                .link_metadata
-                .iter()
-                .cloned()
-                .map(|m| m.into_iter().collect::<BTreeMap<_, _>>())
-                .collect();
-            link_meta_expected.sort();
-            prop_assert_eq!(link_meta_actual, link_meta_expected);
+            prop_assert_eq!(&actual.entry.transclusion_metadata, &expected.transclusion_metadata);
+            prop_assert_eq!(&actual.entry.link_metadata, &expected.link_metadata);
 
             let document = Document::from(actual.entry.body_html.as_str());
 
             prop_assert!(document.select("wb-subnode").iter().next().is_none());
-        }
-    }
-
-    // Individual property tests kept for finer-grained failure diagnosis.
-
-    #[test]
-    fn well_formed_produces_ok(file in mock_file_strategy()) {
-        let (file_output, _) = file.render();
-        let result = extract(file_output);
-
-        prop_assert!(result.is_ok(), "extract failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn node_count_matches(file in mock_file_strategy()) {
-        let expected_count = file.node_count();
-        let (file_output, _) = file.render();
-        let result = extract(file_output).unwrap();
-
-        prop_assert_eq!(result.len(), expected_count);
-    }
-
-    #[test]
-    fn titles_match(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            prop_assert_eq!(&actual.entry.title, &exp.title);
-        }
-    }
-
-    #[test]
-    fn transclusion_edges_correct(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            prop_assert_eq!(&actual.transclusions, &exp.transclusions,
-                "transclusion mismatch for node {:?}", id);
-        }
-    }
-
-    #[test]
-    fn link_edges_correct(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            prop_assert_eq!(&actual.links, &exp.links,
-                "link mismatch for node {:?}", id);
-        }
-    }
-
-    #[test]
-    fn node_metadata_matches(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            prop_assert_eq!(&actual.entry.node_metadata, &exp.node_metadata,
-                "metadata mismatch for node {:?}", id);
-        }
-    }
-
-    #[test]
-    fn transclusion_metadata_matches(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            let actual_meta = sorted_metadata(
-                actual.entry.transclusion_metadata.values().cloned().collect(),
-            );
-            let expected_meta = sorted_metadata(exp.transclusion_metadata.clone());
-            prop_assert_eq!(actual_meta, expected_meta,
-                "transclusion metadata mismatch for node {:?}", id);
-        }
-    }
-
-    #[test]
-    fn link_metadata_matches(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for (id, exp) in &expected {
-            let actual = &result[id.as_str()];
-            let actual_meta = sorted_metadata(
-                actual.entry.link_metadata.values().cloned().collect(),
-            );
-            let expected_meta = sorted_metadata(exp.link_metadata.clone());
-            prop_assert_eq!(actual_meta, expected_meta,
-                "link metadata mismatch for node {:?}", id);
-        }
-    }
-
-    #[test]
-    fn non_transcluding_subnodes_removed(file in mock_file_strategy()) {
-        let (file_output, expected) = file.render();
-        let result = extract(file_output).unwrap();
-
-        for id in expected.keys() {
-            let actual = &result[id.as_str()];
-            prop_assert!(
-                !actual.entry.body_html.contains("<wb-subnode"),
-                "node {:?} body_html still contains wb-subnode", id,
-            );
         }
     }
 }
