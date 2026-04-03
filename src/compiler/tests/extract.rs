@@ -24,7 +24,7 @@ struct MockFile {
 struct MockNode {
     identifier: String,
     title: String,
-    metadata: Metadata,
+    metadata: Option<Metadata>,
     body: Vec<MockElement>,
 }
 
@@ -46,13 +46,13 @@ struct MockSubnode {
 struct MockLink {
     target: String,
     content: Option<String>,
-    metadata: Metadata,
+    metadata: Option<Metadata>,
 }
 
 #[derive(Debug, Clone)]
 struct MockTransclusion {
     target: String,
-    metadata: Metadata,
+    metadata: Option<Metadata>,
 }
 
 #[derive(Debug)]
@@ -90,7 +90,7 @@ impl MockFile {
         let mut file_node_metadata = HashMap::new();
         let mut file_transclusion_metadata = HashMap::new();
         let mut file_link_metadata = HashMap::new();
-        let mut synthetic_transclusions: Vec<(String, Metadata)> = Vec::new();
+        let mut synthetic_transclusions: Vec<(String, Option<Metadata>)> = Vec::new();
         let mut transclusion_counter = 0u32;
         let mut link_counter = 0u32;
         let mut expected = HashMap::new();
@@ -111,7 +111,7 @@ impl MockFile {
                 identifier: &'a str,
                 tag: &'static str,
                 title: &'a str,
-                node_metadata: &'a Metadata,
+                node_metadata: &'a Option<Metadata>,
             },
         }
 
@@ -178,19 +178,21 @@ impl MockFile {
                                 link.target,
                             )
                             .unwrap();
-                            assert!(
-                                file_link_metadata
-                                    .insert(counter, link.metadata.clone())
-                                    .is_none(),
-                                "duplicate link metadata: {counter}",
-                            );
-                            assert!(
-                                edges
-                                    .link_metadata
-                                    .insert(counter, link.metadata.clone())
-                                    .is_none(),
-                                "duplicate expected link metadata: {counter}",
-                            );
+                            if let Some(metadata) = &link.metadata {
+                                assert!(
+                                    file_link_metadata
+                                        .insert(counter, metadata.clone())
+                                        .is_none(),
+                                    "duplicate link metadata: {counter}",
+                                );
+                                assert!(
+                                    edges
+                                        .link_metadata
+                                        .insert(counter, metadata.clone())
+                                        .is_none(),
+                                    "duplicate expected link metadata: {counter}",
+                                );
+                            }
                             edges.links.push(link.target.clone());
                         }
                         MockElement::Transclusion(t) => {
@@ -202,19 +204,21 @@ impl MockFile {
                                 t.target,
                             )
                             .unwrap();
-                            assert!(
-                                file_transclusion_metadata
-                                    .insert(counter, t.metadata.clone())
-                                    .is_none(),
-                                "duplicate transclusion metadata: {counter}",
-                            );
-                            assert!(
-                                edges
-                                    .transclusion_metadata
-                                    .insert(counter, t.metadata.clone())
-                                    .is_none(),
-                                "duplicate expected transclusion metadata: {counter}",
-                            );
+                            if let Some(metadata) = &t.metadata {
+                                assert!(
+                                    file_transclusion_metadata
+                                        .insert(counter, metadata.clone())
+                                        .is_none(),
+                                    "duplicate transclusion metadata: {counter}",
+                                );
+                                assert!(
+                                    edges
+                                        .transclusion_metadata
+                                        .insert(counter, metadata.clone())
+                                        .is_none(),
+                                    "duplicate expected transclusion metadata: {counter}",
+                                );
+                            }
                             edges.transclusions.push(t.target.clone());
                         }
                         MockElement::Subnode(subnode) => {
@@ -250,19 +254,21 @@ impl MockFile {
                             .is_none(),
                         "duplicate span: {identifier}",
                     );
-                    assert!(
-                        file_node_metadata
-                            .insert(identifier.to_owned(), node_metadata.clone())
-                            .is_none(),
-                        "duplicate node metadata: {identifier}",
-                    );
+                    if let Some(metadata) = node_metadata {
+                        assert!(
+                            file_node_metadata
+                                .insert(identifier.to_owned(), metadata.clone())
+                                .is_none(),
+                            "duplicate node metadata: {identifier}",
+                        );
+                    }
 
                     let edges = edge_stack.pop().unwrap();
                     expected.insert(
                         identifier.to_owned(),
                         ExpectedOutput {
                             title: title.to_owned(),
-                            node_metadata: node_metadata.clone(),
+                            node_metadata: node_metadata.clone().unwrap_or_default(),
                             transclusions: edges.transclusions,
                             links: edges.links,
                             transclusion_metadata: edges.transclusion_metadata,
@@ -280,15 +286,17 @@ impl MockFile {
                 .checked_add(1)
                 .expect("synthetic transclusion counter overflow");
 
-            assert!(
-                expected
-                    .get_mut(&owner_identifier)
-                    .expect("bug: missing expected owner for synthetic transclusion")
-                    .transclusion_metadata
-                    .insert(counter, metadata)
-                    .is_none(),
-                "duplicate expected synthetic transclusion metadata: {counter}",
-            );
+            if let Some(metadata) = metadata {
+                assert!(
+                    expected
+                        .get_mut(&owner_identifier)
+                        .expect("bug: missing expected owner for synthetic transclusion")
+                        .transclusion_metadata
+                        .insert(counter, metadata)
+                        .is_none(),
+                    "duplicate expected synthetic transclusion metadata: {counter}",
+                );
+            }
         }
 
         let file_output = FileOutput {
@@ -317,26 +325,35 @@ fn leaf_element_strategy() -> impl Strategy<Value = MockElement> {
         (
             "[a-z][a-z0-9]{0,7}",
             proptest::option::of("[a-z ]{1,10}"),
-            metadata_strategy(),
+            proptest::option::of(metadata_strategy()),
         )
             .prop_map(|(target, content, metadata)| MockElement::Link(MockLink {
                 target,
                 content,
                 metadata,
             })),
-        ("[a-z][a-z0-9]{0,7}", metadata_strategy()).prop_map(|(target, metadata)| {
-            MockElement::Transclusion(MockTransclusion { target, metadata })
-        }),
+        (
+            "[a-z][a-z0-9]{0,7}",
+            proptest::option::of(metadata_strategy())
+        )
+            .prop_map(|(target, metadata)| {
+                MockElement::Transclusion(MockTransclusion { target, metadata })
+            }),
     ]
 }
 
 fn node_strategy(body: impl Strategy<Value = Vec<MockElement>>) -> impl Strategy<Value = MockNode> {
-    ("[A-Za-z ]{0,12}", metadata_strategy(), body).prop_map(|(title, metadata, body)| MockNode {
-        identifier: String::new(),
-        title,
-        metadata,
+    (
+        "[A-Za-z ]{0,12}",
+        proptest::option::of(metadata_strategy()),
         body,
-    })
+    )
+        .prop_map(|(title, metadata, body)| MockNode {
+            identifier: String::new(),
+            title,
+            metadata,
+            body,
+        })
 }
 
 fn element_strategy() -> impl Strategy<Value = MockElement> {
@@ -393,6 +410,7 @@ proptest! {
             let document = Document::from(actual.entry.body_html.as_str());
 
             prop_assert!(document.select("wb-subnode").iter().next().is_none());
+            prop_assert!(document.select("wb-title").iter().next().is_none());
         }
     }
 }
