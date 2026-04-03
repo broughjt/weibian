@@ -487,6 +487,7 @@ struct Backmatter {
 
 type Metadata = HashMap<String, Vec<String>>;
 
+#[derive(Debug)]
 struct NodeEntry {
     pub body_html: String,
     pub title: String,

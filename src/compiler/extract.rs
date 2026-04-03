@@ -19,6 +19,7 @@ pub trait Compile {
     fn compile(self) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
 }
 
+#[derive(Debug)]
 pub struct NodeOutput {
     pub(super) entry: NodeEntry,
     pub transclusions: Vec<String>,
@@ -76,6 +77,9 @@ impl<W: World> Compile for TypstCompile<W> {
         Warned { output, warnings }
     }
 }
+
+pub(super) const NO_WB_NODE: &str = "source file produced no wb-node";
+pub(super) const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 
 /// Parses the HTML in `output` into a map of node IDs to node entries.
 ///
@@ -170,10 +174,7 @@ pub(super) fn extract(
 
     match node_iter.next() {
         None => {
-            errors.push(SourceDiagnostic::error(
-                Span::detached(),
-                "source file produced no wb-node",
-            ));
+            errors.push(SourceDiagnostic::error(Span::detached(), NO_WB_NODE));
         }
         Some(wb_node) => {
             if let Some((identifier, output)) = extract_node_content(
@@ -203,7 +204,7 @@ pub(super) fn extract(
                     })
                     .unwrap_or(Span::detached());
 
-                SourceDiagnostic::error(span, "source file produced multiple wb-node elements")
+                SourceDiagnostic::error(span, MULTIPLE_WB_NODES)
             }));
         }
     }

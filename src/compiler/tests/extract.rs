@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use typst::syntax::Span;
 
 use crate::compiler::Metadata;
-use crate::compiler::extract::{FileOutput, extract};
+use crate::compiler::extract::{FileOutput, MULTIPLE_WB_NODES, NO_WB_NODE, extract};
 
 const METADATA_VEC_COUNT_MAX: usize = 10;
 const METADATA_ENTRIES_COUNT_MAX: usize = 16;
@@ -395,6 +395,39 @@ fn mock_file_strategy() -> impl Strategy<Value = MockFile> {
         file.assign_unique_identifiers();
         file
     })
+}
+
+#[test]
+fn missing_wb_node() {
+    let output = FileOutput {
+        html: String::new(),
+        spans: HashMap::new(),
+        node_metadata: HashMap::new(),
+        transclusion_metadata: HashMap::new(),
+        link_metadata: HashMap::new(),
+    };
+    let errors = extract(output).unwrap_err();
+    assert!(errors.iter().any(|e| e.message == NO_WB_NODE));
+}
+
+#[test]
+fn multiple_wb_nodes() {
+    let output = FileOutput {
+        html: concat!(
+            r#"<wb-node identifier="n0"><wb-title>A</wb-title></wb-node>"#,
+            r#"<wb-node identifier="n1"><wb-title>B</wb-title></wb-node>"#,
+        )
+        .to_owned(),
+        spans: HashMap::from([
+            ("n0".to_owned(), Span::detached()),
+            ("n1".to_owned(), Span::detached()),
+        ]),
+        node_metadata: HashMap::new(),
+        transclusion_metadata: HashMap::new(),
+        link_metadata: HashMap::new(),
+    };
+    let errors = extract(output).unwrap_err();
+    assert!(errors.iter().any(|e| e.message == MULTIPLE_WB_NODES));
 }
 
 proptest! {
