@@ -414,6 +414,7 @@ proptest! {
             prop_assert_eq!(&actual.links, &expected.links);
             prop_assert_eq!(&actual.entry.transclusion_metadata, &expected.transclusion_metadata);
             prop_assert_eq!(&actual.entry.link_metadata, &expected.link_metadata);
+
             prop_assert!(actual.entry.transclusion_metadata.values().all(|m| !m.is_empty()));
             prop_assert!(actual.entry.link_metadata.values().all(|m| !m.is_empty()));
 

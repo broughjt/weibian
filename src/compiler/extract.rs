@@ -81,7 +81,9 @@ impl<W: World> Compile for TypstCompile<W> {
 ///
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
-pub(super) fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+pub(super) fn extract(
+    output: FileOutput,
+) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
     let FileOutput {
         html,
         spans,
@@ -92,9 +94,20 @@ pub(super) fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>,
     let mut errors = EcoVec::new();
     let document = Document::from(html);
     let mut nodes = HashMap::with_capacity(spans.len());
-    let mut synthetic_counter: u32 = transclusion_metadata.keys().copied().max().map_or(0, |m| {
-        m.checked_add(1).expect("transclusion counter overflow")
-    });
+    let mut synthetic_counter: u32 = document
+        .select("wb-transclude")
+        .iter()
+        .filter_map(|element| {
+            element
+                .attr("counter")
+                .and_then(|counter| counter.parse::<u32>().ok())
+        })
+        .max()
+        .map_or(0, |counter| {
+            counter
+                .checked_add(1)
+                .expect("transclusion counter overflow")
+        });
 
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
@@ -135,7 +148,9 @@ pub(super) fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>,
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            transclusion_metadata.insert(counter, output.entry.node_metadata.clone());
+            if !output.entry.node_metadata.is_empty() {
+                transclusion_metadata.insert(counter, output.entry.node_metadata.clone());
+            }
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
             ));
