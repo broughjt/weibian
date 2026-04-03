@@ -178,7 +178,9 @@ impl MockFile {
                                 link.target,
                             )
                             .unwrap();
-                            if let Some(metadata) = &link.metadata {
+                            if let Some(metadata) = &link.metadata
+                                && !metadata.is_empty()
+                            {
                                 assert!(
                                     file_link_metadata
                                         .insert(counter, metadata.clone())
@@ -204,7 +206,9 @@ impl MockFile {
                                 t.target,
                             )
                             .unwrap();
-                            if let Some(metadata) = &t.metadata {
+                            if let Some(metadata) = &t.metadata
+                                && !metadata.is_empty()
+                            {
                                 assert!(
                                     file_transclusion_metadata
                                         .insert(counter, metadata.clone())
@@ -254,7 +258,9 @@ impl MockFile {
                             .is_none(),
                         "duplicate span: {identifier}",
                     );
-                    if let Some(metadata) = node_metadata {
+                    if let Some(metadata) = node_metadata
+                        && !metadata.is_empty()
+                    {
                         assert!(
                             file_node_metadata
                                 .insert(identifier.to_owned(), metadata.clone())
@@ -286,7 +292,9 @@ impl MockFile {
                 .checked_add(1)
                 .expect("synthetic transclusion counter overflow");
 
-            if let Some(metadata) = metadata {
+            if let Some(metadata) = metadata
+                && !metadata.is_empty()
+            {
                 assert!(
                     expected
                         .get_mut(&owner_identifier)
@@ -406,6 +414,8 @@ proptest! {
             prop_assert_eq!(&actual.links, &expected.links);
             prop_assert_eq!(&actual.entry.transclusion_metadata, &expected.transclusion_metadata);
             prop_assert_eq!(&actual.entry.link_metadata, &expected.link_metadata);
+            prop_assert!(actual.entry.transclusion_metadata.values().all(|m| !m.is_empty()));
+            prop_assert!(actual.entry.link_metadata.values().all(|m| !m.is_empty()));
 
             let document = Document::from(actual.entry.body_html.as_str());
 

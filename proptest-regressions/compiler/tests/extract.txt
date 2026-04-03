@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 13e42d6f7a7b5806e7bf18b0f279d42320b6ef975df43e07caf13f27e1cd9c2b # shrinks to file = MockFile { primary: MockNode { identifier: "n0", title: "", metadata: None, body: [Subnode(MockSubnode { node: MockNode { identifier: "n1", title: "", metadata: None, body: [] }, transclude: true })] } }
