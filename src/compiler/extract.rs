@@ -20,6 +20,9 @@ const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier
 const WB_NODE_MISSING_TITLE: &str = "wb-node's first child must be a wb-title element";
 const WB_SUBNODE_MISSING_TITLE: &str = "wb-subnode's first child must be a wb-title element";
 const WB_SUBNODE_MISSING_TRANSCLUDE: &str = "wb-subnode is missing the transclude attribute";
+const WB_TRANSCLUDE_MISSING_IDENTIFIER: &str = "wb-transclude is missing an identifier";
+const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter attribute";
+const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
 const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
 const BUG_DUPLICATE_IDENTIFIER: &str =
     "bug: duplicate node identifier slipped past collect_node_spans";
@@ -73,6 +76,7 @@ pub fn compile<W: World>(
     Warned { output, warnings }
 }
 
+#[derive(Clone, Debug)]
 struct FileOutput {
     pub html: String,
     pub spans: HashMap<String, Span>,
@@ -239,7 +243,7 @@ fn extract_node_content(
             None => {
                 errors.push(SourceDiagnostic::error(
                     Span::detached(),
-                    "wb-transclude is missing an identifier",
+                    WB_TRANSCLUDE_MISSING_IDENTIFIER,
                 ));
                 continue;
             }
@@ -248,17 +252,14 @@ fn extract_node_content(
             Some(n) => match n.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => {
-                    errors.push(SourceDiagnostic::error(
-                        Span::detached(),
-                        eco_format!("wb-transclude has invalid counter: {n:?}"),
-                    ));
+                    errors.push(invalid_transclude_counter_diagnostic(n));
                     continue;
                 }
             },
             None => {
                 errors.push(SourceDiagnostic::error(
                     Span::detached(),
-                    "wb-transclude is missing a counter attribute",
+                    WB_TRANSCLUDE_MISSING_COUNTER,
                 ));
                 continue;
             }
@@ -283,17 +284,14 @@ fn extract_node_content(
             Some(n) => match n.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => {
-                    errors.push(SourceDiagnostic::error(
-                        Span::detached(),
-                        eco_format!("link has invalid data-counter: {n:?}"),
-                    ));
+                    errors.push(invalid_link_counter_diagnostic(n));
                     continue;
                 }
             },
             None => {
                 errors.push(SourceDiagnostic::error(
                     Span::detached(),
-                    "link is missing a data-counter attribute",
+                    LINK_MISSING_COUNTER,
                 ));
                 continue;
             }
@@ -619,6 +617,20 @@ fn invalid_transclude_value_diagnostic(value: &str) -> SourceDiagnostic {
     )
 }
 
+fn invalid_transclude_counter_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("wb-transclude has invalid counter: {value:?}"),
+    )
+}
+
+fn invalid_link_counter_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("link has invalid data-counter: {value:?}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -632,6 +644,22 @@ mod tests {
 
     use super::*;
     use crate::compiler::Metadata;
+
+    fn transclude_counters(html: &str) -> Vec<String> {
+        Document::from(html)
+            .select("wb-transclude[counter]")
+            .iter()
+            .filter_map(|e| e.attr("counter").map(|c| c.to_string()))
+            .collect()
+    }
+
+    fn link_counters(html: &str) -> Vec<String> {
+        Document::from(html)
+            .select("a[data-counter]")
+            .iter()
+            .filter_map(|e| e.attr("data-counter").map(|c| c.to_string()))
+            .collect()
+    }
 
     const METADATA_VEC_COUNT_MAX: usize = 10;
     const METADATA_ENTRIES_COUNT_MAX: usize = 16;
@@ -1258,13 +1286,14 @@ mod tests {
             }
             output.html = document.html().to_string();
 
-            let expected: Vec<SourceDiagnostic> = ids
+            let mut expected: Vec<SourceDiagnostic> = ids
                 .iter()
                 .map(|_| SourceDiagnostic::error(Span::detached(), WB_SUBNODE_MISSING_TRANSCLUDE))
                 .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
 
             prop_assert_eq!(actual, expected);
         }
@@ -1307,6 +1336,195 @@ mod tests {
             let mut expected: Vec<SourceDiagnostic> = values
                 .iter()
                 .map(|v| invalid_transclude_value_diagnostic(v))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_identifier(
+            (mut output, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (output.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+        ) {
+            let document = Document::from(output.html.as_str());
+            for counter in &counters {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).remove_attr("identifier");
+                let counter_u32: u32 = counter.parse().unwrap();
+                output.transclusion_metadata.remove(&counter_u32);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = counters
+                .iter()
+                .map(|_| SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_IDENTIFIER))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_counter(
+            (file, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for counter in &counters {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).remove_attr("counter");
+                let counter_u32: u32 = counter.parse().unwrap();
+                output.transclusion_metadata.remove(&counter_u32);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = counters
+                .iter()
+                .map(|_| SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_COUNTER))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_transclude_counter(
+            (file, counters, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+                .prop_flat_map(|(file, counters)| {
+                    let n = counters.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}",
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), counters.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (counter, value) in counters.iter().zip(values.iter()) {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).set_attr("counter", value.as_str());
+                let counter_u32: u32 = counter.parse().unwrap();
+                output.transclusion_metadata.remove(&counter_u32);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = values
+                .iter()
+                .map(|v| invalid_transclude_counter_diagnostic(v))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_link_counter(
+            (file, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = link_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one link", |(_, counters)| !counters.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for counter in &counters {
+                let selector = format!(r#"a[data-counter="{counter}"]"#);
+                document.select(&selector).remove_attr("data-counter");
+                let counter_u32: u32 = counter.parse().unwrap();
+                output.link_metadata.remove(&counter_u32);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = counters
+                .iter()
+                .map(|_| SourceDiagnostic::error(Span::detached(), LINK_MISSING_COUNTER))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_link_counter(
+            (file, counters, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = link_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one link", |(_, counters)| !counters.is_empty())
+                .prop_flat_map(|(file, counters)| {
+                    let n = counters.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}",
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), counters.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (counter, value) in counters.iter().zip(values.iter()) {
+                let selector = format!(r#"a[data-counter="{counter}"]"#);
+                document.select(&selector).set_attr("data-counter", value.as_str());
+                let counter_u32: u32 = counter.parse().unwrap();
+                output.link_metadata.remove(&counter_u32);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = values
+                .iter()
+                .map(|v| invalid_link_counter_diagnostic(v))
                 .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
