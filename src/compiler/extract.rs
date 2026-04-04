@@ -100,7 +100,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
     let mut errors = EcoVec::new();
     let document = Document::from(html);
     let mut nodes = HashMap::with_capacity(spans.len());
-    let mut synthetic_counter: u32 = document
+    let max_html_counter = document
         .select("wb-transclude")
         .iter()
         .filter_map(|element| {
@@ -108,6 +108,11 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
                 .attr("counter")
                 .and_then(|counter| counter.parse::<u32>().ok())
         })
+        .max();
+    let max_metadata_counter = transclusion_metadata.keys().copied().max();
+    let mut synthetic_counter: u32 = [max_html_counter, max_metadata_counter]
+        .into_iter()
+        .flatten()
         .max()
         .map_or(0, |counter| {
             counter
@@ -206,11 +211,12 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
     }
 
     assert!(metadata.is_empty(), "bug: unconsumed node metadata");
-    assert!(
-        transclusion_metadata.is_empty(),
-        "bug: unconsumed transclusion metadata"
-    );
-    assert!(link_metadata.is_empty(), "bug: unconsumed link metadata",);
+    for counter in transclusion_metadata.keys().copied() {
+        errors.push(orphaned_transclusion_metadata_diagnostic(counter));
+    }
+    for counter in link_metadata.keys().copied() {
+        errors.push(orphaned_link_metadata_diagnostic(counter));
+    }
 
     if errors.is_empty() {
         Ok(nodes)
@@ -628,6 +634,22 @@ fn invalid_link_counter_diagnostic(value: &str) -> SourceDiagnostic {
     SourceDiagnostic::error(
         Span::detached(),
         eco_format!("link has invalid data-counter: {value:?}"),
+    )
+}
+
+fn orphaned_transclusion_metadata_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!(
+            "transclusion metadata for counter {counter} has no corresponding wb-transclude element"
+        ),
+    )
+}
+
+fn orphaned_link_metadata_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("link metadata for counter {counter} has no corresponding link element"),
     )
 }
 
@@ -1358,18 +1380,18 @@ mod tests {
                 .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
         ) {
             let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
             for counter in &counters {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).remove_attr("identifier");
                 let counter_u32: u32 = counter.parse().unwrap();
-                output.transclusion_metadata.remove(&counter_u32);
+                if output.transclusion_metadata.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_IDENTIFIER));
             }
             output.html = document.html().to_string();
 
-            let mut expected: Vec<SourceDiagnostic> = counters
-                .iter()
-                .map(|_| SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_IDENTIFIER))
-                .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
@@ -1393,18 +1415,18 @@ mod tests {
             let (mut output, _) = file.render();
 
             let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
             for counter in &counters {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).remove_attr("counter");
                 let counter_u32: u32 = counter.parse().unwrap();
-                output.transclusion_metadata.remove(&counter_u32);
+                if output.transclusion_metadata.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_COUNTER));
             }
             output.html = document.html().to_string();
 
-            let mut expected: Vec<SourceDiagnostic> = counters
-                .iter()
-                .map(|_| SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_COUNTER))
-                .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
@@ -1436,18 +1458,18 @@ mod tests {
             let (mut output, _) = file.render();
 
             let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
             for (counter, value) in counters.iter().zip(values.iter()) {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).set_attr("counter", value.as_str());
                 let counter_u32: u32 = counter.parse().unwrap();
-                output.transclusion_metadata.remove(&counter_u32);
+                if output.transclusion_metadata.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(invalid_transclude_counter_diagnostic(value));
             }
             output.html = document.html().to_string();
 
-            let mut expected: Vec<SourceDiagnostic> = values
-                .iter()
-                .map(|v| invalid_transclude_counter_diagnostic(v))
-                .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
@@ -1471,18 +1493,18 @@ mod tests {
             let (mut output, _) = file.render();
 
             let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
             for counter in &counters {
                 let selector = format!(r#"a[data-counter="{counter}"]"#);
                 document.select(&selector).remove_attr("data-counter");
                 let counter_u32: u32 = counter.parse().unwrap();
-                output.link_metadata.remove(&counter_u32);
+                if output.link_metadata.contains_key(&counter_u32) {
+                    expected.push(orphaned_link_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), LINK_MISSING_COUNTER));
             }
             output.html = document.html().to_string();
 
-            let mut expected: Vec<SourceDiagnostic> = counters
-                .iter()
-                .map(|_| SourceDiagnostic::error(Span::detached(), LINK_MISSING_COUNTER))
-                .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
@@ -1514,18 +1536,18 @@ mod tests {
             let (mut output, _) = file.render();
 
             let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
             for (counter, value) in counters.iter().zip(values.iter()) {
                 let selector = format!(r#"a[data-counter="{counter}"]"#);
                 document.select(&selector).set_attr("data-counter", value.as_str());
                 let counter_u32: u32 = counter.parse().unwrap();
-                output.link_metadata.remove(&counter_u32);
+                if output.link_metadata.contains_key(&counter_u32) {
+                    expected.push(orphaned_link_metadata_diagnostic(counter_u32));
+                }
+                expected.push(invalid_link_counter_diagnostic(value));
             }
             output.html = document.html().to_string();
 
-            let mut expected: Vec<SourceDiagnostic> = values
-                .iter()
-                .map(|v| invalid_link_counter_diagnostic(v))
-                .collect();
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
