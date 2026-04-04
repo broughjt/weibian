@@ -691,37 +691,28 @@ mod tests {
     }
 
     impl MockFile {
-        fn assign_unique_identifiers(&mut self) {
-            let mut next_id = 0u32;
-            let mut stack = vec![&mut self.primary];
-
-            while let Some(node) = stack.pop() {
-                node.identifier = format!("n{next_id}");
-                next_id = next_id
-                    .checked_add(1)
-                    .expect("node identifier counter overflow");
-
-                for element in node.body.iter_mut().rev() {
-                    if let MockElement::Subnode(subnode) = element {
-                        stack.push(&mut subnode.node);
-                    }
-                }
-            }
-        }
-
-        /// Returns all node identifiers in the file as `(identifier, is_subnode)` pairs.
-        fn all_identifiers(&self) -> Vec<(String, bool)> {
-            let mut result = Vec::new();
+        fn walk(&self, mut f: impl FnMut(&MockNode, bool)) {
             let mut stack: Vec<(&MockNode, bool)> = vec![(&self.primary, false)];
             while let Some((node, is_subnode)) = stack.pop() {
-                result.push((node.identifier.clone(), is_subnode));
+                f(node, is_subnode);
                 for element in node.body.iter().rev() {
                     if let MockElement::Subnode(subnode) = element {
                         stack.push((&subnode.node, true));
                     }
                 }
             }
-            result
+        }
+
+        fn walk_mut(&mut self, mut f: impl FnMut(&mut MockNode, bool)) {
+            let mut stack: Vec<(&mut MockNode, bool)> = vec![(&mut self.primary, false)];
+            while let Some((node, is_subnode)) = stack.pop() {
+                f(node, is_subnode);
+                for element in node.body.iter_mut().rev() {
+                    if let MockElement::Subnode(subnode) = element {
+                        stack.push((&mut subnode.node, true));
+                    }
+                }
+            }
         }
 
         fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
@@ -1034,7 +1025,11 @@ mod tests {
         ))
         .prop_map(|primary| {
             let mut file = MockFile { primary };
-            file.assign_unique_identifiers();
+            let mut next_id = 0u32;
+            file.walk_mut(|node, _| {
+                node.identifier = format!("n{next_id}");
+                next_id = next_id.checked_add(1).expect("node identifier counter overflow");
+            });
             file
         })
     }
@@ -1104,7 +1099,8 @@ mod tests {
         fn missing_node_identifier(
             (file, ids) in mock_file_strategy()
                 .prop_flat_map(|file| {
-                    let ids = file.all_identifiers();
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| ids.push((node.identifier.clone(), is_subnode)));
                     let n = ids.len();
                     proptest::sample::subsequence(ids, 1..=n)
                         .prop_map(move |stripped| (file.clone(), stripped))
