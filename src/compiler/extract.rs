@@ -17,6 +17,8 @@ const NO_WB_NODE: &str = "source file produced no wb-node";
 const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
 const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
+const WB_NODE_MISSING_TITLE: &str = "wb-node's first child must be a wb-title element";
+const WB_SUBNODE_MISSING_TITLE: &str = "wb-subnode's first child must be a wb-title element";
 const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
 const BUG_DUPLICATE_IDENTIFIER: &str =
     "bug: duplicate node identifier slipped past collect_node_spans";
@@ -321,14 +323,7 @@ fn extract_node_content(
         .first()
         .is_some_and(|n| n.has_name("wb-title"))
     {
-        errors.push(SourceDiagnostic::error(
-            span,
-            if is_subnode {
-                "wb-subnode's first child must be a wb-title element"
-            } else {
-                "wb-node's first child must be a wb-title element"
-            },
-        ));
+        errors.push(missing_title_diagnostic(is_subnode));
         return None;
     }
     let title = title_selection.inner_html().to_string();
@@ -604,6 +599,17 @@ fn missing_identifier_diagnostic(is_subnode: bool) -> SourceDiagnostic {
             WB_SUBNODE_MISSING_IDENTIFIER
         } else {
             WB_NODE_MISSING_IDENTIFIER
+        },
+    )
+}
+
+fn missing_title_diagnostic(is_subnode: bool) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        if is_subnode {
+            WB_SUBNODE_MISSING_TITLE
+        } else {
+            WB_NODE_MISSING_TITLE
         },
     )
 }
@@ -1187,6 +1193,39 @@ mod tests {
                 message.contains(BUG_DUPLICATE_IDENTIFIER),
                 "unexpected panic message: {message:?}",
             );
+        }
+
+        #[test]
+        fn missing_title(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| ids.push((node.identifier.clone(), is_subnode)));
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 1..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, _) in &ids {
+                let selector =
+                    format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).children().first().remove();
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|(_, is_subnode)| missing_title_diagnostic(*is_subnode))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
         }
     }
 }
