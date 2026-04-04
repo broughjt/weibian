@@ -17,6 +17,7 @@ const NO_WB_NODE: &str = "source file produced no wb-node";
 const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
 const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
+const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
 
 #[derive(Debug)]
 pub struct NodeOutput {
@@ -313,7 +314,7 @@ fn extract_node_content(
     let span = spans
         .get(&identifier)
         .copied()
-        .expect("bug: no span found for node identifier");
+        .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
 
     let title_selection = element.children().first();
     if !title_selection
@@ -619,9 +620,7 @@ mod tests {
 
     use typst::diag::SourceDiagnostic;
 
-    use super::{
-        FileOutput, MULTIPLE_WB_NODES, NO_WB_NODE, extract, missing_identifier_diagnostic,
-    };
+    use super::*;
     use crate::compiler::Metadata;
 
     const METADATA_VEC_COUNT_MAX: usize = 10;
@@ -1120,6 +1119,31 @@ mod tests {
             expected.sort_by(|a, b| a.message.cmp(&b.message));
 
             prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_span(
+            (file, id) in mock_file_strategy().prop_flat_map(|file| {
+                let mut ids = Vec::new();
+                file.walk(|node, _| ids.push(node.identifier.clone()));
+                proptest::sample::select(ids).prop_map(move |id| (file.clone(), id))
+            })
+        ) {
+            let (mut output, _) = file.render();
+            output.spans.remove(&id);
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_NO_SPAN_FOR_IDENTIFIER),
+                "unexpected panic message: {message:?}",
+            );
         }
     }
 }
