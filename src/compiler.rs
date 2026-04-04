@@ -10,12 +10,12 @@ use ecow::{EcoVec, eco_format};
 use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
+use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
 
-pub use self::extract::{Compile, TypstCompile};
+use self::extract::NodeOutput;
 use self::render::Renderer;
-use crate::compiler::extract::NodeOutput;
 use crate::config::{BuildConfig, RenderConfig};
 
 pub type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
@@ -47,11 +47,19 @@ impl Compiler {
     ///
     /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
     /// are stored as diagnostics rather than returned as errors.
-    pub fn update<C: Compile>(&mut self, compiler: C, id: FileId) {
+    pub fn update<W: World>(&mut self, world: &W, id: FileId) {
+        self._update(id, extract::compile(world));
+    }
+
+    fn _update(
+        &mut self,
+        id: FileId,
+        compiled: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
+    ) {
         let Warned {
             output: result,
             warnings,
-        } = compiler.compile();
+        } = compiled;
 
         match result {
             Ok(extracted_nodes) => {
@@ -440,6 +448,39 @@ impl Compiler {
     }
 }
 
+pub struct OutputPlan {
+    pub writes: HashMap<String, String>,
+    pub deletes: HashSet<String>,
+}
+
+impl OutputPlan {
+    pub fn apply(&self, config: &BuildConfig) -> Result<(), io::Error> {
+        for (node_id, html) in &self.writes {
+            let path = config.output_path(node_id);
+
+            if let Some(parent) = path.parent()
+                && parent != config.output_directory
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, html)?;
+        }
+        for node_id in &self.deletes {
+            let path = config.output_path(node_id);
+
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    eprintln!("warning: expected to delete {path:?} but it was not found");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
 struct NodeId(u32);
 
@@ -584,37 +625,4 @@ fn should_backmatter_render(
                 .chain(new.outlinks.iter())
                 .any(|id| dirty.contains(id) || metadata_dirty.contains(id) || removed.contains(id))
     })
-}
-
-pub struct OutputPlan {
-    pub writes: HashMap<String, String>,
-    pub deletes: HashSet<String>,
-}
-
-impl OutputPlan {
-    pub fn apply(&self, config: &BuildConfig) -> Result<(), io::Error> {
-        for (node_id, html) in &self.writes {
-            let path = config.output_path(node_id);
-
-            if let Some(parent) = path.parent()
-                && parent != config.output_directory
-            {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, html)?;
-        }
-        for node_id in &self.deletes {
-            let path = config.output_path(node_id);
-
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    eprintln!("warning: expected to delete {path:?} but it was not found");
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        Ok(())
-    }
 }

@@ -23,7 +23,7 @@ use typst_syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 use walkdir::WalkDir;
 
 use crate::{
-    compiler::{Compiler, TypstCompile},
+    compiler::Compiler,
     config::{BuildConfig, copy_directory_recursive},
     file_store::FileStore,
     world::{DependenciesWorld, Resources, SystemWorld},
@@ -98,7 +98,7 @@ impl Watcher {
             let world =
                 DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-            self.compiler.update(TypstCompile(&world), id);
+            self.compiler.update(&world, id);
 
             let (_, dependencies) = world.into_inner();
 
@@ -156,7 +156,7 @@ impl Watcher {
                 let world =
                     DependenciesWorld::new(SystemWorld::new(id, &self.resources, &self.file_store));
 
-                self.compiler.update(TypstCompile(&world), id);
+                self.compiler.update(&world, id);
 
                 let (_, dependencies) = world.into_inner();
 

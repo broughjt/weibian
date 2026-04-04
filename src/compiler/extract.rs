@@ -13,81 +13,71 @@ use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 use super::NodeEntry;
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
-
-/// Compiles a source file and extracts its nodes.
-pub trait Compile {
-    fn compile(self) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
-}
+const NO_WB_NODE: &str = "source file produced no wb-node";
+const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 
 #[derive(Debug)]
 pub struct NodeOutput {
-    pub(super) entry: NodeEntry,
+    pub entry: NodeEntry,
     pub transclusions: Vec<String>,
     pub links: Vec<String>,
 }
 
-pub(super) struct FileOutput {
-    pub(super) html: String,
-    pub(super) spans: HashMap<String, Span>,
-    pub(super) node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    pub(super) transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    pub(super) link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+/// Compiles a source file and extracts its nodes.
+pub fn compile<W: World>(
+    world: &W,
+) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
+    let Warned {
+        output: result,
+        mut warnings,
+    } = typst::compile::<typst_html::HtmlDocument>(world);
+
+    // Discard warnings about html being an unstable feature, html is kind
+    // of the whole game here
+    warnings.retain(|diagnostic: &mut SourceDiagnostic| {
+        !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
+    });
+
+    let output = result.and_then(|html_document| {
+        typst_html::html(&html_document).and_then(|html| {
+            let (spans, span_errors) = collect_node_spans(&html_document);
+            let (metadata, transclusion_metadata, link_metadata, meta_errors) =
+                collect_metadata(html_document.introspector().as_ref(), &spans);
+            let mut errors = span_errors;
+            errors.extend(meta_errors);
+
+            if errors.is_empty() {
+                let file_output = FileOutput {
+                    html,
+                    spans,
+                    node_metadata: metadata,
+                    transclusion_metadata,
+                    link_metadata,
+                };
+
+                extract(file_output)
+            } else {
+                Err(errors)
+            }
+        })
+    });
+
+    Warned { output, warnings }
 }
 
-/// Wraps a Typst [`World`] so it can be passed to [`Compiler::update`].
-pub struct TypstCompile<W>(pub W);
-
-impl<W: World> Compile for TypstCompile<W> {
-    fn compile(self) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
-        let Warned {
-            output: result,
-            mut warnings,
-        } = typst::compile::<typst_html::HtmlDocument>(&self.0);
-
-        // Discard warnings about html being an unstable feature, html is kind
-        // of the whole game here
-        warnings.retain(|diagnostic: &mut SourceDiagnostic| {
-            !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
-        });
-
-        let output = result.and_then(|html_document| {
-            typst_html::html(&html_document).and_then(|html| {
-                let (spans, span_errors) = collect_node_spans(&html_document);
-                let (metadata, transclusion_metadata, link_metadata, meta_errors) =
-                    collect_metadata(html_document.introspector().as_ref(), &spans);
-                let mut errors = span_errors;
-                errors.extend(meta_errors);
-
-                if errors.is_empty() {
-                    let file_output = FileOutput {
-                        html,
-                        spans,
-                        node_metadata: metadata,
-                        transclusion_metadata,
-                        link_metadata,
-                    };
-
-                    extract(file_output)
-                } else {
-                    Err(errors)
-                }
-            })
-        });
-
-        Warned { output, warnings }
-    }
+struct FileOutput {
+    pub html: String,
+    pub spans: HashMap<String, Span>,
+    pub node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
+    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
 }
-
-pub(super) const NO_WB_NODE: &str = "source file produced no wb-node";
-pub(super) const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 
 /// Parses the HTML in `output` into a map of node IDs to node entries.
 ///
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
 /// or `Ok` with the node map on success.
-pub(super) fn extract(
-    output: FileOutput,
-) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
     let FileOutput {
         html,
         spans,
@@ -396,7 +386,7 @@ fn extract_node_content(
 /// - node identifier not present in `spans` (unknown node)
 /// - duplicate entries for the same node or counter
 #[allow(clippy::type_complexity)]
-pub(super) fn collect_metadata<I: Introspector>(
+fn collect_metadata<I: Introspector>(
     introspector: &I,
     spans: &HashMap<String, Span>,
 ) -> (
@@ -585,7 +575,7 @@ fn normalize_metadata(dictionary: &Dict) -> HashMap<String, Vec<String>> {
 /// Walks `document`'s element tree once (iterative DFS), returning a map from
 /// each node identifier to the span of its `wb-node` or `wb-subnode` element,
 /// plus errors for any duplicate identifiers found within the document.
-pub(super) fn collect_node_spans(
+fn collect_node_spans(
     document: &HtmlDocument,
 ) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
