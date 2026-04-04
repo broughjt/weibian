@@ -24,6 +24,7 @@ const WB_TRANSCLUDE_MISSING_IDENTIFIER: &str = "wb-transclude is missing an iden
 const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter attribute";
 const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
 const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
+const BUG_UNCONSUMED_NODE_METADATA: &str = "bug: unconsumed node metadata";
 const BUG_DUPLICATE_IDENTIFIER: &str =
     "bug: duplicate node identifier slipped past collect_node_spans";
 
@@ -210,7 +211,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
         }
     }
 
-    assert!(metadata.is_empty(), "bug: unconsumed node metadata");
+    assert!(metadata.is_empty(), "{BUG_UNCONSUMED_NODE_METADATA}");
     for counter in transclusion_metadata.keys().copied() {
         errors.push(orphaned_transclusion_metadata_diagnostic(counter));
     }
@@ -1202,6 +1203,35 @@ mod tests {
                 .unwrap();
             prop_assert!(
                 message.contains(BUG_NO_SPAN_FOR_IDENTIFIER),
+                "unexpected panic message: {message:?}",
+            );
+        }
+
+        #[test]
+        fn extra_node_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let missing_id = output
+                .spans
+                .keys()
+                .find_map(|id| (!output.node_metadata.contains_key(id)).then(|| format!("{id}-bogus")))
+                .unwrap_or_else(|| "bogus".to_owned());
+            output.node_metadata.insert(
+                missing_id,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_UNCONSUMED_NODE_METADATA),
                 "unexpected panic message: {message:?}",
             );
         }
