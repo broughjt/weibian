@@ -1237,6 +1237,60 @@ mod tests {
         }
 
         #[test]
+        fn extra_transclusion_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let extra_counter = output
+                .transclusion_metadata
+                .keys()
+                .copied()
+                .chain(
+                    transclude_counters(&output.html)
+                        .into_iter()
+                        .map(|counter| counter.parse::<u32>().unwrap()),
+                )
+                .max()
+                .map_or(0, |counter| counter + 1);
+            output.transclusion_metadata.insert(
+                extra_counter,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let actual = extract(output).unwrap_err().to_vec();
+            let expected = vec![orphaned_transclusion_metadata_diagnostic(extra_counter)];
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn extra_link_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let extra_counter = output
+                .link_metadata
+                .keys()
+                .copied()
+                .chain(
+                    link_counters(&output.html)
+                        .into_iter()
+                        .map(|counter| counter.parse::<u32>().unwrap()),
+                )
+                .max()
+                .map_or(0, |counter| counter + 1);
+            output.link_metadata.insert(
+                extra_counter,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let actual = extract(output).unwrap_err().to_vec();
+            let expected = vec![orphaned_link_metadata_diagnostic(extra_counter)];
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
         fn duplicate_node_identifier(
             (file, picked, k) in mock_file_strategy()
                 .prop_flat_map(|file| {
