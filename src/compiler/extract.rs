@@ -15,6 +15,8 @@ use super::NodeEntry;
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 const NO_WB_NODE: &str = "source file produced no wb-node";
 const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
+const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
+const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
 
 #[derive(Debug)]
 pub struct NodeOutput {
@@ -239,15 +241,7 @@ fn extract_node_content(
     errors: &mut EcoVec<SourceDiagnostic>,
 ) -> Option<(String, NodeOutput)> {
     let Some(identifier) = element.attr("identifier") else {
-        errors.push(SourceDiagnostic::error(
-            Span::detached(),
-            if is_subnode {
-                "wb-subnode is missing an identifier"
-            } else {
-                "wb-node is missing an identifier"
-            },
-        ));
-
+        errors.push(missing_identifier_diagnostic(is_subnode));
         return None;
     };
     let identifier = identifier.to_string();
@@ -612,6 +606,17 @@ fn collect_node_spans(
     (spans, errors)
 }
 
+fn missing_identifier_diagnostic(is_subnode: bool) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        if is_subnode {
+            WB_SUBNODE_MISSING_IDENTIFIER
+        } else {
+            WB_NODE_MISSING_IDENTIFIER
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -621,7 +626,11 @@ mod tests {
     use proptest::prelude::*;
     use typst::syntax::Span;
 
-    use super::{FileOutput, MULTIPLE_WB_NODES, NO_WB_NODE, extract};
+    use typst::diag::SourceDiagnostic;
+
+    use super::{
+        FileOutput, MULTIPLE_WB_NODES, NO_WB_NODE, extract, missing_identifier_diagnostic,
+    };
     use crate::compiler::Metadata;
 
     const METADATA_VEC_COUNT_MAX: usize = 10;
@@ -698,6 +707,21 @@ mod tests {
                     }
                 }
             }
+        }
+
+        /// Returns all node identifiers in the file as `(identifier, is_subnode)` pairs.
+        fn all_identifiers(&self) -> Vec<(String, bool)> {
+            let mut result = Vec::new();
+            let mut stack: Vec<(&MockNode, bool)> = vec![(&self.primary, false)];
+            while let Some((node, is_subnode)) = stack.pop() {
+                result.push((node.identifier.clone(), is_subnode));
+                for element in node.body.iter().rev() {
+                    if let MockElement::Subnode(subnode) = element {
+                        stack.push((&subnode.node, true));
+                    }
+                }
+            }
+            result
         }
 
         fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
@@ -1074,6 +1098,39 @@ mod tests {
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
             }
+        }
+
+        #[test]
+        fn missing_node_identifier(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let ids = file.all_identifiers();
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 1..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, _) in &ids {
+                let selector = format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).remove_attr("identifier");
+                output.spans.remove(id);
+                output.node_metadata.remove(id);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|(_, is_subnode)| missing_identifier_diagnostic(*is_subnode))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
         }
     }
 }
