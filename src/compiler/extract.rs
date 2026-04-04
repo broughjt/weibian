@@ -129,10 +129,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
             Some("true") => true,
             Some("false") => false,
             Some(other) => {
-                errors.push(SourceDiagnostic::error(
-                    output.entry.span,
-                    eco_format!("wb-subnode has invalid transclude value: {other:?}"),
-                ));
+                errors.push(invalid_transclude_value_diagnostic(other));
                 continue;
             }
             None => {
@@ -612,6 +609,13 @@ fn missing_title_diagnostic(is_subnode: bool) -> SourceDiagnostic {
         } else {
             WB_NODE_MISSING_TITLE
         },
+    )
+}
+
+fn invalid_transclude_value_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("wb-subnode has invalid transclude value: {value:?}"),
     )
 }
 
@@ -1261,6 +1265,53 @@ mod tests {
             let mut actual = extract(output).unwrap_err().to_vec();
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_transclude_attribute_value(
+            (file, ids, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| {
+                        if is_subnode {
+                            ids.push(node.identifier.clone());
+                        }
+                    });
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 0..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+                .prop_filter("need at least one subnode", |(_, ids)| !ids.is_empty())
+                .prop_flat_map(|(file, ids)| {
+                    let n = ids.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}".prop_filter("not true or false", |s| {
+                            s != "true" && s != "false"
+                        }),
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), ids.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, value) in ids.iter().zip(values.iter()) {
+                let selector = format!(r#"wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).set_attr("transclude", value.as_str());
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = values
+                .iter()
+                .map(|v| invalid_transclude_value_diagnostic(v))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
 
             prop_assert_eq!(actual, expected);
         }
