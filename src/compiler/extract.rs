@@ -18,6 +18,8 @@ const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements"
 const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
 const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
 const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
+const BUG_DUPLICATE_IDENTIFIER: &str =
+    "bug: duplicate node identifier slipped past collect_node_spans";
 
 #[derive(Debug)]
 pub struct NodeOutput {
@@ -156,10 +158,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
         }
 
         let displaced = nodes.insert(identifier, output);
-        assert!(
-            displaced.is_none(),
-            "bug: duplicate node identifier slipped past collect_node_spans"
-        );
+        assert!(displaced.is_none(), "{BUG_DUPLICATE_IDENTIFIER}");
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -1142,6 +1141,50 @@ mod tests {
                 .unwrap();
             prop_assert!(
                 message.contains(BUG_NO_SPAN_FOR_IDENTIFIER),
+                "unexpected panic message: {message:?}",
+            );
+        }
+
+        #[test]
+        fn duplicate_node_identifier(
+            (file, picked, k) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, _| ids.push(node.identifier.clone()));
+                    let k = (ids.len() / 2).max(1);
+                    (Just(file), Just(ids), 1usize..=k)
+                })
+                .prop_filter("need at least 2 nodes for a duplicate pair", |(_, ids, _): &(MockFile, Vec<String>, usize)| {
+                    ids.len() >= 2
+                })
+                .prop_flat_map(|(file, ids, k)| {
+                    proptest::sample::subsequence(ids, 2 * k)
+                        .prop_map(move |picked| (file.clone(), picked, k))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (target_id, source_id) in picked[..k].iter().zip(picked[k..2 * k].iter()) {
+                let selector = format!(
+                    r#"wb-node[identifier="{target_id}"], wb-subnode[identifier="{target_id}"]"#
+                );
+                document.select(&selector).set_attr("identifier", source_id);
+                output.spans.remove(target_id);
+                output.node_metadata.remove(target_id);
+            }
+            output.html = document.html().to_string();
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_DUPLICATE_IDENTIFIER),
                 "unexpected panic message: {message:?}",
             );
         }
