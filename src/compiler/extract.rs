@@ -317,6 +317,8 @@ fn extract_node_content(
         .copied()
         .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
 
+    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
+
     let title_selection = element.children().first();
     if !title_selection
         .nodes()
@@ -331,8 +333,6 @@ fn extract_node_content(
     title_selection.remove();
 
     let body_html = element.inner_html().to_string();
-
-    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
 
     Some((
         identifier,
