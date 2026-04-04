@@ -19,6 +19,7 @@ const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
 const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
 const WB_NODE_MISSING_TITLE: &str = "wb-node's first child must be a wb-title element";
 const WB_SUBNODE_MISSING_TITLE: &str = "wb-subnode's first child must be a wb-title element";
+const WB_SUBNODE_MISSING_TRANSCLUDE: &str = "wb-subnode is missing the transclude attribute";
 const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
 const BUG_DUPLICATE_IDENTIFIER: &str =
     "bug: duplicate node identifier slipped past collect_node_spans";
@@ -137,7 +138,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
             None => {
                 errors.push(SourceDiagnostic::error(
                     output.entry.span,
-                    "wb-subnode is missing the transclude attribute",
+                    WB_SUBNODE_MISSING_TRANSCLUDE,
                 ));
                 continue;
             }
@@ -1224,6 +1225,42 @@ mod tests {
 
             actual.sort_by(|a, b| a.message.cmp(&b.message));
             expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_attribute(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| {
+                        if is_subnode {
+                            ids.push(node.identifier.clone());
+                        }
+                    });
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 0..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+                .prop_filter("need at least one subnode", |(_, ids)| !ids.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for id in &ids {
+                let selector = format!(r#"wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).remove_attr("transclude");
+            }
+            output.html = document.html().to_string();
+
+            let expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|_| SourceDiagnostic::error(Span::detached(), WB_SUBNODE_MISSING_TRANSCLUDE))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
 
             prop_assert_eq!(actual, expected);
         }
