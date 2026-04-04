@@ -201,21 +201,12 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
         }
     }
 
-    assert!(
-        metadata.is_empty(),
-        "bug: unconsumed node metadata: {:?}",
-        metadata.keys().collect::<Vec<_>>()
-    );
+    assert!(metadata.is_empty(), "bug: unconsumed node metadata");
     assert!(
         transclusion_metadata.is_empty(),
-        "bug: unconsumed transclusion metadata: {:?}",
-        transclusion_metadata.keys().collect::<Vec<_>>()
+        "bug: unconsumed transclusion metadata"
     );
-    assert!(
-        link_metadata.is_empty(),
-        "bug: unconsumed link metadata: {:?}",
-        link_metadata.keys().collect::<Vec<_>>()
-    );
+    assert!(link_metadata.is_empty(), "bug: unconsumed link metadata",);
 
     if errors.is_empty() {
         Ok(nodes)
@@ -240,38 +231,6 @@ fn extract_node_content(
     link_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
     errors: &mut EcoVec<SourceDiagnostic>,
 ) -> Option<(String, NodeOutput)> {
-    let Some(identifier) = element.attr("identifier") else {
-        errors.push(missing_identifier_diagnostic(is_subnode));
-        return None;
-    };
-    let identifier = identifier.to_string();
-    let span = spans
-        .get(&identifier)
-        .copied()
-        .expect("bug: no span found for node identifier");
-
-    let title_selection = element.children().first();
-    if !title_selection
-        .nodes()
-        .first()
-        .is_some_and(|n| n.has_name("wb-title"))
-    {
-        errors.push(SourceDiagnostic::error(
-            span,
-            if is_subnode {
-                "wb-subnode's first child must be a wb-title element"
-            } else {
-                "wb-node's first child must be a wb-title element"
-            },
-        ));
-        return None;
-    }
-    let title = title_selection.inner_html().to_string();
-    let title_text = title_selection.text().to_string();
-    title_selection.remove();
-
-    let body_html = element.inner_html().to_string();
-
     let mut transclusions: Vec<String> = Vec::new();
     let mut node_transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
     for wb_transclude in element.select("wb-transclude").iter() {
@@ -345,6 +304,38 @@ fn extract_node_content(
         }
         links.push(id);
     }
+
+    let Some(identifier) = element.attr("identifier") else {
+        errors.push(missing_identifier_diagnostic(is_subnode));
+        return None;
+    };
+    let identifier = identifier.to_string();
+    let span = spans
+        .get(&identifier)
+        .copied()
+        .expect("bug: no span found for node identifier");
+
+    let title_selection = element.children().first();
+    if !title_selection
+        .nodes()
+        .first()
+        .is_some_and(|n| n.has_name("wb-title"))
+    {
+        errors.push(SourceDiagnostic::error(
+            span,
+            if is_subnode {
+                "wb-subnode's first child must be a wb-title element"
+            } else {
+                "wb-node's first child must be a wb-title element"
+            },
+        ));
+        return None;
+    }
+    let title = title_selection.inner_html().to_string();
+    let title_text = title_selection.text().to_string();
+    title_selection.remove();
+
+    let body_html = element.inner_html().to_string();
 
     let node_metadata = metadata.remove(&identifier).unwrap_or_default();
 
@@ -1028,7 +1019,9 @@ mod tests {
             let mut next_id = 0u32;
             file.walk_mut(|node, _| {
                 node.identifier = format!("n{next_id}");
-                next_id = next_id.checked_add(1).expect("node identifier counter overflow");
+                next_id = next_id
+                    .checked_add(1)
+                    .expect("node identifier counter overflow");
             });
             file
         })
