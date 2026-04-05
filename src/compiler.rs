@@ -526,7 +526,7 @@ struct Backmatter {
     pub outlinks: HashSet<NodeId>,
 }
 
-type Metadata = HashMap<String, Vec<String>>;
+pub(crate) type Metadata = HashMap<String, Vec<String>>;
 
 #[derive(Debug)]
 struct NodeEntry {

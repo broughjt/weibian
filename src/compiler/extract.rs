@@ -10,7 +10,7 @@ use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
-use super::NodeEntry;
+use super::{Metadata, NodeEntry};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 const NO_WB_NODE: &str = "source file produced no wb-node";
@@ -53,7 +53,7 @@ pub fn compile<W: World>(
     let output = result.and_then(|html_document| {
         typst_html::html(&html_document).and_then(|html| {
             let (spans, span_errors) = collect_node_spans(&html_document);
-            let (metadata, transclusion_metadata, link_metadata, meta_errors) =
+            let (node, transclusion, link, meta_errors) =
                 collect_metadata(html_document.introspector().as_ref(), &spans);
             let mut errors = span_errors;
             errors.extend(meta_errors);
@@ -62,9 +62,11 @@ pub fn compile<W: World>(
                 let file_output = FileOutput {
                     html,
                     spans,
-                    node_metadata: metadata,
-                    transclusion_metadata,
-                    link_metadata,
+                    metadata: MetadataMaps {
+                        node,
+                        transclusion,
+                        link,
+                    },
                 };
 
                 extract(file_output)
@@ -81,9 +83,14 @@ pub fn compile<W: World>(
 struct FileOutput {
     pub html: String,
     pub spans: HashMap<String, Span>,
-    pub node_metadata: HashMap<String, HashMap<String, Vec<String>>>,
-    pub transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
-    pub link_metadata: HashMap<u32, HashMap<String, Vec<String>>>,
+    pub metadata: MetadataMaps,
+}
+
+#[derive(Clone, Debug)]
+struct MetadataMaps {
+    node: HashMap<String, Metadata>,
+    transclusion: HashMap<u32, Metadata>,
+    link: HashMap<u32, Metadata>,
 }
 
 /// Parses the HTML in `output` into a map of node IDs to node entries.
@@ -94,45 +101,27 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
     let FileOutput {
         html,
         spans,
-        node_metadata: mut metadata,
-        mut transclusion_metadata,
-        mut link_metadata,
+        mut metadata,
     } = output;
     let mut errors = EcoVec::new();
     let document = Document::from(html);
     let mut nodes = HashMap::with_capacity(spans.len());
-    let max_html_counter = document
+    let mut synthetic_counter: u32 = document
         .select("wb-transclude")
         .iter()
-        .filter_map(|element| {
-            element
-                .attr("counter")
-                .and_then(|counter| counter.parse::<u32>().ok())
-        })
-        .max();
-    let max_metadata_counter = transclusion_metadata.keys().copied().max();
-    let mut synthetic_counter: u32 = [max_html_counter, max_metadata_counter]
-        .into_iter()
-        .flatten()
+        .filter_map(|e| e.attr("counter")?.parse::<u32>().ok())
+        .chain(metadata.transclusion.keys().copied())
         .max()
-        .map_or(0, |counter| {
-            counter
-                .checked_add(1)
-                .expect("transclusion counter overflow")
+        .map_or(0, |n| {
+            n.checked_add(1).expect("transclusion counter overflow")
         });
 
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((identifier, output)) = extract_node_content(
-            &subnode,
-            true,
-            &spans,
-            &mut metadata,
-            &mut transclusion_metadata,
-            &mut link_metadata,
-            &mut errors,
-        ) else {
+        let Some((identifier, output)) =
+            extract_node_content(&subnode, true, &spans, &mut metadata, &mut errors)
+        else {
             continue;
         };
         let transclude = match subnode.attr("transclude").as_deref() {
@@ -158,7 +147,9 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
                 .expect("transclusion counter overflow");
 
             if !output.entry.node_metadata.is_empty() {
-                transclusion_metadata.insert(counter, output.entry.node_metadata.clone());
+                metadata
+                    .transclusion
+                    .insert(counter, output.entry.node_metadata.clone());
             }
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
@@ -179,15 +170,9 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
             errors.push(SourceDiagnostic::error(Span::detached(), NO_WB_NODE));
         }
         Some(wb_node) => {
-            if let Some((identifier, output)) = extract_node_content(
-                &wb_node,
-                false,
-                &spans,
-                &mut metadata,
-                &mut transclusion_metadata,
-                &mut link_metadata,
-                &mut errors,
-            ) {
+            if let Some((identifier, output)) =
+                extract_node_content(&wb_node, false, &spans, &mut metadata, &mut errors)
+            {
                 let displaced = nodes.insert(identifier, output);
                 assert!(
                     displaced.is_none(),
@@ -211,11 +196,11 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
         }
     }
 
-    assert!(metadata.is_empty(), "{BUG_UNCONSUMED_NODE_METADATA}");
-    for counter in transclusion_metadata.keys().copied() {
+    assert!(metadata.node.is_empty(), "{BUG_UNCONSUMED_NODE_METADATA}");
+    for counter in metadata.transclusion.keys().copied() {
         errors.push(orphaned_transclusion_metadata_diagnostic(counter));
     }
-    for counter in link_metadata.keys().copied() {
+    for counter in metadata.link.keys().copied() {
         errors.push(orphaned_link_metadata_diagnostic(counter));
     }
 
@@ -227,23 +212,75 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
 }
 
 /// Extracts the content of a `wb-node` or `wb-subnode` element into a
-/// [`SourceNode`], collecting its transclusions and links and consuming its
-/// metadata from the provided map.
+/// [`NodeOutput`], collecting its transclusions and links and consuming its
+/// metadata from the provided maps.
 ///
 /// Returns `None` (pushing an error) if the identifier attribute is missing or
 /// if the element's first child is not a `wb-title` element.
-#[allow(clippy::too_many_arguments)]
 fn extract_node_content(
     element: &Selection,
     is_subnode: bool,
     spans: &HashMap<String, Span>,
-    metadata: &mut HashMap<String, HashMap<String, Vec<String>>>,
-    transclusion_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
-    link_metadata: &mut HashMap<u32, HashMap<String, Vec<String>>>,
+    metadata: &mut MetadataMaps,
     errors: &mut EcoVec<SourceDiagnostic>,
 ) -> Option<(String, NodeOutput)> {
-    let mut transclusions: Vec<String> = Vec::new();
-    let mut node_transclusion_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
+    let (transclusions, transclusion_metadata) = collect_transclusions(element, metadata, errors);
+    let (links, link_metadata) = collect_links(element, metadata, errors);
+
+    let Some(identifier) = element.attr("identifier") else {
+        errors.push(missing_identifier_diagnostic(is_subnode));
+        return None;
+    };
+    let identifier = identifier.to_string();
+    let span = spans
+        .get(&identifier)
+        .copied()
+        .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
+
+    let node_metadata = metadata.node.remove(&identifier).unwrap_or_default();
+
+    let title_selection = element.children().first();
+    if !title_selection
+        .nodes()
+        .first()
+        .is_some_and(|n| n.has_name("wb-title"))
+    {
+        errors.push(missing_title_diagnostic(is_subnode));
+        return None;
+    }
+    let title = title_selection.inner_html().to_string();
+    let title_text = title_selection.text().to_string();
+    title_selection.remove();
+
+    let body_html = element.inner_html().to_string();
+
+    Some((
+        identifier,
+        NodeOutput {
+            entry: NodeEntry {
+                body_html,
+                title,
+                title_text,
+                span,
+                node_metadata,
+                transclusion_metadata,
+                link_metadata,
+            },
+            transclusions,
+            links,
+        },
+    ))
+}
+
+/// Collects transclusion targets and their metadata from `wb-transclude`
+/// elements within `element`.
+fn collect_transclusions(
+    element: &Selection,
+    metadata: &mut MetadataMaps,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> (Vec<String>, HashMap<u32, Metadata>) {
+    let mut targets = Vec::new();
+    let mut node_metadata = HashMap::new();
     for wb_transclude in element.select("wb-transclude").iter() {
         let id = match wb_transclude.attr("identifier").as_deref() {
             Some(id) => id.to_owned(),
@@ -272,14 +309,23 @@ fn extract_node_content(
             }
         };
 
-        if let Some(metadata) = transclusion_metadata.remove(&counter) {
-            node_transclusion_metadata.insert(counter, metadata);
+        if let Some(meta) = metadata.transclusion.remove(&counter) {
+            node_metadata.insert(counter, meta);
         }
-        transclusions.push(id);
+        targets.push(id);
     }
+    (targets, node_metadata)
+}
 
-    let mut links: Vec<String> = Vec::new();
-    let mut node_link_metadata: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
+/// Collects link targets and their metadata from `<a href="wb:...">` elements
+/// within `element`.
+fn collect_links(
+    element: &Selection,
+    metadata: &mut MetadataMaps,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> (Vec<String>, HashMap<u32, Metadata>) {
+    let mut targets = Vec::new();
+    let mut node_metadata = HashMap::new();
     let links_iter = element.select("a").iter().filter_map(|element| {
         element
             .attr("href")
@@ -304,55 +350,12 @@ fn extract_node_content(
             }
         };
 
-        if let Some(metadata) = link_metadata.remove(&counter) {
-            node_link_metadata.insert(counter, metadata);
+        if let Some(meta) = metadata.link.remove(&counter) {
+            node_metadata.insert(counter, meta);
         }
-        links.push(id);
+        targets.push(id);
     }
-
-    let Some(identifier) = element.attr("identifier") else {
-        errors.push(missing_identifier_diagnostic(is_subnode));
-        return None;
-    };
-    let identifier = identifier.to_string();
-    let span = spans
-        .get(&identifier)
-        .copied()
-        .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
-
-    let node_metadata = metadata.remove(&identifier).unwrap_or_default();
-
-    let title_selection = element.children().first();
-    if !title_selection
-        .nodes()
-        .first()
-        .is_some_and(|n| n.has_name("wb-title"))
-    {
-        errors.push(missing_title_diagnostic(is_subnode));
-        return None;
-    }
-    let title = title_selection.inner_html().to_string();
-    let title_text = title_selection.text().to_string();
-    title_selection.remove();
-
-    let body_html = element.inner_html().to_string();
-
-    Some((
-        identifier,
-        NodeOutput {
-            entry: NodeEntry {
-                body_html,
-                title,
-                title_text,
-                span,
-                node_metadata,
-                transclusion_metadata: node_transclusion_metadata,
-                link_metadata: node_link_metadata,
-            },
-            transclusions,
-            links,
-        },
-    ))
+    (targets, node_metadata)
 }
 
 /// Queries the introspector for `#metadata(...)` elements that carry node or
@@ -373,17 +376,17 @@ fn collect_metadata<I: Introspector>(
     introspector: &I,
     spans: &HashMap<String, Span>,
 ) -> (
-    HashMap<String, HashMap<String, Vec<String>>>,
-    HashMap<u32, HashMap<String, Vec<String>>>,
-    HashMap<u32, HashMap<String, Vec<String>>>,
+    HashMap<String, Metadata>,
+    HashMap<u32, Metadata>,
+    HashMap<u32, Metadata>,
     EcoVec<SourceDiagnostic>,
 ) {
     let selector = MetadataElem::ELEM.select();
     let items = introspector.query(&selector);
     let mut errors = EcoVec::new();
-    let mut node_result: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
-    let mut transclusion_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
-    let mut link_result: HashMap<u32, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut node_result: HashMap<String, Metadata> = HashMap::new();
+    let mut transclusion_result: HashMap<u32, Metadata> = HashMap::new();
+    let mut link_result: HashMap<u32, Metadata> = HashMap::new();
 
     for item in &items {
         let Some((dictionary, wb_metadata)) =
@@ -1039,9 +1042,11 @@ mod tests {
             let file_output = FileOutput {
                 html,
                 spans,
-                node_metadata: file_node_metadata,
-                transclusion_metadata: file_transclusion_metadata,
-                link_metadata: file_link_metadata,
+                metadata: MetadataMaps {
+                    node: file_node_metadata,
+                    transclusion: file_transclusion_metadata,
+                    link: file_link_metadata,
+                },
             };
 
             (file_output, expected)
@@ -1139,9 +1144,11 @@ mod tests {
         let output = FileOutput {
             html: String::new(),
             spans: HashMap::new(),
-            node_metadata: HashMap::new(),
-            transclusion_metadata: HashMap::new(),
-            link_metadata: HashMap::new(),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
         };
         let errors = extract(output).unwrap_err();
         assert!(errors.iter().any(|e| e.message == NO_WB_NODE));
@@ -1159,9 +1166,11 @@ mod tests {
                 ("n0".to_owned(), Span::detached()),
                 ("n1".to_owned(), Span::detached()),
             ]),
-            node_metadata: HashMap::new(),
-            transclusion_metadata: HashMap::new(),
-            link_metadata: HashMap::new(),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
         };
         let errors = extract(output).unwrap_err();
         assert!(errors.iter().any(|e| e.message == MULTIPLE_WB_NODES));
@@ -1219,7 +1228,7 @@ mod tests {
                 let selector = format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
                 document.select(&selector).remove_attr("identifier");
                 output.spans.remove(id);
-                output.node_metadata.remove(id);
+                output.metadata.node.remove(id);
             }
             output.html = document.html().to_string();
 
@@ -1268,9 +1277,9 @@ mod tests {
             let missing_id = output
                 .spans
                 .keys()
-                .find_map(|id| (!output.node_metadata.contains_key(id)).then(|| format!("{id}-bogus")))
+                .find_map(|id| (!output.metadata.node.contains_key(id)).then(|| format!("{id}-bogus")))
                 .unwrap_or_else(|| "bogus".to_owned());
-            output.node_metadata.insert(
+            output.metadata.node.insert(
                 missing_id,
                 HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
             );
@@ -1295,7 +1304,7 @@ mod tests {
         ) {
             let (mut output, _) = file.render();
             let extra_counter = output
-                .transclusion_metadata
+                .metadata.transclusion
                 .keys()
                 .copied()
                 .chain(
@@ -1305,7 +1314,7 @@ mod tests {
                 )
                 .max()
                 .map_or(0, |counter| counter + 1);
-            output.transclusion_metadata.insert(
+            output.metadata.transclusion.insert(
                 extra_counter,
                 HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
             );
@@ -1322,7 +1331,7 @@ mod tests {
         ) {
             let (mut output, _) = file.render();
             let extra_counter = output
-                .link_metadata
+                .metadata.link
                 .keys()
                 .copied()
                 .chain(
@@ -1332,7 +1341,7 @@ mod tests {
                 )
                 .max()
                 .map_or(0, |counter| counter + 1);
-            output.link_metadata.insert(
+            output.metadata.link.insert(
                 extra_counter,
                 HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
             );
@@ -1369,7 +1378,7 @@ mod tests {
                 );
                 document.select(&selector).set_attr("identifier", source_id);
                 output.spans.remove(target_id);
-                output.node_metadata.remove(target_id);
+                output.metadata.node.remove(target_id);
             }
             output.html = document.html().to_string();
 
@@ -1522,7 +1531,7 @@ mod tests {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).remove_attr("identifier");
                 let counter_u32: u32 = counter.parse().unwrap();
-                if output.transclusion_metadata.contains_key(&counter_u32) {
+                if output.metadata.transclusion.contains_key(&counter_u32) {
                     expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
                 }
                 expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_IDENTIFIER));
@@ -1557,7 +1566,7 @@ mod tests {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).remove_attr("counter");
                 let counter_u32: u32 = counter.parse().unwrap();
-                if output.transclusion_metadata.contains_key(&counter_u32) {
+                if output.metadata.transclusion.contains_key(&counter_u32) {
                     expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
                 }
                 expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_COUNTER));
@@ -1600,7 +1609,7 @@ mod tests {
                 let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
                 document.select(&selector).set_attr("counter", value.as_str());
                 let counter_u32: u32 = counter.parse().unwrap();
-                if output.transclusion_metadata.contains_key(&counter_u32) {
+                if output.metadata.transclusion.contains_key(&counter_u32) {
                     expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
                 }
                 expected.push(invalid_transclude_counter_diagnostic(value));
@@ -1635,7 +1644,7 @@ mod tests {
                 let selector = format!(r#"a[data-counter="{counter}"]"#);
                 document.select(&selector).remove_attr("data-counter");
                 let counter_u32: u32 = counter.parse().unwrap();
-                if output.link_metadata.contains_key(&counter_u32) {
+                if output.metadata.link.contains_key(&counter_u32) {
                     expected.push(orphaned_link_metadata_diagnostic(counter_u32));
                 }
                 expected.push(SourceDiagnostic::error(Span::detached(), LINK_MISSING_COUNTER));
@@ -1678,7 +1687,7 @@ mod tests {
                 let selector = format!(r#"a[data-counter="{counter}"]"#);
                 document.select(&selector).set_attr("data-counter", value.as_str());
                 let counter_u32: u32 = counter.parse().unwrap();
-                if output.link_metadata.contains_key(&counter_u32) {
+                if output.metadata.link.contains_key(&counter_u32) {
                     expected.push(orphaned_link_metadata_diagnostic(counter_u32));
                 }
                 expected.push(invalid_link_counter_diagnostic(value));
