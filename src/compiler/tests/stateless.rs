@@ -1,24 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
-use ecow::EcoVec;
 use petgraph::Direction;
 use petgraph::algo::{tarjan_scc, toposort};
 use petgraph::prelude::DiGraphMap;
-use typst::diag::Warned;
 use typst::syntax::FileId;
 
 use crate::compiler::{
-    Backmatter, Compile, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
+    Backmatter, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
 };
 use crate::config::RenderConfig;
 
 use super::super::{
     Renderer, cycle_diagnostics, dangling_link_diagnostic, dangling_transclusion_diagnostic,
-    extract,
 };
-use super::mock::MockFile;
+use super::mock::AbstractState;
+use crate::compiler::extract::NodeOutput;
 
-/// Stateless reference implementation: compiles `mock_nodes` from scratch and
+/// Stateless reference implementation: compiles all files from scratch and
 /// returns the complete rendered filesystem, compile diagnostics, and process
 /// diagnostics.
 ///
@@ -26,7 +24,7 @@ use super::mock::MockFile;
 /// Every call recomputes everything. Used as a test oracle against the
 /// incremental `Compiler`.
 pub(super) fn process_stateless(
-    ordered_files: &[(FileId, MockFile)],
+    state: &AbstractState,
     config: &RenderConfig,
 ) -> anyhow::Result<(
     HashMap<String, String>,
@@ -38,38 +36,26 @@ pub(super) fn process_stateless(
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
-    let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
+    let compile_diagnostics: CompileDiagnostics = HashMap::new();
 
-    for (file_id, mock_file) in ordered_files {
-        let Warned {
-            output: result,
-            warnings,
-        } = mock_file.compile();
+    for (&raw_file_id, file_nodes) in &state.files {
+        let file_id = AbstractState::to_typst_file_id(raw_file_id);
 
-        match result.and_then(|output| {
-            extract(output, &mut interner, |node_id| {
-                nodes.contains_key(&node_id)
-            })
-        }) {
-            Ok(extracted) => {
-                for (id, (entry, ts, ls)) in extracted {
-                    node_to_file.insert(id, *file_id);
-                    for &t in &ts {
-                        transclusions.add_edge(id, t, ());
-                    }
-                    for &l in &ls {
-                        links.add_edge(id, l, ());
-                    }
-                    nodes.insert(id, entry);
-                }
+        for (identifier, mock_node) in file_nodes {
+            let node_output = NodeOutput::from(mock_node.clone());
+            let node_id = interner.intern(identifier.as_str());
 
-                if !warnings.is_empty() {
-                    compile_diagnostics.insert(*file_id, (warnings, EcoVec::new()));
-                }
+            for t in &node_output.transclusions {
+                let t_id = interner.intern(t.as_str());
+                transclusions.add_edge(node_id, t_id, ());
             }
-            Err(errors) => {
-                compile_diagnostics.insert(*file_id, (warnings, errors));
+            for l in &node_output.links {
+                let l_id = interner.intern(l.as_str());
+                links.add_edge(node_id, l_id, ());
             }
+
+            node_to_file.insert(node_id, file_id);
+            nodes.insert(node_id, node_output.entry);
         }
     }
 

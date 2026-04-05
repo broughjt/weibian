@@ -23,7 +23,7 @@ pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Compiler {
     file_to_nodes: HashMap<FileId, Vec<NodeId>>,
     node_to_file: HashMap<NodeId, FileId>,
@@ -485,7 +485,7 @@ impl OutputPlan {
 struct NodeId(u32);
 
 /// Interns node name strings to compact [`NodeId`] handles.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NodeInterner {
     forward: HashMap<String, NodeId>,
     reverse: Vec<String>,
@@ -519,7 +519,7 @@ impl NodeInterner {
 
 /// Cached backmatter sets for a node, used to determine whether backmatter
 /// needs to be re-rendered on the next [`Compiler::process`] call.
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Backmatter {
     pub contexts: HashSet<NodeId>,
     pub backlinks: HashSet<NodeId>,
@@ -528,7 +528,7 @@ struct Backmatter {
 
 pub(crate) type Metadata = HashMap<String, Vec<String>>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct NodeEntry {
     pub body_html: String,
     pub title: String,
