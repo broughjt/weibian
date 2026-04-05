@@ -7,14 +7,8 @@ use typst::syntax::Span;
 use crate::compiler::{Compiler, Metadata};
 use crate::config::RenderConfig;
 
-use super::mock::{
-    AbstractState, MockLink, MockNode, MockTransclusion, Transition,
-};
+use super::mock::{AbstractState, MockLink, MockNode, MockTransclusion, Transition};
 use super::stateless::process_stateless;
-
-// ---------------------------------------------------------------------------
-// Test RenderConfig with minimal templates
-// ---------------------------------------------------------------------------
 
 fn test_render_config() -> RenderConfig {
     let mut env = minijinja::Environment::new();
@@ -33,11 +27,8 @@ fn test_render_config() -> RenderConfig {
         "<a href=\"{{ href }}\">{{ content }}</a>".to_owned(),
     )
     .unwrap();
-    env.add_template_owned(
-        "backmatter.html".to_owned(),
-        "".to_owned(),
-    )
-    .unwrap();
+    env.add_template_owned("backmatter.html".to_owned(), "".to_owned())
+        .unwrap();
 
     RenderConfig {
         root_directory: "/".to_owned(),
@@ -48,12 +39,12 @@ fn test_render_config() -> RenderConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Proptest strategies for generating mock data
-// ---------------------------------------------------------------------------
-
 fn metadata_strategy() -> impl Strategy<Value = Metadata> {
-    proptest::collection::hash_map("[a-z]{1,4}", proptest::collection::vec("[a-z0-9]{1,6}", 0..=3), 0..=3)
+    proptest::collection::hash_map(
+        "[a-z]{1,4}",
+        proptest::collection::vec("[a-z0-9]{1,6}", 0..=3),
+        0..=3,
+    )
 }
 
 fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
@@ -61,10 +52,11 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
     let targets_for_links = targets;
 
     (
-        "[A-Za-z ]{1,12}",                    // title
-        "[a-z ]{0,20}",                       // body
-        metadata_strategy(),                   // node metadata
-        proptest::collection::vec(             // transclusions
+        "[A-Za-z ]{1,12}",   // title
+        "[a-z ]{0,20}",      // body
+        metadata_strategy(), // node metadata
+        proptest::collection::vec(
+            // transclusions
             (
                 proptest::sample::select(targets_for_transclusions),
                 metadata_strategy(),
@@ -72,7 +64,8 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
                 .prop_map(|(target, metadata)| MockTransclusion { target, metadata }),
             0..=3,
         ),
-        proptest::collection::vec(             // links
+        proptest::collection::vec(
+            // links
             (
                 proptest::sample::select(targets_for_links),
                 proptest::option::of("[a-z ]{1,8}"),
@@ -96,10 +89,6 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
         })
         .boxed()
 }
-
-// ---------------------------------------------------------------------------
-// ReferenceStateMachine
-// ---------------------------------------------------------------------------
 
 impl ReferenceStateMachine for AbstractState {
     type State = AbstractState;
@@ -139,11 +128,8 @@ impl ReferenceStateMachine for AbstractState {
                         let targets = targets.clone();
                         proptest::collection::vec(mock_node_strategy(targets), count as usize)
                             .prop_map(move |nodes| {
-                                let map: HashMap<String, MockNode> = node_ids
-                                    .iter()
-                                    .cloned()
-                                    .zip(nodes)
-                                    .collect();
+                                let map: HashMap<String, MockNode> =
+                                    node_ids.iter().cloned().zip(nodes).collect();
                                 Transition::CreateFile {
                                     file_id: next_file_id,
                                     nodes: map,
@@ -320,10 +306,7 @@ impl ReferenceStateMachine for AbstractState {
         if !pairs.is_empty() {
             let pairs_clone = pairs.clone();
             strategies.push(
-                (
-                    proptest::sample::select(pairs_clone),
-                    "[A-Za-z ]{1,12}",
-                )
+                (proptest::sample::select(pairs_clone), "[A-Za-z ]{1,12}")
                     .prop_map(|((file_id, node_id), title)| Transition::UpdateTitle {
                         file_id,
                         node_id,
@@ -337,10 +320,7 @@ impl ReferenceStateMachine for AbstractState {
         if !pairs.is_empty() {
             let pairs_clone = pairs.clone();
             strategies.push(
-                (
-                    proptest::sample::select(pairs_clone),
-                    "[a-z ]{0,20}",
-                )
+                (proptest::sample::select(pairs_clone), "[a-z ]{0,20}")
                     .prop_map(|((file_id, node_id), body)| Transition::UpdateBody {
                         file_id,
                         node_id,
@@ -354,15 +334,14 @@ impl ReferenceStateMachine for AbstractState {
         if !pairs.is_empty() {
             let pairs_clone = pairs;
             strategies.push(
-                (
-                    proptest::sample::select(pairs_clone),
-                    metadata_strategy(),
-                )
-                    .prop_map(|((file_id, node_id), metadata)| Transition::UpdateMetadata {
-                        file_id,
-                        node_id,
-                        metadata,
-                    })
+                (proptest::sample::select(pairs_clone), metadata_strategy())
+                    .prop_map(
+                        |((file_id, node_id), metadata)| Transition::UpdateMetadata {
+                            file_id,
+                            node_id,
+                            metadata,
+                        },
+                    )
                     .boxed(),
             );
         }
@@ -389,26 +368,38 @@ impl ReferenceStateMachine for AbstractState {
         match transition {
             Transition::CreateFile { file_id, .. } => !state.files.contains_key(file_id),
             Transition::RemoveFile { file_id } => state.files.contains_key(file_id),
-            Transition::AddNode { file_id, identifier, .. } => {
-                state.files.contains_key(file_id)
-                    && !state.files[file_id].contains_key(identifier)
+            Transition::AddNode {
+                file_id,
+                identifier,
+                ..
+            } => {
+                state.files.contains_key(file_id) && !state.files[file_id].contains_key(identifier)
             }
-            Transition::RemoveNode { file_id, identifier } => {
-                state
-                    .files
-                    .get(file_id)
-                    .is_some_and(|nodes| nodes.len() >= 2 && nodes.contains_key(identifier))
+            Transition::RemoveNode {
+                file_id,
+                identifier,
+            } => state
+                .files
+                .get(file_id)
+                .is_some_and(|nodes| nodes.len() >= 2 && nodes.contains_key(identifier)),
+            Transition::AddTransclusion {
+                file_id, node_id, ..
             }
-            Transition::AddTransclusion { file_id, node_id, .. }
-            | Transition::AddLink { file_id, node_id, .. }
-            | Transition::UpdateTitle { file_id, node_id, .. }
-            | Transition::UpdateBody { file_id, node_id, .. }
-            | Transition::UpdateMetadata { file_id, node_id, .. } => {
-                state
-                    .files
-                    .get(file_id)
-                    .is_some_and(|nodes| nodes.contains_key(node_id))
+            | Transition::AddLink {
+                file_id, node_id, ..
             }
+            | Transition::UpdateTitle {
+                file_id, node_id, ..
+            }
+            | Transition::UpdateBody {
+                file_id, node_id, ..
+            }
+            | Transition::UpdateMetadata {
+                file_id, node_id, ..
+            } => state
+                .files
+                .get(file_id)
+                .is_some_and(|nodes| nodes.contains_key(node_id)),
             Transition::RemoveTransclusion {
                 file_id,
                 node_id,
@@ -441,7 +432,9 @@ impl StateMachineTest for CompilerStateMachineTest {
     type SystemUnderTest = Compiler;
     type Reference = AbstractState;
 
-    fn init_test(_ref_state: &<Self::Reference as ReferenceStateMachine>::State) -> Self::SystemUnderTest {
+    fn init_test(
+        _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) -> Self::SystemUnderTest {
         Compiler::default()
     }
 
@@ -484,8 +477,7 @@ impl StateMachineTest for CompilerStateMachineTest {
             .expect("incremental process() failed");
 
         let (stateless_output, _stateless_compile_diags, _stateless_process_diags) =
-            process_stateless(ref_state, &config)
-                .expect("stateless process() failed");
+            process_stateless(ref_state, &config).expect("stateless process() failed");
 
         // The key property: rendered HTML output should be identical
         assert_eq!(
