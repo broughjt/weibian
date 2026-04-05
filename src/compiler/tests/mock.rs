@@ -95,7 +95,7 @@ impl From<MockNode> for NodeOutput {
     }
 }
 
-pub(super) fn test_render_config() -> RenderConfig {
+pub fn test_render_config() -> RenderConfig {
     let mut env = minijinja::Environment::new();
     env.add_template_owned(
         "node.html".to_owned(),

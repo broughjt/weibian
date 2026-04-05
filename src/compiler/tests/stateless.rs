@@ -23,7 +23,7 @@ use crate::compiler::extract::NodeOutput;
 /// Has no notion of previous state — no dirty/removed/metadata_dirty sets.
 /// Every call recomputes everything. Used as a test oracle against the
 /// incremental `Compiler`.
-pub(super) fn process_stateless(
+pub fn process_stateless(
     state: &AbstractState,
     config: &RenderConfig,
 ) -> anyhow::Result<(

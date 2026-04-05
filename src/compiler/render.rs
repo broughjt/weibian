@@ -8,7 +8,7 @@ use crate::config::{
 
 use super::{Backmatter, NodeEntry, NodeId, NodeInterner};
 
-pub(super) struct Renderer<'a> {
+pub struct Renderer<'a> {
     nodes: &'a HashMap<NodeId, NodeEntry>,
     interner: &'a NodeInterner,
     config: &'a RenderConfig,
@@ -20,7 +20,7 @@ pub(super) struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
-    pub(super) fn new(
+    pub fn new(
         nodes: &'a HashMap<NodeId, NodeEntry>,
         interner: &'a NodeInterner,
         config: &'a RenderConfig,
@@ -61,7 +61,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub(super) fn render_body(
+    pub fn render_body(
         &self,
         id: NodeId,
         rendered_bodies: &HashMap<NodeId, String>,
@@ -91,11 +91,7 @@ impl<'a> Renderer<'a> {
         Ok(document.select("body").first().inner_html().to_string())
     }
 
-    pub(super) fn render_backmatter(
-        &self,
-        id: NodeId,
-        backmatter: &Backmatter,
-    ) -> anyhow::Result<String> {
+    pub fn render_backmatter(&self, id: NodeId, backmatter: &Backmatter) -> anyhow::Result<String> {
         let node_context = |node_id: NodeId| {
             let name = self.interner.name(node_id);
             let entry = self.nodes.get(&node_id);
@@ -135,7 +131,7 @@ impl<'a> Renderer<'a> {
             .map_err(|e| anyhow::anyhow!("failed to render backmatter template for {name}: {e}"))
     }
 
-    pub(super) fn render_node(
+    pub fn render_node(
         &self,
         name: &str,
         entry: &NodeEntry,
