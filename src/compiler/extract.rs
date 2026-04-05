@@ -684,6 +684,53 @@ mod tests {
             .collect()
     }
 
+    fn check_body_html(node: &MockNode, body_html: &str) -> Result<(), TestCaseError> {
+        let document = Document::from(body_html);
+        for element in &node.body {
+            match element {
+                MockElement::Text(t) => {
+                    prop_assert!(
+                        body_html.contains(t.as_str()),
+                        "text {t:?} not found in body_html: {body_html:?}",
+                    );
+                }
+                MockElement::Link(l) => {
+                    let selector = format!(r#"a[href="wb:{}"]"#, l.target);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "link to {:?} not found in body_html: {body_html:?}",
+                        l.target,
+                    );
+                }
+                MockElement::Transclusion(t) => {
+                    let selector = format!(r#"wb-transclude[identifier="{}"]"#, t.target);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "transclude of {:?} not found in body_html: {body_html:?}",
+                        t.target,
+                    );
+                }
+                MockElement::Subnode(s) if s.transclude => {
+                    let selector = format!(r#"wb-transclude[identifier="{}"]"#, s.node.identifier);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "synthetic transclude for {:?} not found in body_html: {body_html:?}",
+                        s.node.identifier,
+                    );
+                }
+                MockElement::Subnode(s) => {
+                    let selector = format!(r#"wb-subnode[identifier="{}"]"#, s.node.identifier);
+                    prop_assert!(
+                        !document.select(&selector).exists(),
+                        "non-transcluded subnode {:?} found in body_html: {body_html:?}",
+                        s.node.identifier,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     const METADATA_VEC_COUNT_MAX: usize = 10;
     const METADATA_ENTRIES_COUNT_MAX: usize = 16;
     const BODY_ELEMENTS_MAX: usize = 16;
@@ -1122,16 +1169,20 @@ mod tests {
 
     proptest! {
         #[test]
-        fn happy_case(file in mock_file_strategy()) {
+        fn happy_case(mut file in mock_file_strategy()) {
             let (file_output, expected_nodes) = file.render();
             let actual_nodes = extract(file_output).unwrap();
 
             prop_assert_eq!(actual_nodes.len(), expected_nodes.len());
 
+            let mut id_to_node: HashMap<String, MockNode> = HashMap::new();
+            file.walk_mut(|node, _is_subnode| { id_to_node.insert(node.identifier.clone(), node.clone()); });
+
             for (id, expected) in &expected_nodes {
                 let actual = &actual_nodes[id.as_str()];
 
                 prop_assert_eq!(&actual.entry.title, &expected.title);
+                prop_assert_eq!(&actual.entry.title_text, &expected.title);
                 prop_assert_eq!(&actual.entry.node_metadata, &expected.node_metadata);
                 prop_assert_eq!(&actual.transclusions, &expected.transclusions);
                 prop_assert_eq!(&actual.links, &expected.links);
@@ -1145,6 +1196,8 @@ mod tests {
 
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
+
+                check_body_html(&id_to_node[id.as_str()], &actual.entry.body_html)?;
             }
         }
 
