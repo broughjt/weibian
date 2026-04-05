@@ -13,3 +13,6 @@ dist/
 # direnv
 .direnv/
 /.agent-shell/
+
+AGENT.md
+CLAUDE.md
