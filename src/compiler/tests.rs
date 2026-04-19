@@ -1,16 +1,20 @@
 mod mock;
 mod stateless;
 
+use std::num::NonZeroU16;
+
+use proptest::proptest;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+use typst_syntax::FileId;
 
 use crate::compiler::Compiler;
 
 use self::mock::{AbstractState, Transition, test_render_config};
 use self::stateless::process_stateless;
 
-struct CompilerStateMachineTest;
+struct IncrementalMatchesStateless;
 
-impl StateMachineTest for CompilerStateMachineTest {
+impl StateMachineTest for IncrementalMatchesStateless {
     type SystemUnderTest = Compiler;
     type Reference = AbstractState;
 
@@ -29,13 +33,15 @@ impl StateMachineTest for CompilerStateMachineTest {
 
         match &transition {
             Transition::RemoveFile { .. } => {
-                let typst_id = AbstractState::to_typst_file_id(file_id_raw);
-                state.remove(typst_id);
+                // TODO: We thread NonZeroU16 through the ref_state impl
+                state.remove(FileId::from_raw(NonZeroU16::new(file_id_raw).unwrap()));
             }
             _ => {
-                let typst_id = AbstractState::to_typst_file_id(file_id_raw);
                 let compiled = ref_state.compile_file(file_id_raw);
-                state._update(typst_id, compiled);
+                state._update(
+                    FileId::from_raw(NonZeroU16::new(file_id_raw).unwrap()),
+                    compiled,
+                );
             }
         }
 
@@ -46,24 +52,28 @@ impl StateMachineTest for CompilerStateMachineTest {
         state: &Self::SystemUnderTest,
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        let config = test_render_config();
+        // let config = test_render_config();
 
-        let mut compiler_clone: Compiler = state.clone();
-        let incremental_output = compiler_clone
-            .process(&config)
-            .expect("incremental process() failed");
+        // let mut compiler_clone: Compiler = state.clone();
+        // let incremental_output = compiler_clone
+        //     .process(&config)
+        //     .expect("incremental process() failed");
 
-        let (stateless_output, _stateless_compile_diags, _stateless_process_diags) =
-            process_stateless(ref_state, &config).expect("stateless process() failed");
+        // let (stateless_output, _stateless_compile_diags, _stateless_process_diags) =
+        //     process_stateless(ref_state, &config).expect("stateless process() failed");
 
-        assert_eq!(
-            incremental_output.writes, stateless_output,
-            "incremental output differs from stateless reference"
-        );
+        // assert_eq!(
+        //     incremental_output.writes, stateless_output,
+        //     "incremental output differs from stateless reference"
+        // );
+
+        // TODO: Most of that is wrong
+
+        todo!()
     }
 }
 
 prop_state_machine! {
     #[test]
-    fn incremental_matches_stateless(sequential 1..20 => CompilerStateMachineTest);
+    fn incremental_matches_stateless(sequential 1..20 => IncrementalMatchesStateless);
 }

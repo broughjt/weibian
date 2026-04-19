@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::num::NonZeroU16;
 
 use ecow::EcoVec;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use typst::diag::{SourceDiagnostic, Warned};
-use typst::syntax::{FileId, Span};
+use typst::syntax::Span;
 
 use crate::compiler::Metadata;
 use crate::compiler::NodeEntry;
@@ -96,23 +95,22 @@ impl From<MockNode> for NodeOutput {
 }
 
 pub fn test_render_config() -> RenderConfig {
-    let mut env = minijinja::Environment::new();
-    env.add_template_owned(
-        "node.html".to_owned(),
-        "{{ node.body }}{{ node.backmatter }}".to_owned(),
-    )
-    .unwrap();
-    env.add_template_owned(
-        "transclusion.html".to_owned(),
-        "<div class=\"transclusion\">{{ body }}</div>".to_owned(),
-    )
-    .unwrap();
-    env.add_template_owned(
-        "link.html".to_owned(),
-        "<a href=\"{{ href }}\">{{ content }}</a>".to_owned(),
-    )
-    .unwrap();
-    env.add_template_owned("backmatter.html".to_owned(), "".to_owned())
+    // TODO: We need check render.rs to make sure *all* of the information passed gets dumped somehow
+    let mut environment = minijinja::Environment::new();
+    environment
+        .add_template_owned("node.html", "{{ node.body }}{{ node.backmatter }}")
+        .unwrap();
+    environment
+        .add_template_owned(
+            "transclusion.html",
+            "<div class=\"transclusion\">{{ body }}</div>",
+        )
+        .unwrap();
+    environment
+        .add_template_owned("link.html", "<a href=\"{{ href }}\">{{ content }}</a>")
+        .unwrap();
+    environment
+        .add_template_owned("backmatter.html", "{ backmatter }")
         .unwrap();
 
     RenderConfig {
@@ -120,7 +118,7 @@ pub fn test_render_config() -> RenderConfig {
         trailing_slash: false,
         index_node: "index".to_owned(),
         domain: "test.local".to_owned(),
-        environment: env,
+        environment,
     }
 }
 
@@ -130,6 +128,7 @@ fn metadata_strategy() -> impl Strategy<Value = Metadata> {
         proptest::collection::vec("[a-z0-9]{1,6}", 0..=3),
         0..=3,
     )
+    // TODO: Should be configurable lengths
 }
 
 fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
@@ -140,13 +139,16 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
         "[A-Za-z ]{1,12}",
         "[a-z ]{0,20}",
         metadata_strategy(),
+        // TODO: Shouldn't we use a subsequence, not sample? I guess we want the
+        // ability to repeat links/transclusions. Will we get worse coverage
+        // doing this with a repeated sample though?
         proptest::collection::vec(
             (
                 proptest::sample::select(targets_for_transclusions),
                 metadata_strategy(),
             )
                 .prop_map(|(target, metadata)| MockTransclusion { target, metadata }),
-            0..=3,
+            0..=3, // TODO: Should be a configurable value
         ),
         proptest::collection::vec(
             (
@@ -159,13 +161,14 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
                     content,
                     metadata,
                 }),
-            0..=3,
+            0..=3, // TODO: Should be a configurable value
         ),
     )
         .prop_map(|(title, body, metadata, transclusions, links)| MockNode {
             title,
             body,
             span: Span::detached(),
+            // We should generate meaningful spans
             metadata,
             transclusions,
             links,
@@ -175,7 +178,7 @@ fn mock_node_strategy(targets: Vec<String>) -> BoxedStrategy<MockNode> {
 
 #[derive(Debug, Clone)]
 pub struct AbstractState {
-    /// file_id (as u16) → node_identifier → MockNode
+    /// file_id (as u16) \to node_identifier \to MockNode
     pub files: HashMap<u16, HashMap<String, MockNode>>,
     /// Node IDs that intentionally don't exist, for dangling transclusion/link targets
     pub missing_ids: Vec<String>,
@@ -193,10 +196,6 @@ impl AbstractState {
             next_file_id: 1,
             next_node_id: 0,
         }
-    }
-
-    pub fn to_typst_file_id(raw: u16) -> FileId {
-        FileId::from_raw(NonZeroU16::new(raw).expect("file id must be nonzero"))
     }
 
     /// All node identifiers that currently exist across all files.
