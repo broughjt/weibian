@@ -6,6 +6,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::io;
 
+use dom_query::Document;
 use ecow::{EcoVec, eco_format};
 use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
@@ -15,7 +16,10 @@ use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
 
 use self::extract::NodeOutput;
-use self::render::Renderer;
+use self::render::{
+    BackmatterInput, BackmatterNode, BodyInput, JinjaRenderer, LinkInput, NodeInput, Render,
+    ResolvedLink, ResolvedTransclusion, TransclusionInput,
+};
 use crate::config::{BuildConfig, RenderConfig};
 
 pub type CompileDiagnostics = HashMap<FileId, (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>)>;
@@ -400,20 +404,22 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
-        let renderer = Renderer::new(&self.nodes, &self.interner, config);
+        let renderer = JinjaRenderer::new(&self.nodes, &self.interner, config);
 
         for &id in &render_order {
             if body_affected.contains(&id) {
-                let rendered_body = renderer.render_body(id, &self.rendered_bodies)?;
+                let input =
+                    build_body_input(id, &self.nodes, &self.rendered_bodies, &self.interner);
+                let rendered_body = Render::render_body(&renderer, input)?;
                 self.rendered_bodies.insert(id, rendered_body);
             }
             if backmatter_affected.contains(&id) {
-                let rendered_backmatter = renderer.render_backmatter(
-                    id,
-                    self.backmatters
-                        .get(&id)
-                        .expect("bug: renderable node has no backmatter after pass 1"),
-                )?;
+                let backmatter = self
+                    .backmatters
+                    .get(&id)
+                    .expect("bug: renderable node has no backmatter after pass 1");
+                let input = build_backmatter_input(id, &self.nodes, backmatter, &self.interner);
+                let rendered_backmatter = Render::render_backmatter(&renderer, input)?;
                 self.rendered_backmatters.insert(id, rendered_backmatter);
             }
         }
@@ -421,21 +427,17 @@ impl Compiler {
         let writes = render_order
             .iter()
             .map(|&id| -> anyhow::Result<(String, String)> {
-                let name = self.interner.name(id);
-                let entry = &self.nodes[&id];
-                let body = self
-                    .rendered_bodies
-                    .get(&id)
-                    .map(String::as_str)
-                    .expect("bug: renderable node has no rendered_body after pass 2");
-                let backmatter = self
-                    .rendered_backmatters
-                    .get(&id)
-                    .map(String::as_str)
-                    .expect("bug: renderable node has no rendered backmatter after pass 2");
-                let html = renderer.render_node(name, entry, body, backmatter)?;
+                let identifier = self.interner.name(id).to_owned();
+                let input = build_node_input(
+                    id,
+                    &self.nodes,
+                    &self.rendered_bodies,
+                    &self.rendered_backmatters,
+                    &self.interner,
+                );
+                let html = Render::render_node(&renderer, input)?;
 
-                Ok((name.to_owned(), html))
+                Ok((identifier, html))
             })
             .collect::<anyhow::Result<_>>()?;
         let deletes = removed
@@ -625,4 +627,162 @@ fn should_backmatter_render(
                 .chain(new.outlinks.iter())
                 .any(|id| dirty.contains(id) || metadata_dirty.contains(id) || removed.contains(id))
     })
+}
+
+fn build_body_input<'a>(
+    id: NodeId,
+    nodes: &'a HashMap<NodeId, NodeEntry>,
+    rendered_bodies: &'a HashMap<NodeId, String>,
+    interner: &'a NodeInterner,
+) -> BodyInput<'a, String> {
+    let entry = &nodes[&id];
+    let document = Document::from(entry.body_html.as_str());
+
+    let mut links: HashMap<u32, LinkInput<'a>> = HashMap::new();
+    for element in document.select("a").iter() {
+        let Some(href) = element.attr("href") else {
+            continue;
+        };
+        let Some(identifier_str) = href.strip_prefix("wb:") else {
+            continue;
+        };
+
+        let counter: u32 = element
+            .attr("data-counter")
+            .expect("bug: link missing data-counter")
+            .parse()
+            .expect("bug: link has invalid data-counter");
+
+        let target_id = interner
+            .get(identifier_str)
+            .expect("bug: link identifier not interned");
+        let identifier = interner.name(target_id);
+
+        let metadata = entry.link_metadata.get(&counter);
+        let resolution = nodes.get(&target_id).map(|target| ResolvedLink {
+            title: target.title.as_str(),
+            title_text: target.title_text.as_str(),
+            metadata: &target.node_metadata,
+        });
+
+        links.insert(
+            counter,
+            LinkInput {
+                identifier,
+                metadata,
+                resolution,
+            },
+        );
+    }
+
+    let mut transclusions: HashMap<u32, TransclusionInput<'a, String>> = HashMap::new();
+    for element in document.select("wb-transclude").iter() {
+        let identifier_attr = element
+            .attr("identifier")
+            .expect("bug: wb-transclude missing identifier");
+        let counter: u32 = element
+            .attr("counter")
+            .expect("bug: wb-transclude missing counter")
+            .parse()
+            .expect("bug: wb-transclude has invalid counter");
+
+        let target_id = interner
+            .get(identifier_attr.as_ref())
+            .expect("bug: transclusion identifier not interned");
+        let identifier = interner.name(target_id);
+
+        let metadata = entry.transclusion_metadata.get(&counter);
+        let resolution = nodes.get(&target_id).map(|target| {
+            let body = rendered_bodies
+                .get(&target_id)
+                .expect("bug: transclusion target has no rendered_body");
+            ResolvedTransclusion {
+                identifier,
+                title: target.title.as_str(),
+                title_text: target.title_text.as_str(),
+                metadata: &target.node_metadata,
+                body,
+            }
+        });
+
+        transclusions.insert(
+            counter,
+            TransclusionInput {
+                metadata,
+                resolution,
+            },
+        );
+    }
+
+    BodyInput {
+        body_html: entry.body_html.as_str(),
+        links,
+        transclusions,
+    }
+}
+
+fn build_backmatter_input<'a>(
+    id: NodeId,
+    nodes: &'a HashMap<NodeId, NodeEntry>,
+    backmatter: &'a Backmatter,
+    interner: &'a NodeInterner,
+) -> BackmatterInput<'a> {
+    let entry = &nodes[&id];
+    let node = (
+        interner.name(id).to_owned(),
+        BackmatterNode {
+            title: entry.title.as_str(),
+            title_text: entry.title_text.as_str(),
+            metadata: &entry.node_metadata,
+        },
+    );
+
+    let build_list = |ids: &HashSet<NodeId>| -> Vec<(String, Option<BackmatterNode<'a>>)> {
+        let mut sorted: Vec<NodeId> = ids.iter().copied().collect();
+        sorted.sort_by_key(|&nid| interner.name(nid));
+        sorted
+            .into_iter()
+            .map(|nid| {
+                let name = interner.name(nid).to_owned();
+                let node = nodes.get(&nid).map(|target| BackmatterNode {
+                    title: target.title.as_str(),
+                    title_text: target.title_text.as_str(),
+                    metadata: &target.node_metadata,
+                });
+                (name, node)
+            })
+            .collect()
+    };
+
+    BackmatterInput {
+        node,
+        contexts: build_list(&backmatter.contexts),
+        backlinks: build_list(&backmatter.backlinks),
+        outlinks: build_list(&backmatter.outlinks),
+    }
+}
+
+fn build_node_input<'a>(
+    id: NodeId,
+    nodes: &'a HashMap<NodeId, NodeEntry>,
+    rendered_bodies: &'a HashMap<NodeId, String>,
+    rendered_backmatters: &'a HashMap<NodeId, String>,
+    interner: &'a NodeInterner,
+) -> NodeInput<'a, String, String> {
+    let entry = &nodes[&id];
+    let body = rendered_bodies
+        .get(&id)
+        .expect("bug: renderable node has no rendered_body after pass 2");
+    let backmatter = rendered_backmatters
+        .get(&id)
+        .expect("bug: renderable node has no rendered backmatter after pass 2");
+
+    NodeInput {
+        identifier: interner.name(id).to_owned(),
+        title: entry.title.as_str(),
+        title_text: entry.title_text.as_str(),
+        metadata: &entry.node_metadata,
+        body,
+        backmatter,
+    }
 }

@@ -8,7 +8,7 @@ use crate::config::{
 
 use super::{Backmatter, Metadata, NodeEntry, NodeId, NodeInterner};
 
-pub struct Renderer<'a> {
+pub struct JinjaRenderer<'a> {
     nodes: &'a HashMap<NodeId, NodeEntry>,
     interner: &'a NodeInterner,
     config: &'a RenderConfig,
@@ -19,7 +19,7 @@ pub struct Renderer<'a> {
     node_template: minijinja::Template<'a, 'a>,
 }
 
-impl<'a> Renderer<'a> {
+impl<'a> JinjaRenderer<'a> {
     pub fn new(
         nodes: &'a HashMap<NodeId, NodeEntry>,
         interner: &'a NodeInterner,
@@ -271,18 +271,20 @@ pub trait Render {
     type Backmatter;
     type Node;
 
-    fn render_body(&self, input: BodyInput<Self::Body>) -> anyhow::Result<Self::Body>;
-    fn render_backmatter(&self, input: BackmatterInput) -> anyhow::Result<Self::Backmatter>;
-
+    fn render_body(&self, input: BodyInput<'_, Self::Body>) -> anyhow::Result<Self::Body>;
+    fn render_backmatter(
+        &self,
+        input: BackmatterInput<'_>,
+    ) -> anyhow::Result<Self::Backmatter>;
     fn render_node(
         &self,
-        input: NodeInput<Self::Body, Self::Backmatter>,
+        input: NodeInput<'_, Self::Body, Self::Backmatter>,
     ) -> anyhow::Result<Self::Node>;
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BodyInput<'a, Body> {
-    pub body: &'a Body,
+    pub body_html: &'a str,
     pub links: HashMap<u32, LinkInput<'a>>,
     pub transclusions: HashMap<u32, TransclusionInput<'a, Body>>,
 }
@@ -290,7 +292,7 @@ pub struct BodyInput<'a, Body> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LinkInput<'a> {
     pub identifier: &'a str,
-    pub metadata: &'a Metadata,
+    pub metadata: Option<&'a Metadata>,
     pub resolution: Option<ResolvedLink<'a>>,
 }
 
@@ -303,7 +305,7 @@ pub struct ResolvedLink<'a> {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TransclusionInput<'a, Body> {
-    pub metadata: &'a Metadata,
+    pub metadata: Option<&'a Metadata>,
     pub resolution: Option<ResolvedTransclusion<'a, Body>>,
 }
 
@@ -318,17 +320,17 @@ pub struct ResolvedTransclusion<'a, Body> {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BackmatterInput<'a> {
-    pub node: (String, &'a BackmatterNode),
-    pub contexts: Vec<(String, Option<&'a BackmatterNode>)>,
-    pub backlinks: Vec<(String, Option<&'a BackmatterNode>)>,
-    pub outlinks: Vec<(String, Option<&'a BackmatterNode>)>,
+    pub node: (String, BackmatterNode<'a>),
+    pub contexts: Vec<(String, Option<BackmatterNode<'a>>)>,
+    pub backlinks: Vec<(String, Option<BackmatterNode<'a>>)>,
+    pub outlinks: Vec<(String, Option<BackmatterNode<'a>>)>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct BackmatterNode {
-    pub title: String,
-    pub title_text: String,
-    pub metadata: Metadata,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BackmatterNode<'a> {
+    pub title: &'a str,
+    pub title_text: &'a str,
+    pub metadata: &'a Metadata,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -339,6 +341,30 @@ pub struct NodeInput<'a, Body, Backmatter> {
     pub metadata: &'a Metadata,
     pub body: &'a Body,
     pub backmatter: &'a Backmatter,
+}
+
+impl Render for JinjaRenderer<'_> {
+    type Body = String;
+    type Backmatter = String;
+    type Node = String;
+
+    fn render_body(&self, input: BodyInput<'_, String>) -> anyhow::Result<String> {
+        let _ = input;
+        todo!()
+    }
+
+    fn render_backmatter(&self, input: BackmatterInput<'_>) -> anyhow::Result<String> {
+        let _ = input;
+        todo!()
+    }
+
+    fn render_node(
+        &self,
+        input: NodeInput<'_, String, String>,
+    ) -> anyhow::Result<String> {
+        let _ = input;
+        todo!()
+    }
 }
 
 // pub struct IdentityRenderer;
