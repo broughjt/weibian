@@ -6,7 +6,7 @@ use crate::config::{
     BACKMATTER_TEMPLATE, LINK_TEMPLATE, NODE_TEMPLATE, RenderConfig, TRANSCLUSION_TEMPLATE,
 };
 
-use super::{Backmatter, NodeEntry, NodeId, NodeInterner};
+use super::{Backmatter, Metadata, NodeEntry, NodeId, NodeInterner};
 
 pub struct Renderer<'a> {
     nodes: &'a HashMap<NodeId, NodeEntry>,
@@ -265,3 +265,108 @@ impl<'a> Renderer<'a> {
         })
     }
 }
+
+pub trait Render {
+    type Body;
+    type Backmatter;
+    type Node;
+
+    fn render_body(&self, input: BodyInput<Self::Body>) -> anyhow::Result<Self::Body>;
+    fn render_backmatter(&self, input: BackmatterInput) -> anyhow::Result<Self::Backmatter>;
+
+    fn render_node(
+        &self,
+        input: NodeInput<Self::Body, Self::Backmatter>,
+    ) -> anyhow::Result<Self::Node>;
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BodyInput<'a, Body> {
+    pub body: &'a Body,
+    pub links: HashMap<u32, LinkInput<'a>>,
+    pub transclusions: HashMap<u32, TransclusionInput<'a, Body>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LinkInput<'a> {
+    pub identifier: &'a str,
+    pub metadata: &'a Metadata,
+    pub resolution: Option<ResolvedLink<'a>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResolvedLink<'a> {
+    pub title: &'a str,
+    pub title_text: &'a str,
+    pub metadata: &'a Metadata,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TransclusionInput<'a, Body> {
+    pub metadata: &'a Metadata,
+    pub resolution: Option<ResolvedTransclusion<'a, Body>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResolvedTransclusion<'a, Body> {
+    pub identifier: &'a str,
+    pub title: &'a str,
+    pub title_text: &'a str,
+    pub metadata: &'a Metadata,
+    pub body: &'a Body,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BackmatterInput<'a> {
+    pub node: (String, &'a BackmatterNode),
+    pub contexts: Vec<(String, Option<&'a BackmatterNode>)>,
+    pub backlinks: Vec<(String, Option<&'a BackmatterNode>)>,
+    pub outlinks: Vec<(String, Option<&'a BackmatterNode>)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BackmatterNode {
+    pub title: String,
+    pub title_text: String,
+    pub metadata: Metadata,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NodeInput<'a, Body, Backmatter> {
+    pub identifier: String,
+    pub title: &'a str,
+    pub title_text: &'a str,
+    pub metadata: &'a Metadata,
+    pub body: &'a Body,
+    pub backmatter: &'a Backmatter,
+}
+
+// pub struct IdentityRenderer;
+
+// /// Box breaks the `BodyInput<IdentityBody>` type recursion.
+// #[derive(Clone, PartialEq, Eq, Debug)]
+// pub struct IdentityBody(pub Box<BodyInput<IdentityBody>>);
+
+// pub type IdentityBackmatter = BackmatterInput;
+// pub type IdentityNode = NodeInput<IdentityBody, IdentityBackmatter>;
+
+// impl Render for IdentityRenderer {
+//     type Body = IdentityBody;
+//     type Backmatter = IdentityBackmatter;
+//     type Node = IdentityNode;
+
+//     fn render_body(&self, input: BodyInput<IdentityBody>) -> anyhow::Result<IdentityBody> {
+//         Ok(IdentityBody(Box::new(input)))
+//     }
+
+//     fn render_backmatter(&self, input: BackmatterInput) -> anyhow::Result<IdentityBackmatter> {
+//         Ok(input)
+//     }
+
+//     fn render_node(
+//         &self,
+//         input: NodeInput<IdentityBody, IdentityBackmatter>,
+//     ) -> anyhow::Result<IdentityNode> {
+//         Ok(input)
+//     }
+// }
