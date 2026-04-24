@@ -635,84 +635,87 @@ fn build_body_input<'a>(
     rendered_bodies: &'a HashMap<NodeId, String>,
     interner: &'a NodeInterner,
 ) -> BodyInput<'a, String> {
+    // TODO: Perform the dangling link and transclusion checks here?
+
     let entry = &nodes[&id];
     let document = Document::from(entry.body_html.as_str());
 
-    let mut links: HashMap<u32, LinkInput<'a>> = HashMap::new();
-    for element in document.select("a").iter() {
-        let Some(href) = element.attr("href") else {
-            continue;
-        };
-        let Some(identifier_str) = href.strip_prefix("wb:") else {
-            continue;
-        };
+    let links: HashMap<u32, LinkInput<'a>> = document
+        .select("a")
+        .iter()
+        .filter_map(|element| {
+            let href = element.attr("href")?;
+            let identifier_str = href.strip_prefix("wb:")?;
+            let counter: u32 = element
+                .attr("data-counter")
+                .expect("bug: link missing data-counter")
+                .parse()
+                .expect("bug: link has invalid data-counter");
 
-        let counter: u32 = element
-            .attr("data-counter")
-            .expect("bug: link missing data-counter")
-            .parse()
-            .expect("bug: link has invalid data-counter");
+            let target_id = interner
+                .get(identifier_str)
+                .expect("bug: link identifier not interned");
+            let identifier = interner.name(target_id);
 
-        let target_id = interner
-            .get(identifier_str)
-            .expect("bug: link identifier not interned");
-        let identifier = interner.name(target_id);
-
-        let metadata = entry.link_metadata.get(&counter);
-        let resolution = nodes.get(&target_id).map(|target| ResolvedLink {
-            title: target.title.as_str(),
-            title_text: target.title_text.as_str(),
-            metadata: &target.node_metadata,
-        });
-
-        links.insert(
-            counter,
-            LinkInput {
-                identifier,
-                metadata,
-                resolution,
-            },
-        );
-    }
-
-    let mut transclusions: HashMap<u32, TransclusionInput<'a, String>> = HashMap::new();
-    for element in document.select("wb-transclude").iter() {
-        let identifier_attr = element
-            .attr("identifier")
-            .expect("bug: wb-transclude missing identifier");
-        let counter: u32 = element
-            .attr("counter")
-            .expect("bug: wb-transclude missing counter")
-            .parse()
-            .expect("bug: wb-transclude has invalid counter");
-
-        let target_id = interner
-            .get(identifier_attr.as_ref())
-            .expect("bug: transclusion identifier not interned");
-        let identifier = interner.name(target_id);
-
-        let metadata = entry.transclusion_metadata.get(&counter);
-        let resolution = nodes.get(&target_id).map(|target| {
-            let body = rendered_bodies
-                .get(&target_id)
-                .expect("bug: transclusion target has no rendered_body");
-            ResolvedTransclusion {
-                identifier,
+            let metadata = entry.link_metadata.get(&counter);
+            let resolution = nodes.get(&target_id).map(|target| ResolvedLink {
                 title: target.title.as_str(),
                 title_text: target.title_text.as_str(),
                 metadata: &target.node_metadata,
-                body,
-            }
-        });
+            });
 
-        transclusions.insert(
-            counter,
-            TransclusionInput {
-                metadata,
-                resolution,
-            },
-        );
-    }
+            Some((
+                counter,
+                LinkInput {
+                    identifier,
+                    metadata,
+                    resolution,
+                },
+            ))
+        })
+        .collect();
+
+    let transclusions: HashMap<u32, TransclusionInput<'a, String>> = document
+        .select("wb-transclude")
+        .iter()
+        .map(|element| {
+            let identifier_attr = element
+                .attr("identifier")
+                .expect("bug: wb-transclude missing identifier");
+            let counter: u32 = element
+                .attr("counter")
+                .expect("bug: wb-transclude missing counter")
+                .parse()
+                .expect("bug: wb-transclude has invalid counter");
+
+            let target_id = interner
+                .get(identifier_attr.as_ref())
+                .expect("bug: transclusion identifier not interned");
+            let identifier = interner.name(target_id);
+
+            let metadata = entry.transclusion_metadata.get(&counter);
+            let resolution = nodes.get(&target_id).map(|target| {
+                let body = rendered_bodies
+                    .get(&target_id)
+                    .expect("bug: transclusion target has no rendered_body");
+                ResolvedTransclusion {
+                    identifier,
+                    title: target.title.as_str(),
+                    title_text: target.title_text.as_str(),
+                    metadata: &target.node_metadata,
+                    body,
+                }
+            });
+
+            (
+                counter,
+                TransclusionInput {
+                    metadata,
+                    resolution,
+                },
+            )
+        })
+        .collect();
 
     BodyInput {
         body_html: entry.body_html.as_str(),
@@ -737,12 +740,10 @@ fn build_backmatter_input<'a>(
         },
     );
 
-    let build_list = |ids: &HashSet<NodeId>| -> Vec<(String, Option<BackmatterNode<'a>>)> {
-        let mut sorted: Vec<NodeId> = ids.iter().copied().collect();
-        sorted.sort_by_key(|&nid| interner.name(nid));
-        sorted
-            .into_iter()
-            .map(|nid| {
+    let backmatter_set = |ids: &HashSet<NodeId>| -> Vec<(String, Option<BackmatterNode<'a>>)> {
+        let mut items: Vec<(String, Option<BackmatterNode<'a>>)> = ids
+            .iter()
+            .map(|&nid| {
                 let name = interner.name(nid).to_owned();
                 let node = nodes.get(&nid).map(|target| BackmatterNode {
                     title: target.title.as_str(),
@@ -751,14 +752,17 @@ fn build_backmatter_input<'a>(
                 });
                 (name, node)
             })
-            .collect()
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+
+        items
     };
 
     BackmatterInput {
         node,
-        contexts: build_list(&backmatter.contexts),
-        backlinks: build_list(&backmatter.backlinks),
-        outlinks: build_list(&backmatter.outlinks),
+        contexts: backmatter_set(&backmatter.contexts),
+        backlinks: backmatter_set(&backmatter.backlinks),
+        outlinks: backmatter_set(&backmatter.outlinks),
     }
 }
 
