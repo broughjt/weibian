@@ -404,13 +404,14 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
-        let renderer = JinjaRenderer::new(&self.nodes, &self.interner, config);
+        let renderer = JinjaRenderer::new(config);
 
         for &id in &render_order {
             if body_affected.contains(&id) {
                 let input =
                     build_body_input(id, &self.nodes, &self.rendered_bodies, &self.interner);
                 let rendered_body = Render::render_body(&renderer, input)?;
+
                 self.rendered_bodies.insert(id, rendered_body);
             }
             if backmatter_affected.contains(&id) {
@@ -420,6 +421,7 @@ impl Compiler {
                     .expect("bug: renderable node has no backmatter after pass 1");
                 let input = build_backmatter_input(id, &self.nodes, backmatter, &self.interner);
                 let rendered_backmatter = Render::render_backmatter(&renderer, input)?;
+
                 self.rendered_backmatters.insert(id, rendered_backmatter);
             }
         }
