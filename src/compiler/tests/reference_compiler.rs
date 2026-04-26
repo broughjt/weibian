@@ -1,7 +1,11 @@
-use std::{collections::HashMap, fmt::Write, num::NonZeroU16};
+use std::{borrow::Cow, collections::HashMap, fmt::Write, num::NonZeroU16};
 
 use ecow::EcoVec;
-use proptest::prelude::BoxedStrategy;
+use proptest::{
+    prelude::{BoxedStrategy, Strategy},
+    sample::select,
+    strategy::Union,
+};
 use proptest_state_machine::ReferenceStateMachine;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst_syntax::Span;
@@ -14,15 +18,38 @@ impl ReferenceStateMachine for ReferenceCompiler {
     type State = State;
     type Transition = Transition;
 
-    fn init_state() -> BoxedStrategy<Self::State> {
+    fn init_state() -> BoxedStrategy<State> {
         todo!()
     }
 
-    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-        todo!()
+    fn transitions(state: &State) -> BoxedStrategy<Transition> {
+        const CREATE_FILE_WEIGHT: u32 = 2;
+        const REPLACE_FILE_WEIGHT: u32 = 1;
+        const REMOVE_FILE_WEIGHT: u32 = 1;
+
+        let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
+
+        let queries = state.queries();
+
+        strategies.push((
+            CREATE_FILE_WEIGHT,
+            state
+                .create_file_strategy(&queries)
+                .prop_map(Transition::CreateFile)
+                .boxed(),
+        ));
+
+        if let Some(replace_file) = state.replace_file_strategy(&queries) {
+            strategies.push((
+                REPLACE_FILE_WEIGHT,
+                replace_file.prop_map(Transition::ReplaceFile).boxed(),
+            ));
+        }
+
+        Union::new_weighted(strategies).boxed()
     }
 
-    fn apply(state: Self::State, transition: &Self::Transition) -> Self::State {
+    fn apply(state: State, transition: &Transition) -> State {
         todo!()
     }
 }
@@ -122,7 +149,7 @@ pub struct MockFileNode {
 
 #[derive(Clone, Debug, Default)]
 pub struct MockFile {
-    pub nodes: HashMap<MockNodeHandle, MockFileNode>,
+    pub nodes: HashMap<MockNodeId, MockFileNode>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -130,6 +157,205 @@ pub struct MockFile {
 #[derive(Clone, Debug)]
 pub struct State {
     pub files: HashMap<NonZeroU16, MockFile>,
+}
+
+impl State {
+    fn queries(&self) -> Queries {
+        let new_file_id = self
+            .files
+            .keys()
+            .max()
+            .map_or(NonZeroU16::new(1), |k| k.checked_add(1))
+            .unwrap();
+        let existing_file_ids: Cow<'static, [NonZeroU16]> = self.files.keys().copied().collect();
+
+        Queries {
+            new_file_id,
+            existing_file_ids,
+        }
+    }
+
+    fn create_file_strategy(&self, queries: &Queries) -> impl Strategy<Value = CreateFile> + use<> {
+        let file_id = queries.new_file_id;
+
+        mock_file_strategy().prop_map(move |file| CreateFile { file_id, file })
+    }
+
+    fn replace_file_strategy(
+        &self,
+        queries: &Queries,
+    ) -> Option<impl Strategy<Value = ReplaceFile> + use<>> {
+        if !queries.existing_file_ids.is_empty() {
+            Some(
+                (
+                    select(queries.existing_file_ids.clone()),
+                    mock_file_strategy(),
+                )
+                    .prop_map(move |(file_id, file)| ReplaceFile { file_id, file }),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Transition {
+    CreateFile(CreateFile),
+    ReplaceFile(ReplaceFile),
+    RemoveFile(RemoveFile),
+    AddNode(AddNode),
+    RemoveNode(RemoveNode),
+    AddTransclusion(AddTransclusion),
+    RemoveTransclusion(RemoveTransclusion),
+    AddLink(AddLink),
+    RemoveLink(RemoveLink),
+    UpdateTitle(UpdateTitle),
+    UpdateBody(UpdateBody),
+    EditMetadata(EditMetadata),
+    UpdateLinkTarget(UpdateLinkTarget),
+    UpdateLinkContent(UpdateLinkContent),
+    UpdateTransclusionTarget(UpdateTransclusionTarget),
+    AddCompileError(AddCompileError),
+    RemoveCompileError(RemoveCompileError),
+    AddCompileWarning(AddCompileWarning),
+    RemoveCompileWarning(RemoveCompileWarning),
+    RenameNode(RenameNode),
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateFile {
+    pub file_id: NonZeroU16,
+    pub file: MockFile,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplaceFile {
+    pub file_id: NonZeroU16,
+    pub file: MockFile,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveFile {
+    pub file_id: NonZeroU16,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddNode {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub node: MockFileNode,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveNode {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddTransclusion {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub transclusion: MockTransclusion,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveTransclusion {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub index: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddLink {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub link: MockLink,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveLink {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub index: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateTitle {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub title: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateBody {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditMetadata {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub target: MetadataTarget,
+    pub operation: MetadataOperation,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLinkTarget {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub link_index: u32,
+    pub new_target: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLinkContent {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub link_index: u32,
+    pub new_content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateTransclusionTarget {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub transclusion_index: u32,
+    pub new_target: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddCompileError {
+    pub file_id: NonZeroU16,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveCompileError {
+    pub file_id: NonZeroU16,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddCompileWarning {
+    pub file_id: NonZeroU16,
+    pub warning: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveCompileWarning {
+    pub file_id: NonZeroU16,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenameNode {
+    pub file_id: NonZeroU16,
+    pub node_id: MockNodeId,
+    pub new_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -165,101 +391,11 @@ pub enum MetadataOperation {
     Clear,
 }
 
-#[derive(Debug, Clone)]
-pub enum Transition {
-    CreateFile {
-        file_id: u16,
-        file: MockFile,
-    },
-    ReplaceFile {
-        file_id: u16,
-        file: MockFile,
-    },
-    RemoveFile {
-        file_id: u16,
-    },
-    AddNode {
-        file_id: u16,
-        node_id: MockNodeId,
-        node: MockFileNode,
-    },
-    RemoveNode {
-        file_id: u16,
-        node_id: MockNodeId,
-    },
-    AddTransclusion {
-        file_id: u16,
-        node_id: MockNodeId,
-        transclusion: MockTransclusion,
-    },
-    RemoveTransclusion {
-        file_id: u16,
-        node_id: MockNodeId,
-        index: u32,
-    },
-    AddLink {
-        file_id: u16,
-        node_id: MockNodeId,
-        link: MockLink,
-    },
-    RemoveLink {
-        file_id: u16,
-        node_id: MockNodeId,
-        index: u32,
-    },
-    UpdateTitle {
-        file_id: u16,
-        node_id: MockNodeId,
-        title: String,
-    },
-    UpdateBody {
-        file_id: u16,
-        node_id: MockNodeId,
-        body: String,
-    },
-    EditMetadata {
-        file_id: u16,
-        node_id: MockNodeId,
-        target: MetadataTarget,
-        operation: MetadataOperation,
-    },
-    UpdateLinkTarget {
-        file_id: u16,
-        node_id: MockNodeId,
-        link_index: u32,
-        new_target: String,
-    },
-    UpdateLinkContent {
-        file_id: u16,
-        node_id: MockNodeId,
-        link_index: u32,
-        new_content: Option<String>,
-    },
-    UpdateTransclusionTarget {
-        file_id: u16,
-        node_id: MockNodeId,
-        transclusion_index: u32,
-        new_target: String,
-    },
-    AddCompileError {
-        file_id: u16,
-        error: String,
-    },
-    RemoveCompileError {
-        file_id: u16,
-        index: usize,
-    },
-    AddCompileWarning {
-        file_id: u16,
-        warning: String,
-    },
-    RemoveCompileWarning {
-        file_id: u16,
-        index: usize,
-    },
-    RenameNode {
-        file_id: u16,
-        node_id: MockNodeId,
-        new_id: String,
-    },
+struct Queries {
+    new_file_id: NonZeroU16,
+    existing_file_ids: Cow<'static, [NonZeroU16]>,
+}
+
+fn mock_file_strategy() -> BoxedStrategy<MockFile> {
+    todo!()
 }
