@@ -121,7 +121,11 @@ pub struct State {
 pub enum Transition {
     CreateFile {
         file_id: u16,
-        nodes: HashMap<String, MockNode>,
+        nodes: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
+    },
+    ReplaceFile {
+        file_id: u16,
+        nodes: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
     },
     RemoveFile {
         file_id: u16,
