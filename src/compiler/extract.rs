@@ -28,7 +28,7 @@ const BUG_UNCONSUMED_NODE_METADATA: &str = "bug: unconsumed node metadata";
 const BUG_DUPLICATE_IDENTIFIER: &str =
     "bug: duplicate node identifier slipped past collect_node_spans";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NodeOutput {
     pub entry: NodeEntry,
     pub transclusions: Vec<String>,

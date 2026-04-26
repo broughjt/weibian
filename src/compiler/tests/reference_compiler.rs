@@ -1,23 +1,24 @@
 use std::{collections::HashMap, fmt::Write, num::NonZeroU16};
 
+use ecow::EcoVec;
+use proptest::prelude::BoxedStrategy;
 use proptest_state_machine::ReferenceStateMachine;
+use typst::diag::{SourceDiagnostic, Warned};
 use typst_syntax::Span;
 
 use crate::compiler::{Metadata, NodeEntry, extract::NodeOutput};
 
-pub struct ReferenceCompiler {
-    pub files: HashMap<NonZeroU16, HashMap<String, MockNode>>,
-}
+pub struct ReferenceCompiler;
 
 impl ReferenceStateMachine for ReferenceCompiler {
-    type State = ();
-    type Transition = ();
+    type State = State;
+    type Transition = Transition;
 
-    fn init_state() -> proptest::prelude::BoxedStrategy<Self::State> {
+    fn init_state() -> BoxedStrategy<Self::State> {
         todo!()
     }
 
-    fn transitions(state: &Self::State) -> proptest::prelude::BoxedStrategy<Self::Transition> {
+    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
         todo!()
     }
 
@@ -25,6 +26,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
         todo!()
     }
 }
+
+pub type MockResult = Result<MockNode, EcoVec<SourceDiagnostic>>;
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
@@ -106,4 +109,65 @@ impl From<MockNode> for NodeOutput {
             links,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct State {
+    pub files:
+        HashMap<NonZeroU16, Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Transition {
+    CreateFile {
+        file_id: u16,
+        nodes: HashMap<String, MockNode>,
+    },
+    RemoveFile {
+        file_id: u16,
+    },
+    AddNode {
+        file_id: u16,
+        identifier: String,
+        node: MockNode,
+    },
+    RemoveNode {
+        file_id: u16,
+        identifier: String,
+    },
+    AddTransclusion {
+        file_id: u16,
+        node_id: String,
+        transclusion: MockTransclusion,
+    },
+    RemoveTransclusion {
+        file_id: u16,
+        node_id: String,
+        index: usize,
+    },
+    AddLink {
+        file_id: u16,
+        node_id: String,
+        link: MockLink,
+    },
+    RemoveLink {
+        file_id: u16,
+        node_id: String,
+        index: usize,
+    },
+    UpdateTitle {
+        file_id: u16,
+        node_id: String,
+        title: String,
+    },
+    UpdateBody {
+        file_id: u16,
+        node_id: String,
+        body: String,
+    },
+    UpdateMetadata {
+        file_id: u16,
+        node_id: String,
+        metadata: Metadata,
+    },
 }
