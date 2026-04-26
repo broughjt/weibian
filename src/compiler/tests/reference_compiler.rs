@@ -112,7 +112,7 @@ impl From<MockNode> for NodeOutput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MockNodeHandle(pub u32);
+pub struct MockNodeId(pub u32);
 
 #[derive(Debug, Clone)]
 pub struct MockFileNode {
@@ -180,63 +180,64 @@ pub enum Transition {
     },
     AddNode {
         file_id: u16,
+        node_id: MockNodeId,
         node: MockFileNode,
     },
     RemoveNode {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
     },
     AddTransclusion {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         transclusion: MockTransclusion,
     },
     RemoveTransclusion {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         index: u32,
     },
     AddLink {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         link: MockLink,
     },
     RemoveLink {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         index: u32,
     },
     UpdateTitle {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         title: String,
     },
     UpdateBody {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         body: String,
     },
     EditMetadata {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         target: MetadataTarget,
         operation: MetadataOperation,
     },
     UpdateLinkTarget {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         link_index: u32,
         new_target: String,
     },
     UpdateLinkContent {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         link_index: u32,
         new_content: Option<String>,
     },
     UpdateTransclusionTarget {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         transclusion_index: u32,
         new_target: String,
     },
@@ -258,7 +259,7 @@ pub enum Transition {
     },
     RenameNode {
         file_id: u16,
-        node: MockNodeHandle,
+        node_id: MockNodeId,
         new_id: String,
     },
 }
