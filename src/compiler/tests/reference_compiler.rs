@@ -27,7 +27,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
     }
 }
 
-pub type MockResult = Result<MockNode, EcoVec<SourceDiagnostic>>;
+pub type CompiledMockFile = Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
@@ -111,10 +111,26 @@ impl From<MockNode> for NodeOutput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MockNodeHandle(pub u32);
+
+#[derive(Debug, Clone)]
+pub struct MockFileNode {
+    pub handle: MockNodeHandle,
+    pub identifier: String,
+    pub node: MockNode,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MockFile {
+    pub nodes: Vec<MockFileNode>,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct State {
-    pub files:
-        HashMap<NonZeroU16, Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>>,
+    pub files: HashMap<NonZeroU16, MockFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,81 +170,96 @@ pub enum MetadataOperation {
 pub enum Transition {
     CreateFile {
         file_id: u16,
-        nodes: Warned<Result<HashMap<String, MockNode>, EcoVec<SourceDiagnostic>>>,
+        file: MockFile,
     },
     ReplaceFile {
         file_id: u16,
-        nodes: Warned<Result<HashMap<String, MockNode>, EcoVec<SourceDiagnostic>>>,
+        file: MockFile,
     },
     RemoveFile {
         file_id: u16,
     },
     AddNode {
         file_id: u16,
-        identifier: String,
-        node: MockNode,
+        node: MockFileNode,
     },
     RemoveNode {
         file_id: u16,
-        identifier: String,
+        node: MockNodeHandle,
     },
     AddTransclusion {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         transclusion: MockTransclusion,
     },
     RemoveTransclusion {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         index: u32,
     },
     AddLink {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         link: MockLink,
     },
     RemoveLink {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         index: u32,
     },
     UpdateTitle {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         title: String,
     },
     UpdateBody {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         body: String,
     },
     EditMetadata {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         target: MetadataTarget,
-        op: MetadataOperation,
+        operation: MetadataOperation,
     },
     UpdateLinkTarget {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         link_index: u32,
         new_target: String,
     },
     UpdateLinkContent {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         link_index: u32,
         new_content: Option<String>,
     },
     UpdateTransclusionTarget {
         file_id: u16,
-        node_id: String,
+        node: MockNodeHandle,
         transclusion_index: u32,
         new_target: String,
     },
+    AddCompileError {
+        file_id: u16,
+        error: String,
+    },
+    RemoveCompileError {
+        file_id: u16,
+        index: usize,
+    },
+    AddCompileWarning {
+        file_id: u16,
+        warning: String,
+    },
+    RemoveCompileWarning {
+        file_id: u16,
+        index: usize,
+    },
     RenameNode {
         file_id: u16,
-        old_id: String,
+        node: MockNodeHandle,
         new_id: String,
     },
 }
