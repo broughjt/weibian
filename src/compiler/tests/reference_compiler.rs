@@ -46,6 +46,13 @@ impl ReferenceStateMachine for ReferenceCompiler {
             ));
         }
 
+        if let Some(remove_file) = state.remove_file_strategy(&queries) {
+            strategies.push((
+                REMOVE_FILE_WEIGHT,
+                remove_file.prop_map(Transition::RemoveFile).boxed(),
+            ))
+        }
+
         Union::new_weighted(strategies).boxed()
     }
 
@@ -197,6 +204,140 @@ impl State {
             None
         }
     }
+
+    fn remove_file_strategy(
+        &self,
+        queries: &Queries,
+    ) -> Option<impl Strategy<Value = RemoveFile> + use<>> {
+        if !queries.existing_file_ids.is_empty() {
+            Some(
+                select(queries.existing_file_ids.clone())
+                    .prop_map(|file_id| RemoveFile { file_id }),
+            )
+        } else {
+            None
+        }
+    }
+
+    // fn add_node_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = AddNode> + use<>> {
+    //     todo!()
+    // }
+
+    // fn remove_node_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RemoveNode> + use<>> {
+    //     todo!()
+    // }
+
+    // fn add_transclusion_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = AddTransclusion> + use<>> {
+    //     todo!()
+    // }
+
+    // fn remove_transclusion_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RemoveTransclusion> + use<>> {
+    //     todo!()
+    // }
+
+    // fn add_link_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = AddLink> + use<>> {
+    //     todo!()
+    // }
+
+    // fn remove_link_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RemoveLink> + use<>> {
+    //     todo!()
+    // }
+
+    // fn update_title_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = UpdateTitle> + use<>> {
+    //     todo!()
+    // }
+
+    // fn update_body_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = UpdateBody> + use<>> {
+    //     todo!()
+    // }
+
+    // TODO:
+    // fn edit_metadata_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = EditMetadata> + use<>> {
+    //     todo!()
+    // }
+
+    // fn update_link_target_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = UpdateLinkTarget> + use<>> {
+    //     todo!()
+    // }
+
+    // fn update_link_content_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = UpdateLinkContent> + use<>> {
+    //     todo!()
+    // }
+
+    // fn update_transclusion_target_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = UpdateTransclusionTarget> + use<>> {
+    //     todo!()
+    // }
+
+    // fn add_compile_error_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = AddCompileError> + use<>> {
+    //     todo!()
+    // }
+
+    // fn remove_compile_error_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RemoveCompileError> + use<>> {
+    //     todo!()
+    // }
+
+    // fn add_compile_warning_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = AddCompileWarning> + use<>> {
+    //     todo!()
+    // }
+
+    // fn remove_compile_warning_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RemoveCompileWarning> + use<>> {
+    //     todo!()
+    // }
+
+    // fn rename_node_strategy(
+    //     &self,
+    //     queries: &Queries,
+    // ) -> Option<impl Strategy<Value = RenameNode> + use<>> {
+    //     todo!()
+    // }
 }
 
 #[derive(Debug, Clone)]
