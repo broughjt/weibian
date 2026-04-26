@@ -27,14 +27,14 @@ pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
-#[derive(Clone, Default)]
-pub struct Compiler {
+#[derive(Default)]
+pub struct Compiler<B = String, M = String> {
     file_to_nodes: HashMap<FileId, Vec<NodeId>>,
     node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, NodeEntry>,
     backmatters: HashMap<NodeId, Backmatter>,
-    rendered_bodies: HashMap<NodeId, String>,
-    rendered_backmatters: HashMap<NodeId, String>,
+    rendered_bodies: HashMap<NodeId, B>,
+    rendered_backmatters: HashMap<NodeId, M>,
     compile_diagnostics: CompileDiagnostics,
     process_diagnostics: ProcessDiagnostics,
     links: DiGraphMap<NodeId, ()>,
@@ -45,7 +45,7 @@ pub struct Compiler {
     metadata_dirty: HashSet<NodeId>,
 }
 
-impl Compiler {
+impl<B, M> Compiler<B, M> {
     /// Compiles a single source file and splits it into nodes, updating the
     /// node store and diagnostics.
     ///
@@ -192,7 +192,10 @@ impl Compiler {
 
     /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
     /// the output directory, and clears the dirty and removed sets.
-    pub fn process(&mut self, config: &RenderConfig) -> anyhow::Result<OutputPlan> {
+    pub(crate) fn _process<R>(&mut self, renderer: &R) -> anyhow::Result<OutputPlan<R::Node>>
+    where
+        R: Render<Body = B, Backmatter = M>,
+    {
         assert!(self.metadata_dirty.is_subset(&self.dirty));
         assert!(self.dirty.is_disjoint(&self.removed));
 
@@ -404,13 +407,11 @@ impl Compiler {
 
         // Pass 2: render nodes in order (isolated first, then leaves-to-roots).
 
-        let renderer = JinjaRenderer::new(config);
-
         for &id in &render_order {
             if body_affected.contains(&id) {
                 let input =
                     build_body_input(id, &self.nodes, &self.rendered_bodies, &self.interner);
-                let rendered_body = Render::render_body(&renderer, input)?;
+                let rendered_body = renderer.render_body(input)?;
 
                 self.rendered_bodies.insert(id, rendered_body);
             }
@@ -420,7 +421,7 @@ impl Compiler {
                     .get(&id)
                     .expect("bug: renderable node has no backmatter after pass 1");
                 let input = build_backmatter_input(id, &self.nodes, backmatter, &self.interner);
-                let rendered_backmatter = Render::render_backmatter(&renderer, input)?;
+                let rendered_backmatter = renderer.render_backmatter(input)?;
 
                 self.rendered_backmatters.insert(id, rendered_backmatter);
             }
@@ -428,7 +429,7 @@ impl Compiler {
 
         let writes = render_order
             .iter()
-            .map(|&id| -> anyhow::Result<(String, String)> {
+            .map(|&id| {
                 let identifier = self.interner.name(id).to_owned();
                 let input = build_node_input(
                     id,
@@ -437,7 +438,7 @@ impl Compiler {
                     &self.rendered_backmatters,
                     &self.interner,
                 );
-                let html = Render::render_node(&renderer, input)?;
+                let html = renderer.render_node(input)?;
 
                 Ok((identifier, html))
             })
@@ -452,8 +453,18 @@ impl Compiler {
     }
 }
 
-pub struct OutputPlan {
-    pub writes: HashMap<String, String>,
+impl Compiler {
+    /// Returns an [`OutputPlan`] describing the writes and deletes to apply to
+    /// the output directory, and clears the dirty and removed sets.
+    pub fn process(&mut self, config: &RenderConfig) -> anyhow::Result<OutputPlan> {
+        let renderer = JinjaRenderer::new(config);
+
+        self._process(&renderer)
+    }
+}
+
+pub struct OutputPlan<N = String> {
+    pub writes: HashMap<String, N>,
     pub deletes: HashSet<String>,
 }
 
@@ -631,12 +642,12 @@ fn should_backmatter_render(
     })
 }
 
-fn build_body_input<'a>(
+fn build_body_input<'a, B>(
     id: NodeId,
     nodes: &'a HashMap<NodeId, NodeEntry>,
-    rendered_bodies: &'a HashMap<NodeId, String>,
+    rendered_bodies: &'a HashMap<NodeId, B>,
     interner: &'a NodeInterner,
-) -> BodyInput<'a, String> {
+) -> BodyInput<'a, B> {
     // TODO: Perform the dangling link and transclusion checks here?
 
     let entry = &nodes[&id];
@@ -677,7 +688,7 @@ fn build_body_input<'a>(
         })
         .collect();
 
-    let transclusions: HashMap<u32, TransclusionInput<'a, String>> = document
+    let transclusions: HashMap<u32, TransclusionInput<'a, B>> = document
         .select("wb-transclude")
         .iter()
         .map(|element| {
@@ -768,13 +779,13 @@ fn build_backmatter_input<'a>(
     }
 }
 
-fn build_node_input<'a>(
+fn build_node_input<'a, B, M>(
     id: NodeId,
     nodes: &'a HashMap<NodeId, NodeEntry>,
-    rendered_bodies: &'a HashMap<NodeId, String>,
-    rendered_backmatters: &'a HashMap<NodeId, String>,
+    rendered_bodies: &'a HashMap<NodeId, B>,
+    rendered_backmatters: &'a HashMap<NodeId, M>,
     interner: &'a NodeInterner,
-) -> NodeInput<'a, String, String> {
+) -> NodeInput<'a, B, M> {
     let entry = &nodes[&id];
     let body = rendered_bodies
         .get(&id)
