@@ -121,11 +121,11 @@ pub struct State {
 pub enum Transition {
     CreateFile {
         file_id: u16,
-        nodes: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
+        nodes: Warned<Result<HashMap<String, MockNode>, EcoVec<SourceDiagnostic>>>,
     },
     ReplaceFile {
         file_id: u16,
-        nodes: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
+        nodes: Warned<Result<HashMap<String, MockNode>, EcoVec<SourceDiagnostic>>>,
     },
     RemoveFile {
         file_id: u16,
@@ -147,7 +147,7 @@ pub enum Transition {
     RemoveTransclusion {
         file_id: u16,
         node_id: String,
-        index: usize,
+        index: u32,
     },
     AddLink {
         file_id: u16,
@@ -157,7 +157,7 @@ pub enum Transition {
     RemoveLink {
         file_id: u16,
         node_id: String,
-        index: usize,
+        index: u32,
     },
     UpdateTitle {
         file_id: u16,
@@ -173,5 +173,142 @@ pub enum Transition {
         file_id: u16,
         node_id: String,
         metadata: Metadata,
+    },
+    InsertNodeMetadataKey {
+        file_id: u16,
+        node_id: String,
+        key: String,
+        values: Vec<String>,
+    },
+    RemoveNodeMetadataKey {
+        file_id: u16,
+        node_id: String,
+        key: String,
+    },
+    AppendNodeMetadataValue {
+        file_id: u16,
+        node_id: String,
+        key: String,
+        value: String,
+    },
+    RemoveNodeMetadataValue {
+        file_id: u16,
+        node_id: String,
+        key: String,
+        index: usize,
+    },
+    ReplaceNodeMetadataValue {
+        file_id: u16,
+        node_id: String,
+        key: String,
+        index: usize,
+        new_value: String,
+    },
+    ClearNodeMetadata {
+        file_id: u16,
+        node_id: String,
+    },
+    InsertLinkMetadataKey {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        key: String,
+        values: Vec<String>,
+    },
+    RemoveLinkMetadataKey {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        key: String,
+    },
+    AppendLinkMetadataValue {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        key: String,
+        value: String,
+    },
+    RemoveLinkMetadataValue {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        key: String,
+        index: usize,
+    },
+    ReplaceLinkMetadataValue {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        key: String,
+        index: usize,
+        new_value: String,
+    },
+    ClearLinkMetadata {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+    },
+    InsertTransclusionMetadataKey {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        key: String,
+        values: Vec<String>,
+    },
+    RemoveTransclusionMetadataKey {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        key: String,
+    },
+    AppendTransclusionMetadataValue {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        key: String,
+        value: String,
+    },
+    RemoveTransclusionMetadataValue {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        key: String,
+        index: usize,
+    },
+    ReplaceTransclusionMetadataValue {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        key: String,
+        index: usize,
+        new_value: String,
+    },
+    ClearTransclusionMetadata {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+    },
+    UpdateLinkTarget {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        new_target: String,
+    },
+    UpdateLinkContent {
+        file_id: u16,
+        node_id: String,
+        link_index: u32,
+        new_content: Option<String>,
+    },
+    UpdateTransclusionTarget {
+        file_id: u16,
+        node_id: String,
+        transclusion_index: u32,
+        new_target: String,
+    },
+    RenameNode {
+        file_id: u16,
+        old_id: String,
+        new_id: String,
     },
 }
