@@ -6,22 +6,23 @@ use super::super::render::{
     ResolvedTransclusion, TransclusionInput,
 };
 
+#[derive(Default)]
 pub struct MockRenderer;
 
 // The code here is extra verbose because it purposefully destructs each of the
 // types from the render trait to ensure we don't miss anything.
 impl Render for MockRenderer {
-    type Body = MockBody;
-    type Backmatter = MockBackmatter;
-    type Node = MockNode;
+    type Body = RenderBody;
+    type Backmatter = RenderBackmatter;
+    type Node = RenderNode;
 
-    fn render_body(&self, input: BodyInput<'_, MockBody>) -> anyhow::Result<MockBody> {
+    fn render_body(&self, input: BodyInput<'_, RenderBody>) -> anyhow::Result<RenderBody> {
         let BodyInput {
             body_html,
             links,
             transclusions,
         } = input;
-        Ok(MockBody {
+        Ok(RenderBody {
             body_html: body_html.to_owned(),
             links: links
                 .into_iter()
@@ -33,7 +34,7 @@ impl Render for MockRenderer {
                     } = v;
                     (
                         k,
-                        MockLinkInput {
+                        RenderLinkInput {
                             identifier: identifier.to_owned(),
                             metadata: metadata.cloned(),
                             resolution: resolution.map(|r| {
@@ -42,7 +43,7 @@ impl Render for MockRenderer {
                                     title_text,
                                     metadata,
                                 } = r;
-                                MockResolvedLink {
+                                RenderResolvedLink {
                                     title: title.to_owned(),
                                     title_text: title_text.to_owned(),
                                     metadata: metadata.clone(),
@@ -61,7 +62,7 @@ impl Render for MockRenderer {
                     } = v;
                     (
                         k,
-                        MockTransclusionInput {
+                        RenderTransclusionInput {
                             metadata: metadata.cloned(),
                             resolution: resolution.map(|r| {
                                 let ResolvedTransclusion {
@@ -71,7 +72,7 @@ impl Render for MockRenderer {
                                     metadata,
                                     body,
                                 } = r;
-                                MockResolvedTransclusion {
+                                RenderResolvedTransclusion {
                                     identifier: identifier.to_owned(),
                                     title: title.to_owned(),
                                     title_text: title_text.to_owned(),
@@ -86,14 +87,14 @@ impl Render for MockRenderer {
         })
     }
 
-    fn render_backmatter(&self, input: BackmatterInput<'_>) -> anyhow::Result<MockBackmatter> {
-        fn to_mock_node(n: BackmatterNode<'_>) -> MockBackmatterNode {
+    fn render_backmatter(&self, input: BackmatterInput<'_>) -> anyhow::Result<RenderBackmatter> {
+        fn to_render_backmatter_node(n: BackmatterNode<'_>) -> RenderBackmatterNode {
             let BackmatterNode {
                 title,
                 title_text,
                 metadata,
             } = n;
-            MockBackmatterNode {
+            RenderBackmatterNode {
                 title: title.to_owned(),
                 title_text: title_text.to_owned(),
                 metadata: metadata.clone(),
@@ -106,27 +107,27 @@ impl Render for MockRenderer {
             backlinks,
             outlinks,
         } = input;
-        Ok(MockBackmatter {
-            node: (node.0, to_mock_node(node.1)),
+        Ok(RenderBackmatter {
+            node: (node.0, to_render_backmatter_node(node.1)),
             contexts: contexts
                 .into_iter()
-                .map(|(id, opt)| (id, opt.map(to_mock_node)))
+                .map(|(id, opt)| (id, opt.map(to_render_backmatter_node)))
                 .collect(),
             backlinks: backlinks
                 .into_iter()
-                .map(|(id, opt)| (id, opt.map(to_mock_node)))
+                .map(|(id, opt)| (id, opt.map(to_render_backmatter_node)))
                 .collect(),
             outlinks: outlinks
                 .into_iter()
-                .map(|(id, opt)| (id, opt.map(to_mock_node)))
+                .map(|(id, opt)| (id, opt.map(to_render_backmatter_node)))
                 .collect(),
         })
     }
 
     fn render_node(
         &self,
-        input: NodeInput<'_, MockBody, MockBackmatter>,
-    ) -> anyhow::Result<MockNode> {
+        input: NodeInput<'_, RenderBody, RenderBackmatter>,
+    ) -> anyhow::Result<RenderNode> {
         let NodeInput {
             identifier,
             title,
@@ -135,7 +136,7 @@ impl Render for MockRenderer {
             body,
             backmatter,
         } = input;
-        Ok(MockNode {
+        Ok(RenderNode {
             identifier,
             title: title.to_owned(),
             title_text: title_text.to_owned(),
@@ -147,62 +148,62 @@ impl Render for MockRenderer {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockBody {
+pub struct RenderBody {
     pub body_html: String,
-    pub links: HashMap<u32, MockLinkInput>,
-    pub transclusions: HashMap<u32, MockTransclusionInput>,
+    pub links: HashMap<u32, RenderLinkInput>,
+    pub transclusions: HashMap<u32, RenderTransclusionInput>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockLinkInput {
+pub struct RenderLinkInput {
     pub identifier: String,
     pub metadata: Option<Metadata>,
-    pub resolution: Option<MockResolvedLink>,
+    pub resolution: Option<RenderResolvedLink>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockResolvedLink {
+pub struct RenderResolvedLink {
     pub title: String,
     pub title_text: String,
     pub metadata: Metadata,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockTransclusionInput {
+pub struct RenderTransclusionInput {
     pub metadata: Option<Metadata>,
-    pub resolution: Option<MockResolvedTransclusion>,
+    pub resolution: Option<RenderResolvedTransclusion>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockResolvedTransclusion {
+pub struct RenderResolvedTransclusion {
     pub identifier: String,
     pub title: String,
     pub title_text: String,
     pub metadata: Metadata,
-    pub body: Box<MockBody>,
+    pub body: Box<RenderBody>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockBackmatterNode {
+pub struct RenderBackmatterNode {
     pub title: String,
     pub title_text: String,
     pub metadata: Metadata,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockBackmatter {
-    pub node: (String, MockBackmatterNode),
-    pub contexts: Vec<(String, Option<MockBackmatterNode>)>,
-    pub backlinks: Vec<(String, Option<MockBackmatterNode>)>,
-    pub outlinks: Vec<(String, Option<MockBackmatterNode>)>,
+pub struct RenderBackmatter {
+    pub node: (String, RenderBackmatterNode),
+    pub contexts: Vec<(String, Option<RenderBackmatterNode>)>,
+    pub backlinks: Vec<(String, Option<RenderBackmatterNode>)>,
+    pub outlinks: Vec<(String, Option<RenderBackmatterNode>)>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MockNode {
+pub struct RenderNode {
     pub identifier: String,
     pub title: String,
     pub title_text: String,
     pub metadata: Metadata,
-    pub body: MockBody,
-    pub backmatter: MockBackmatter,
+    pub body: RenderBody,
+    pub backmatter: RenderBackmatter,
 }
