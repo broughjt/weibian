@@ -116,14 +116,13 @@ pub struct MockNodeHandle(pub u32);
 
 #[derive(Debug, Clone)]
 pub struct MockFileNode {
-    pub handle: MockNodeHandle,
     pub identifier: String,
     pub node: MockNode,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct MockFile {
-    pub nodes: Vec<MockFileNode>,
+    pub nodes: HashMap<MockNodeHandle, MockFileNode>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
 }
