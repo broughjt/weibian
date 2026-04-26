@@ -1,50 +1,83 @@
 use std::collections::HashMap;
 
 use super::super::Metadata;
-use super::super::render::{BackmatterInput, BackmatterNode, BodyInput, NodeInput, Render};
+use super::super::render::{
+    BackmatterInput, BackmatterNode, BodyInput, LinkInput, NodeInput, Render, ResolvedLink,
+    ResolvedTransclusion, TransclusionInput,
+};
 
 pub struct MockRenderer;
 
+// The code here is extra verbose because it purposefully destructs each of the
+// types from the render trait to ensure we don't miss anything.
 impl Render for MockRenderer {
     type Body = MockBody;
     type Backmatter = MockBackmatter;
     type Node = MockNode;
 
     fn render_body(&self, input: BodyInput<'_, MockBody>) -> anyhow::Result<MockBody> {
+        let BodyInput {
+            body_html,
+            links,
+            transclusions,
+        } = input;
         Ok(MockBody {
-            body_html: input.body_html.to_owned(),
-            links: input
-                .links
+            body_html: body_html.to_owned(),
+            links: links
                 .into_iter()
                 .map(|(k, v)| {
+                    let LinkInput {
+                        identifier,
+                        metadata,
+                        resolution,
+                    } = v;
                     (
                         k,
                         MockLinkInput {
-                            identifier: v.identifier.to_owned(),
-                            metadata: v.metadata.cloned(),
-                            resolution: v.resolution.map(|r| MockResolvedLink {
-                                title: r.title.to_owned(),
-                                title_text: r.title_text.to_owned(),
-                                metadata: r.metadata.clone(),
+                            identifier: identifier.to_owned(),
+                            metadata: metadata.cloned(),
+                            resolution: resolution.map(|r| {
+                                let ResolvedLink {
+                                    title,
+                                    title_text,
+                                    metadata,
+                                } = r;
+                                MockResolvedLink {
+                                    title: title.to_owned(),
+                                    title_text: title_text.to_owned(),
+                                    metadata: metadata.clone(),
+                                }
                             }),
                         },
                     )
                 })
                 .collect(),
-            transclusions: input
-                .transclusions
+            transclusions: transclusions
                 .into_iter()
                 .map(|(k, v)| {
+                    let TransclusionInput {
+                        metadata,
+                        resolution,
+                    } = v;
                     (
                         k,
                         MockTransclusionInput {
-                            metadata: v.metadata.cloned(),
-                            resolution: v.resolution.map(|r| MockResolvedTransclusion {
-                                identifier: r.identifier.to_owned(),
-                                title: r.title.to_owned(),
-                                title_text: r.title_text.to_owned(),
-                                metadata: r.metadata.clone(),
-                                body: Box::new(r.body.clone()),
+                            metadata: metadata.cloned(),
+                            resolution: resolution.map(|r| {
+                                let ResolvedTransclusion {
+                                    identifier,
+                                    title,
+                                    title_text,
+                                    metadata,
+                                    body,
+                                } = r;
+                                MockResolvedTransclusion {
+                                    identifier: identifier.to_owned(),
+                                    title: title.to_owned(),
+                                    title_text: title_text.to_owned(),
+                                    metadata: metadata.clone(),
+                                    body: Box::new(body.clone()),
+                                }
                             }),
                         },
                     )
@@ -55,27 +88,35 @@ impl Render for MockRenderer {
 
     fn render_backmatter(&self, input: BackmatterInput<'_>) -> anyhow::Result<MockBackmatter> {
         fn to_mock_node(n: BackmatterNode<'_>) -> MockBackmatterNode {
+            let BackmatterNode {
+                title,
+                title_text,
+                metadata,
+            } = n;
             MockBackmatterNode {
-                title: n.title.to_owned(),
-                title_text: n.title_text.to_owned(),
-                metadata: n.metadata.clone(),
+                title: title.to_owned(),
+                title_text: title_text.to_owned(),
+                metadata: metadata.clone(),
             }
         }
 
+        let BackmatterInput {
+            node,
+            contexts,
+            backlinks,
+            outlinks,
+        } = input;
         Ok(MockBackmatter {
-            node: (input.node.0, to_mock_node(input.node.1)),
-            contexts: input
-                .contexts
+            node: (node.0, to_mock_node(node.1)),
+            contexts: contexts
                 .into_iter()
                 .map(|(id, opt)| (id, opt.map(to_mock_node)))
                 .collect(),
-            backlinks: input
-                .backlinks
+            backlinks: backlinks
                 .into_iter()
                 .map(|(id, opt)| (id, opt.map(to_mock_node)))
                 .collect(),
-            outlinks: input
-                .outlinks
+            outlinks: outlinks
                 .into_iter()
                 .map(|(id, opt)| (id, opt.map(to_mock_node)))
                 .collect(),
@@ -86,13 +127,21 @@ impl Render for MockRenderer {
         &self,
         input: NodeInput<'_, MockBody, MockBackmatter>,
     ) -> anyhow::Result<MockNode> {
+        let NodeInput {
+            identifier,
+            title,
+            title_text,
+            metadata,
+            body,
+            backmatter,
+        } = input;
         Ok(MockNode {
-            identifier: input.identifier,
-            title: input.title.to_owned(),
-            title_text: input.title_text.to_owned(),
-            metadata: input.metadata.clone(),
-            body: input.body.clone(),
-            backmatter: input.backmatter.clone(),
+            identifier,
+            title: title.to_owned(),
+            title_text: title_text.to_owned(),
+            metadata: metadata.clone(),
+            body: body.clone(),
+            backmatter: backmatter.clone(),
         })
     }
 }
