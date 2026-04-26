@@ -118,6 +118,39 @@ pub struct State {
 }
 
 #[derive(Debug, Clone)]
+pub enum MetadataTarget {
+    Node,
+    Link { index: u32 },
+    Transclusion { index: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub enum MetadataOperation {
+    ReplaceAll(Metadata),
+    InsertKey {
+        key: String,
+        values: Vec<String>,
+    },
+    RemoveKey {
+        key: String,
+    },
+    AppendValue {
+        key: String,
+        value: String,
+    },
+    RemoveValue {
+        key: String,
+        index: usize,
+    },
+    ReplaceValue {
+        key: String,
+        index: usize,
+        new_value: String,
+    },
+    Clear,
+}
+
+#[derive(Debug, Clone)]
 pub enum Transition {
     CreateFile {
         file_id: u16,
@@ -169,124 +202,11 @@ pub enum Transition {
         node_id: String,
         body: String,
     },
-    UpdateMetadata {
+    EditMetadata {
         file_id: u16,
         node_id: String,
-        metadata: Metadata,
-    },
-    InsertNodeMetadataKey {
-        file_id: u16,
-        node_id: String,
-        key: String,
-        values: Vec<String>,
-    },
-    RemoveNodeMetadataKey {
-        file_id: u16,
-        node_id: String,
-        key: String,
-    },
-    AppendNodeMetadataValue {
-        file_id: u16,
-        node_id: String,
-        key: String,
-        value: String,
-    },
-    RemoveNodeMetadataValue {
-        file_id: u16,
-        node_id: String,
-        key: String,
-        index: usize,
-    },
-    ReplaceNodeMetadataValue {
-        file_id: u16,
-        node_id: String,
-        key: String,
-        index: usize,
-        new_value: String,
-    },
-    ClearNodeMetadata {
-        file_id: u16,
-        node_id: String,
-    },
-    InsertLinkMetadataKey {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-        key: String,
-        values: Vec<String>,
-    },
-    RemoveLinkMetadataKey {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-        key: String,
-    },
-    AppendLinkMetadataValue {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-        key: String,
-        value: String,
-    },
-    RemoveLinkMetadataValue {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-        key: String,
-        index: usize,
-    },
-    ReplaceLinkMetadataValue {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-        key: String,
-        index: usize,
-        new_value: String,
-    },
-    ClearLinkMetadata {
-        file_id: u16,
-        node_id: String,
-        link_index: u32,
-    },
-    InsertTransclusionMetadataKey {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
-        key: String,
-        values: Vec<String>,
-    },
-    RemoveTransclusionMetadataKey {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
-        key: String,
-    },
-    AppendTransclusionMetadataValue {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
-        key: String,
-        value: String,
-    },
-    RemoveTransclusionMetadataValue {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
-        key: String,
-        index: usize,
-    },
-    ReplaceTransclusionMetadataValue {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
-        key: String,
-        index: usize,
-        new_value: String,
-    },
-    ClearTransclusionMetadata {
-        file_id: u16,
-        node_id: String,
-        transclusion_index: u32,
+        target: MetadataTarget,
+        op: MetadataOperation,
     },
     UpdateLinkTarget {
         file_id: u16,
