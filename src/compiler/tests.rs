@@ -14,6 +14,7 @@ use crate::compiler::{
 
 struct IncrementalMatchesStateless;
 
+#[derive(Default)]
 struct IncrementalCompiler {
     compiler: Compiler,
     filesystem: HashMap<String, RenderNode>,
@@ -24,9 +25,9 @@ impl StateMachineTest for IncrementalMatchesStateless {
     type Reference = ReferenceCompiler;
 
     fn init_test(
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest {
-        todo!()
+        IncrementalCompiler::default()
     }
 
     fn apply(

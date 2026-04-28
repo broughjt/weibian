@@ -392,6 +392,8 @@ const NODE_TRANSCLUSIONS_MAX: usize = 5;
 const NODE_LINKS_MAX: usize = 5;
 
 fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + use<> {
+    let next_node_id_value = queries.next_node_id.0;
+
     (
         vec(mock_node_strategy(queries), 0..CREATE_FILE_NODE_MAX),
         vec(compile_error_strategy(), 0..CREATE_FILE_COMPILE_ERRORS_MAX),
@@ -401,44 +403,39 @@ fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + us
         ),
     )
         .prop_map(move |(nodes, errors, warnings)| MockFile {
-            nodes: (queries.next_node_id.0..)
-                .map(MockNodeId)
-                .zip(nodes.into_iter())
-                .collect(),
+            nodes: (next_node_id_value..).map(MockNodeId).zip(nodes).collect(),
             errors,
             warnings,
         })
 }
 
 fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + use<> {
-    // (
-    //     node_identifier_strategy(queries),
-    //     title_strategy(),
-    //     body_strategy(),
-    //     span_strategy(),
-    //     metadata_strategy(),
-    //     vec(
-    //         mock_transclusion_strategy(queries),
-    //         0..NODE_TRANSCLUSIONS_MAX,
-    //     ),
-    //     vec(mock_link_strategy(queries), 0..NODE_LINKS_MAX),
-    // )
-    //     .prop_map(
-    //         |(identifier, title, body, span, metadata, transclusions, links)| MockNode {
-    //             identifier,
-    //             title,
-    //             body,
-    //             span,
-    //             metadata,
-    //             transclusions,
-    //             links,
-    //         },
-    //     )
-
-    todo!()
+    (
+        node_identifier_strategy(queries),
+        title_strategy(),
+        body_strategy(),
+        span_strategy(),
+        metadata_strategy(),
+        vec(
+            mock_transclusion_strategy(queries),
+            0..NODE_TRANSCLUSIONS_MAX,
+        ),
+        vec(mock_link_strategy(queries), 0..NODE_LINKS_MAX),
+    )
+        .prop_map(
+            |(identifier, title, body, span, metadata, transclusions, links)| MockNode {
+                identifier,
+                title,
+                body,
+                span,
+                metadata,
+                transclusions,
+                links,
+            },
+        )
 }
 
-fn mock_link_strategy(queries: &Queries) -> impl Strategy<Value = MockLink> {
+fn mock_link_strategy(queries: &Queries) -> impl Strategy<Value = MockLink> + use<> {
     (
         target_strategy(queries),
         option::of(link_content_strategy()),
@@ -451,12 +448,14 @@ fn mock_link_strategy(queries: &Queries) -> impl Strategy<Value = MockLink> {
         })
 }
 
-fn mock_transclusion_strategy(queries: &Queries) -> impl Strategy<Value = MockTransclusion> {
+fn mock_transclusion_strategy(
+    queries: &Queries,
+) -> impl Strategy<Value = MockTransclusion> + use<> {
     (target_strategy(queries), metadata_strategy())
         .prop_map(|(target, metadata)| MockTransclusion { target, metadata })
 }
 
-fn target_strategy(queries: &Queries) -> impl Strategy<Value = MockNodeIdentifier> {
+fn target_strategy(queries: &Queries) -> impl Strategy<Value = MockNodeIdentifier> + use<> {
     let next_missing = Just(queries.next_missing_node_identifier).boxed();
     let mut strategies = vec![next_missing];
 
@@ -471,7 +470,9 @@ fn target_strategy(queries: &Queries) -> impl Strategy<Value = MockNodeIdentifie
     Union::new(strategies)
 }
 
-fn node_identifier_strategy(queries: &Queries) -> impl Strategy<Value = MockNodeIdentifier> {
+fn node_identifier_strategy(
+    queries: &Queries,
+) -> impl Strategy<Value = MockNodeIdentifier> + use<> {
     let next = Just(queries.next_node_identifier).boxed();
     let mut strategies = vec![next];
 
@@ -515,10 +516,6 @@ fn title_strategy() -> impl Strategy<Value = String> {
     "[a-z]*"
 }
 
-fn identifier_strategy() -> impl Strategy<Value = String> {
-    "[a-z]{0,5}"
-}
-
 fn metadata_key_strategy() -> impl Strategy<Value = String> {
     "[a-z]*"
 }
@@ -544,10 +541,10 @@ fn range_strategy() -> impl Strategy<Value = Range<usize>> {
 }
 
 trait Event {
-    fn strategy<'a, 'b>(
-        state: &'a State,
-        queries: &'b Queries,
-    ) -> Option<impl Strategy<Value = Self>>;
+    fn strategy(
+        state: &State,
+        queries: &Queries,
+    ) -> Option<impl Strategy<Value = Self> + use<Self>>;
 
     fn does_apply(&self, state: &State) -> bool;
 
@@ -555,13 +552,13 @@ trait Event {
 }
 
 impl Event for CreateFile {
-    fn strategy(state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
         let file_id = queries.next_file_id;
 
         Some(mock_file_strategy(queries).prop_map(move |file| CreateFile { file_id, file }))
     }
 
-    fn does_apply(&self, state: &State) -> bool {
+    fn does_apply(&self, _state: &State) -> bool {
         true
     }
 
@@ -584,7 +581,7 @@ impl Event for CreateFile {
                 warnings,
             },
         );
-        state.nodes.extend(nodes.into_iter());
+        state.nodes.extend(nodes);
 
         state
     }
