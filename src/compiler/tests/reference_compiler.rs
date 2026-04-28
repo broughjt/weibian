@@ -464,7 +464,7 @@ fn target_strategy(queries: &Queries) -> impl Strategy<Value = MockNodeIdentifie
     }
 
     if !queries.missing_node_identifiers.is_empty() {
-        strategies.push(select(queries.existing_node_identifiers.clone()).boxed());
+        strategies.push(select(queries.missing_node_identifiers.clone()).boxed());
     }
 
     Union::new(strategies)
@@ -481,7 +481,7 @@ fn node_identifier_strategy(
     }
 
     if !queries.missing_node_identifiers.is_empty() {
-        strategies.push(select(queries.existing_node_identifiers.clone()).boxed());
+        strategies.push(select(queries.missing_node_identifiers.clone()).boxed());
     }
 
     Union::new(strategies)
