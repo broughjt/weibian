@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 
 use crate::compiler::{
-    Compiler, OutputPlan,
+    Compiler,
     tests::{
         process_stateless::process_stateless,
         reference_compiler::{ReferenceCompiler, Transition},

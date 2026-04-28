@@ -10,6 +10,7 @@ use proptest::{
     collection::{hash_map, vec},
     option,
     prelude::{BoxedStrategy, Just, Strategy, any},
+    prop_assert, proptest,
     sample::select,
     strategy::Union,
 };
@@ -168,6 +169,8 @@ impl State {
     }
 
     fn queries(&self) -> Queries {
+        // TODO: We need to ensure that Cow<'static, [_]> lists are deterministically ordered
+
         // let new_file_id = self
         //     .files
         //     .keys()
@@ -658,5 +661,46 @@ impl Event for CreateFile {
         state.nodes.extend(nodes);
 
         state
+    }
+}
+
+fn state_strategy() -> impl Strategy<Value = State> {
+    ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
+        transitions.iter().fold(initial, ReferenceCompiler::apply)
+    })
+}
+
+fn state_and_next_transition_strategy() -> impl Strategy<Value = (State, Transition)> {
+    state_strategy().prop_flat_map(|state| {
+        let transition = ReferenceCompiler::transitions(&state);
+
+        (Just(state), transition)
+    })
+}
+
+proptest! {
+    #[test]
+    fn transitions_satisfy_preconditions(
+        (state, transition) in state_and_next_transition_strategy()
+    ) {
+        prop_assert!(
+            ReferenceCompiler::preconditions(&state, &transition),
+            "{transition:?} fails preconditions in {state:?}",
+        );
+    }
+
+    #[test]
+    fn create_file_strategy_implies_does_apply(
+        (state, create_file) in state_strategy().prop_flat_map(|state| {
+            let queries = state.queries();
+            let strategy = CreateFile::strategy(&state, &queries)
+                .expect("CreateFile::strategy always returns Some");
+            (Just(state), strategy)
+        })
+    ) {
+        prop_assert!(
+            create_file.does_apply(&state),
+            "{create_file:?} fails does_apply in {state:?}",
+        );
     }
 }
