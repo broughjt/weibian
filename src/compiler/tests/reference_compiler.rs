@@ -205,6 +205,37 @@ pub enum Transition {
     RenameNode(RenameNode),
 }
 
+impl Transition {
+    pub fn file_id(&self) -> FileId {
+        match self {
+            Transition::CreateFile(create_file) => create_file.file_id,
+            Transition::ReplaceFile(replace_file) => replace_file.file_id,
+            Transition::RemoveFile(remove_file) => remove_file.file_id,
+            Transition::AddNode(add_node) => add_node.file_id,
+            Transition::RemoveNode(remove_node) => remove_node.file_id,
+            Transition::AddTransclusion(add_transclusion) => add_transclusion.file_id,
+            Transition::RemoveTransclusion(remove_transclusion) => remove_transclusion.file_id,
+            Transition::AddLink(add_link) => add_link.file_id,
+            Transition::RemoveLink(remove_link) => remove_link.file_id,
+            Transition::UpdateTitle(update_title) => update_title.file_id,
+            Transition::UpdateBody(update_body) => update_body.file_id,
+            Transition::EditMetadata(edit_metadata) => edit_metadata.file_id,
+            Transition::UpdateLinkTarget(update_link_target) => update_link_target.file_id,
+            Transition::UpdateLinkContent(update_link_content) => update_link_content.file_id,
+            Transition::UpdateTransclusionTarget(update_transclusion_target) => {
+                update_transclusion_target.file_id
+            }
+            Transition::AddCompileError(add_compile_error) => add_compile_error.file_id,
+            Transition::RemoveCompileError(remove_compile_error) => remove_compile_error.file_id,
+            Transition::AddCompileWarning(add_compile_warning) => add_compile_warning.file_id,
+            Transition::RemoveCompileWarning(remove_compile_warning) => {
+                remove_compile_warning.file_id
+            }
+            Transition::RenameNode(rename_node) => rename_node.file_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateFile {
     pub file_id: FileId,
