@@ -5,18 +5,14 @@ mod render;
 
 use std::{collections::HashMap, num::NonZeroU16};
 
-use ecow::{EcoVec, eco_format};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use typst::diag::{SourceDiagnostic, Warned};
-use typst_syntax::{FileId, Span};
 
 use crate::compiler::{
     Compiler, OutputPlan,
-    extract::NodeOutput,
     tests::{
         model::MockNode,
         process_stateless::process_stateless,
-        reference_compiler::{FileState, MockNodeId, ReferenceCompiler, Transition},
+        reference_compiler::{ReferenceCompiler, Transition},
         render::{MockRenderer, RenderBackmatter, RenderBody, RenderNode},
     },
 };
@@ -50,12 +46,9 @@ impl StateMachineTest for IncrementalMatchesStateless {
             state.compiler.remove(file_id);
         } else {
             // TODO: Write a test for this
-            let file = ref_state
-                .files
-                .get(&file_id)
-                .expect("bug: ref_state must contain affected file_id after non-remove transition");
-            let warned = compile_payload(file, &ref_state.nodes);
-            state.compiler._update(file_id, warned);
+            state
+                .compiler
+                ._update(file_id, ref_state.compile_file(file_id));
         }
 
         let plan = state
@@ -91,54 +84,23 @@ impl StateMachineTest for IncrementalMatchesStateless {
             })
             .collect();
 
-        let (expected_output, _expected_compile_diagnostics, expected_process_diagnostics) =
+        let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
             process_stateless(&input).expect("stateless reference must succeed");
 
         assert_eq!(state.filesystem, expected_output);
         assert_eq!(
+            state.compiler.compile_diagnostics(),
+            &expected_compile_diagnostics
+        );
+        assert_eq!(
             state.compiler.process_diagnostics(),
             &expected_process_diagnostics
         );
-        // TODO: Check compile_diagnostics
     }
 }
 
-fn compile_payload(
-    file: &FileState,
-    all_nodes: &HashMap<MockNodeId, MockNode>,
-) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
-    let warnings: EcoVec<SourceDiagnostic> = file
-        .warnings
-        .iter()
-        .map(|msg| SourceDiagnostic::warning(Span::detached(), eco_format!("{msg}")))
-        .collect();
-    let errors: EcoVec<SourceDiagnostic> = file
-        .errors
-        .iter()
-        .map(|msg| SourceDiagnostic::error(Span::detached(), eco_format!("{msg}")))
-        .collect();
-
-    let output = if !errors.is_empty() {
-        Err(errors)
-    } else {
-        let nodes: HashMap<String, NodeOutput> = file
-            .nodes
-            .iter()
-            .map(|node_id| {
-                let mock = &all_nodes[node_id];
-                (
-                    mock.identifier.0.to_string(),
-                    NodeOutput::from(mock.clone()),
-                )
-            })
-            .collect();
-        Ok(nodes)
-    };
-
-    Warned { output, warnings }
-}
-
 fn apply_plan(filesystem: &mut HashMap<String, RenderNode>, plan: OutputPlan<RenderNode>) {
+    // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
     for (name, node) in plan.writes {
         filesystem.insert(name, node);
     }

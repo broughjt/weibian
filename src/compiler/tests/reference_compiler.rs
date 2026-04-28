@@ -5,6 +5,7 @@ use std::{
     ops::Range,
 };
 
+use ecow::{EcoVec, eco_format};
 use proptest::{
     collection::{hash_map, vec},
     option,
@@ -13,9 +14,10 @@ use proptest::{
     strategy::Union,
 };
 use proptest_state_machine::ReferenceStateMachine;
+use typst::diag::{SourceDiagnostic, Warned};
 use typst_syntax::{FileId, Span};
 
-use crate::compiler::{Metadata, tests::model::*};
+use crate::compiler::{Metadata, extract::NodeOutput, tests::model::*};
 
 pub struct ReferenceCompiler;
 
@@ -124,6 +126,47 @@ pub struct State {
 }
 
 impl State {
+    /// Builds the `_update` payload that the incremental compiler would
+    /// receive after compiling this file: errors and warnings translated
+    /// into [`SourceDiagnostic`]s, and (when there are no errors) all the
+    /// file's nodes converted into [`NodeOutput`]s keyed by identifier.
+    pub fn compile_file(
+        &self,
+        file_id: FileId,
+    ) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
+        let file = &self.files[&file_id];
+
+        let warnings: EcoVec<SourceDiagnostic> = file
+            .warnings
+            .iter()
+            .map(|msg| SourceDiagnostic::warning(Span::detached(), eco_format!("{msg}")))
+            .collect();
+        let errors: EcoVec<SourceDiagnostic> = file
+            .errors
+            .iter()
+            .map(|msg| SourceDiagnostic::error(Span::detached(), eco_format!("{msg}")))
+            .collect();
+
+        let output = if !errors.is_empty() {
+            Err(errors)
+        } else {
+            let nodes: HashMap<String, NodeOutput> = file
+                .nodes
+                .iter()
+                .map(|node_id| {
+                    let mock = &self.nodes[node_id];
+                    (
+                        mock.identifier.0.to_string(),
+                        NodeOutput::from(mock.clone()),
+                    )
+                })
+                .collect();
+            Ok(nodes)
+        };
+
+        Warned { output, warnings }
+    }
+
     fn queries(&self) -> Queries {
         // let new_file_id = self
         //     .files
