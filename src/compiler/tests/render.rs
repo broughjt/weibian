@@ -6,7 +6,6 @@ use super::super::render::{
     ResolvedTransclusion, TransclusionInput,
 };
 
-#[derive(Default)]
 pub struct MockRenderer;
 
 // The code here is extra verbose because it purposefully destructs each of the
