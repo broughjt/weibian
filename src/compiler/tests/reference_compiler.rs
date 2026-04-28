@@ -120,6 +120,10 @@ pub struct FileState {
     pub warnings: Vec<String>,
 }
 
+// TODO: Invariant — every `MockNodeId` in `nodes` is owned by exactly one
+// `FileState` (i.e. appears in exactly one `files[*].nodes`). All
+// `Event::apply` impls must maintain this. Worth writing a property test that
+// asserts the invariant after each transition.
 #[derive(Clone, Debug)]
 pub struct State {
     pub files: HashMap<FileId, FileState>,
@@ -169,22 +173,75 @@ impl State {
     }
 
     fn queries(&self) -> Queries {
-        // TODO: We need to ensure that Cow<'static, [_]> lists are deterministically ordered
+        let next_file_id = FileId::from_raw(
+            self.files
+                .keys()
+                .map(|id| id.into_raw())
+                .max()
+                .map_or(NonZeroU16::new(1).unwrap(), |raw| {
+                    raw.checked_add(1).expect("file id overflow")
+                }),
+        );
 
-        // let new_file_id = self
-        //     .files
-        //     .keys()
-        //     .max()
-        //     .map_or(NonZeroU16::new(1), |k| k.checked_add(1))
-        //     .unwrap();
-        // let existing_file_ids: Cow<'static, [NonZeroU16]> = self.files.keys().copied().collect();
+        let mut existing_file_ids: Vec<FileId> = self.files.keys().copied().collect();
+        existing_file_ids.sort_by_key(|id| id.into_raw());
 
-        // Queries {
-        //     new_file_id,
-        //     existing_file_ids,
-        // }
+        let next_node_id = MockNodeId(
+            self.nodes
+                .keys()
+                .map(|MockNodeId(n)| *n)
+                .max()
+                .map_or(0, |n| n + 1),
+        );
 
-        todo!()
+        let existing_identifiers: HashSet<MockNodeIdentifier> =
+            self.nodes.values().map(|n| n.identifier).collect();
+
+        let mut missing_identifiers: HashSet<MockNodeIdentifier> = HashSet::new();
+        for node in self.nodes.values() {
+            for t in &node.transclusions {
+                if !existing_identifiers.contains(&t.target) {
+                    missing_identifiers.insert(t.target);
+                }
+            }
+            for l in &node.links {
+                if !existing_identifiers.contains(&l.target) {
+                    missing_identifiers.insert(l.target);
+                }
+            }
+        }
+
+        // `next_node_identifier` and `next_missing_node_identifier` are both
+        // fresh (greater than any identifier we've seen as a node or as a
+        // dangling target), and they are deliberately distinct so that a
+        // single transition that uses both — e.g. CreateFile that introduces
+        // a new node and a new dangling transclusion target in one shot —
+        // doesn't accidentally collapse them into the same identifier and
+        // resolve what was meant to be dangling.
+        let max_seen = existing_identifiers
+            .iter()
+            .chain(missing_identifiers.iter())
+            .map(|MockNodeIdentifier(n)| *n)
+            .max();
+        let next_node_identifier = MockNodeIdentifier(max_seen.map_or(0, |n| n + 1));
+        let next_missing_node_identifier = MockNodeIdentifier(max_seen.map_or(1, |n| n + 2));
+
+        let mut existing_sorted: Vec<MockNodeIdentifier> =
+            existing_identifiers.into_iter().collect();
+        existing_sorted.sort_by_key(|MockNodeIdentifier(n)| *n);
+
+        let mut missing_sorted: Vec<MockNodeIdentifier> = missing_identifiers.into_iter().collect();
+        missing_sorted.sort_by_key(|MockNodeIdentifier(n)| *n);
+
+        Queries {
+            next_file_id,
+            existing_file_ids: Cow::Owned(existing_file_ids),
+            next_node_id,
+            next_node_identifier,
+            existing_node_identifiers: Cow::Owned(existing_sorted),
+            missing_node_identifiers: Cow::Owned(missing_sorted),
+            next_missing_node_identifier,
+        }
     }
 
     // fn create_file_strategy(&self, queries: &Queries) -> impl Strategy<Value = CreateFile> + use<> {
