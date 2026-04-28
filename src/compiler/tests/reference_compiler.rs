@@ -57,6 +57,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 remove_file.prop_map(Transition::RemoveFile).boxed(),
             ));
         }
+        if let Some(add_node) = AddNode::strategy(state, &queries) {
+            strategies.push((
+                ADD_NODE_WEIGHT,
+                add_node.prop_map(Transition::AddNode).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -66,7 +72,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::CreateFile(create_file) => create_file.apply(state),
             Transition::ReplaceFile(replace_file) => replace_file.apply(state),
             Transition::RemoveFile(remove_file) => remove_file.apply(state),
-            Transition::AddNode(add_node) => todo!(),
+            Transition::AddNode(add_node) => add_node.apply(state),
             Transition::RemoveNode(remove_node) => todo!(),
             Transition::AddTransclusion(add_transclusion) => todo!(),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
@@ -91,7 +97,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::CreateFile(create_file) => create_file.does_apply(state),
             Transition::ReplaceFile(replace_file) => replace_file.does_apply(state),
             Transition::RemoveFile(remove_file) => remove_file.does_apply(state),
-            Transition::AddNode(add_node) => todo!(),
+            Transition::AddNode(add_node) => add_node.does_apply(state),
             Transition::RemoveNode(remove_node) => todo!(),
             Transition::AddTransclusion(add_transclusion) => todo!(),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
@@ -547,6 +553,7 @@ struct Queries {
 const CREATE_FILE_NODE_MAX: usize = 5;
 const CREATE_FILE_COMPILE_ERRORS_MAX: usize = 3;
 const CREATE_FILE_COMPILE_WARNINGS_MAX: usize = 3;
+const ADD_NODE_WEIGHT: u32 = 1;
 const METADATA_ENTRIES_MAX: usize = 6;
 const METADATA_VALUES_MAX: usize = 4;
 const NODE_TRANSCLUSIONS_MAX: usize = 5;
@@ -823,6 +830,57 @@ impl Event for RemoveFile {
     }
 }
 
+impl Event for AddNode {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_ids.is_empty() {
+            None
+        } else {
+            let node_id = queries.next_node_id;
+            Some(
+                (
+                    select(queries.existing_file_ids.clone()),
+                    mock_node_strategy(queries),
+                )
+                    .prop_map(move |(file_id, node)| AddNode {
+                        file_id,
+                        node_id,
+                        node,
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && !state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let AddNode {
+            file_id,
+            node_id,
+            node,
+        } = self.clone();
+
+        let replaced = state.nodes.insert(node_id, node);
+        assert!(
+            replaced.is_none(),
+            "bug: AddNode inserted duplicate MockNodeId"
+        );
+
+        let file = state
+            .files
+            .get_mut(&file_id)
+            .expect("bug: AddNode target file disappeared before apply");
+        let inserted = file.nodes.insert(node_id);
+        assert!(
+            inserted,
+            "bug: AddNode inserted a node id already owned by the target file"
+        );
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -894,6 +952,23 @@ proptest! {
         prop_assert!(
             remove_file.does_apply(&state),
             "{remove_file:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn add_node_strategy_implies_does_apply(
+        (state, add_node) in state_strategy()
+            .prop_filter("AddNode needs an existing file", |state| !state.files.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = AddNode::strategy(&state, &queries)
+                    .expect("AddNode::strategy returns Some when files exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            add_node.does_apply(&state),
+            "{add_node:?} fails does_apply in {state:?}",
         );
     }
 }
