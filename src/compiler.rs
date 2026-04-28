@@ -27,14 +27,13 @@ pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 
 /// Compiles Typst source files into nodes and maintains the in-memory node
 /// store and per-file diagnostics across incremental rebuilds.
-#[derive(Default)]
-pub struct Compiler<B = String, M = String> {
+pub struct Compiler<T = String, U = String> {
     file_to_nodes: HashMap<FileId, Vec<NodeId>>,
     node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, NodeEntry>,
     backmatters: HashMap<NodeId, Backmatter>,
-    rendered_bodies: HashMap<NodeId, B>,
-    rendered_backmatters: HashMap<NodeId, M>,
+    rendered_bodies: HashMap<NodeId, T>,
+    rendered_backmatters: HashMap<NodeId, U>,
     compile_diagnostics: CompileDiagnostics,
     process_diagnostics: ProcessDiagnostics,
     links: DiGraphMap<NodeId, ()>,
@@ -45,7 +44,7 @@ pub struct Compiler<B = String, M = String> {
     metadata_dirty: HashSet<NodeId>,
 }
 
-impl<B, M> Compiler<B, M> {
+impl<T, U> Compiler<T, U> {
     /// Compiles a single source file and splits it into nodes, updating the
     /// node store and diagnostics.
     ///
@@ -194,7 +193,7 @@ impl<B, M> Compiler<B, M> {
     /// the output directory, and clears the dirty and removed sets.
     pub(crate) fn _process<R>(&mut self, renderer: &R) -> anyhow::Result<OutputPlan<R::Node>>
     where
-        R: Render<Body = B, Backmatter = M>,
+        R: Render<Body = T, Backmatter = U>,
     {
         assert!(self.metadata_dirty.is_subset(&self.dirty));
         assert!(self.dirty.is_disjoint(&self.removed));
@@ -460,6 +459,27 @@ impl Compiler {
         let renderer = JinjaRenderer::new(config);
 
         self._process(&renderer)
+    }
+}
+
+impl<T, U> Default for Compiler<T, U> {
+    fn default() -> Self {
+        Self {
+            file_to_nodes: HashMap::default(),
+            node_to_file: HashMap::default(),
+            nodes: HashMap::default(),
+            backmatters: HashMap::default(),
+            rendered_bodies: HashMap::default(),
+            rendered_backmatters: HashMap::default(),
+            compile_diagnostics: HashMap::default(),
+            process_diagnostics: HashMap::default(),
+            links: DiGraphMap::default(),
+            transclusions: DiGraphMap::default(),
+            interner: NodeInterner::default(),
+            dirty: HashSet::default(),
+            removed: HashSet::default(),
+            metadata_dirty: HashSet::default(),
+        }
     }
 }
 
