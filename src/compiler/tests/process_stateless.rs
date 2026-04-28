@@ -1,30 +1,27 @@
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZeroU16,
-};
+use std::collections::{HashMap, HashSet};
 
+use ecow::EcoVec;
 use petgraph::{
     Direction,
     algo::{tarjan_scc, toposort},
     prelude::DiGraphMap,
 };
+use typst::diag::Warned;
 use typst_syntax::FileId;
 
 use crate::compiler::{
     Backmatter, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
     build_backmatter_input, build_body_input, build_node_input, cycle_diagnostics,
     dangling_link_diagnostic, dangling_transclusion_diagnostic,
-    extract::NodeOutput,
-    render::{BodyInput, Render},
+    render::Render,
     tests::{
-        model::MockNode,
+        reference_compiler::State,
         render::{MockRenderer, RenderBackmatter, RenderBody, RenderNode},
     },
 };
 
-// TODO: Needs to be updated to fit the new shape of the reference compiler state.
 pub fn process_stateless(
-    files: &HashMap<NonZeroU16, HashMap<String, MockNode>>,
+    state: &State,
 ) -> anyhow::Result<(
     HashMap<String, RenderNode>,
     CompileDiagnostics,
@@ -37,26 +34,41 @@ pub fn process_stateless(
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
-    let compile_diagnostics: CompileDiagnostics = HashMap::new();
+    let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
 
-    for (&raw_file_id, file_nodes) in files {
-        let file_id = FileId::from_raw(raw_file_id);
+    for &file_id in state.files.keys() {
+        let Warned { output, warnings } = state.compile_file(file_id);
 
-        for (identifier, mock_node) in file_nodes {
-            let node_output = NodeOutput::from(mock_node.clone());
-            let node_id = interner.intern(identifier.as_str());
+        match output {
+            Ok(file_nodes) => {
+                if !warnings.is_empty() {
+                    compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
+                }
+                for (identifier, node_output) in file_nodes {
+                    let node_id = interner.intern(identifier.as_str());
 
-            for t in &node_output.transclusions {
-                let transclusion_id = interner.intern(t.as_str());
-                transclusions.add_edge(node_id, transclusion_id, ());
+                    for transclusion_id in node_output
+                        .transclusions
+                        .iter()
+                        .map(|t| interner.intern(t.as_str()))
+                    {
+                        transclusions.add_edge(node_id, transclusion_id, ());
+                    }
+                    for link_id in node_output
+                        .links
+                        .iter()
+                        .map(|l| interner.intern(l.as_str()))
+                    {
+                        links.add_edge(node_id, link_id, ());
+                    }
+
+                    node_to_file.insert(node_id, file_id);
+                    nodes.insert(node_id, node_output.entry);
+                }
             }
-            for l in &node_output.links {
-                let link_id = interner.intern(l.as_str());
-                links.add_edge(node_id, link_id, ());
+            Err(errors) => {
+                compile_diagnostics.insert(file_id, (warnings, errors));
             }
-
-            node_to_file.insert(node_id, file_id);
-            nodes.insert(node_id, node_output.entry);
         }
     }
 
@@ -156,7 +168,6 @@ pub fn process_stateless(
 
     for &id in &render_order {
         let name = interner.name(id);
-        let entry = &nodes[&id];
 
         let rendered_body =
             renderer.render_body(build_body_input(id, &nodes, &rendered_bodies, &interner))?;

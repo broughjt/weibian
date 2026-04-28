@@ -3,14 +3,13 @@ mod process_stateless;
 mod reference_compiler;
 mod render;
 
-use std::{collections::HashMap, num::NonZeroU16};
+use std::collections::HashMap;
 
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 
 use crate::compiler::{
     Compiler, OutputPlan,
     tests::{
-        model::MockNode,
         process_stateless::process_stateless,
         reference_compiler::{ReferenceCompiler, Transition},
         render::{MockRenderer, RenderBackmatter, RenderBody, RenderNode},
@@ -55,7 +54,13 @@ impl StateMachineTest for IncrementalMatchesStateless {
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        apply_plan(&mut state.filesystem, plan);
+        // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
+        for (name, node) in plan.writes {
+            state.filesystem.insert(name, node);
+        }
+        for name in plan.deletes {
+            state.filesystem.remove(&name);
+        }
 
         state
     }
@@ -64,28 +69,8 @@ impl StateMachineTest for IncrementalMatchesStateless {
         state: &Self::SystemUnderTest,
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        // Files with compile errors are dropped by the incremental compiler
-        // (see Compiler::_update), so exclude them from the stateless input
-        // to keep both sides agreeing on the node set.
-        let input: HashMap<NonZeroU16, HashMap<String, MockNode>> = ref_state
-            .files
-            .iter()
-            .filter(|(_, file)| file.errors.is_empty())
-            .map(|(file_id, file)| {
-                let nodes: HashMap<String, MockNode> = file
-                    .nodes
-                    .iter()
-                    .map(|node_id| {
-                        let mock = &ref_state.nodes[node_id];
-                        (mock.identifier.0.to_string(), mock.clone())
-                    })
-                    .collect();
-                (file_id.into_raw(), nodes)
-            })
-            .collect();
-
         let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
-            process_stateless(&input).expect("stateless reference must succeed");
+            process_stateless(ref_state).expect("stateless reference must succeed");
 
         assert_eq!(state.filesystem, expected_output);
         assert_eq!(
@@ -96,16 +81,6 @@ impl StateMachineTest for IncrementalMatchesStateless {
             state.compiler.process_diagnostics(),
             &expected_process_diagnostics
         );
-    }
-}
-
-fn apply_plan(filesystem: &mut HashMap<String, RenderNode>, plan: OutputPlan<RenderNode>) {
-    // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
-    for (name, node) in plan.writes {
-        filesystem.insert(name, node);
-    }
-    for name in plan.deletes {
-        filesystem.remove(&name);
     }
 }
 
