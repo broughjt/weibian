@@ -1,3 +1,8 @@
+mod model;
+mod process_stateless;
+mod reference_compiler;
+mod render;
+
 use std::collections::HashMap;
 
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
@@ -6,10 +11,6 @@ use crate::compiler::{
     Compiler,
     tests::{reference_compiler::ReferenceCompiler, render::RenderNode},
 };
-
-mod process_stateless;
-mod reference_compiler;
-mod render;
 
 struct IncrementalMatchesStateless;
 

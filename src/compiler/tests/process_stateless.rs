@@ -17,7 +17,7 @@ use crate::compiler::{
     extract::NodeOutput,
     render::{BodyInput, Render},
     tests::{
-        reference_compiler::MockNode,
+        model::MockNode,
         render::{MockRenderer, RenderBackmatter, RenderBody, RenderNode},
     },
 };
