@@ -51,6 +51,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 replace_file.prop_map(Transition::ReplaceFile).boxed(),
             ));
         }
+        if let Some(remove_file) = RemoveFile::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_FILE_WEIGHT,
+                remove_file.prop_map(Transition::RemoveFile).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -59,7 +65,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         match transition {
             Transition::CreateFile(create_file) => create_file.apply(state),
             Transition::ReplaceFile(replace_file) => replace_file.apply(state),
-            Transition::RemoveFile(remove_file) => todo!(),
+            Transition::RemoveFile(remove_file) => remove_file.apply(state),
             Transition::AddNode(add_node) => todo!(),
             Transition::RemoveNode(remove_node) => todo!(),
             Transition::AddTransclusion(add_transclusion) => todo!(),
@@ -84,7 +90,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         match transition {
             Transition::CreateFile(create_file) => create_file.does_apply(state),
             Transition::ReplaceFile(replace_file) => replace_file.does_apply(state),
-            Transition::RemoveFile(remove_file) => todo!(),
+            Transition::RemoveFile(remove_file) => remove_file.does_apply(state),
             Transition::AddNode(add_node) => todo!(),
             Transition::RemoveNode(remove_node) => todo!(),
             Transition::AddTransclusion(add_transclusion) => todo!(),
@@ -787,6 +793,36 @@ impl Event for ReplaceFile {
     }
 }
 
+impl Event for RemoveFile {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_ids.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_ids.clone())
+                    .prop_map(|file_id| RemoveFile { file_id }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveFile { file_id } = self;
+
+        state.remove_file_nodes(*file_id);
+        let removed = state.files.remove(file_id);
+        assert!(
+            removed.is_some(),
+            "bug: file disappeared before RemoveFile::apply removed it"
+        );
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -841,6 +877,23 @@ proptest! {
         prop_assert!(
             replace_file.does_apply(&state),
             "{replace_file:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_file_strategy_implies_does_apply(
+        (state, remove_file) in state_strategy()
+            .prop_filter("RemoveFile needs an existing file", |state| !state.files.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveFile::strategy(&state, &queries)
+                    .expect("RemoveFile::strategy returns Some when files exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_file.does_apply(&state),
+            "{remove_file:?} fails does_apply in {state:?}",
         );
     }
 }
