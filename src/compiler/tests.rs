@@ -35,6 +35,13 @@ impl StateMachineTest for IncrementalMatchesStateless {
     ) -> Self::SystemUnderTest {
         todo!()
     }
+
+    fn check_invariants(
+        state: &Self::SystemUnderTest,
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) {
+        todo!()
+    }
 }
 
 prop_state_machine! {

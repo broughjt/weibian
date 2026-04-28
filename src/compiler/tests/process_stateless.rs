@@ -22,6 +22,7 @@ use crate::compiler::{
     },
 };
 
+// TODO: Needs to be updated to fit the new shape of the reference compiler state.
 pub fn process_stateless(
     files: &HashMap<NonZeroU16, HashMap<String, MockNode>>,
 ) -> anyhow::Result<(

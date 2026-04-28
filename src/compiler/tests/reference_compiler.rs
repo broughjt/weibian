@@ -1,14 +1,26 @@
-use std::{borrow::Cow, collections::HashMap, fmt::Write, num::NonZeroU16};
+use std::{
+    any,
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    num::NonZeroU16,
+    ops::Range,
+};
 
 use ecow::EcoVec;
 use proptest::{
-    prelude::{BoxedStrategy, Strategy},
-    sample::select,
+    arbitrary::any,
+    collection::{hash_map, vec},
+    option,
+    prelude::{BoxedStrategy, Just, Strategy},
+    prop_oneof,
+    sample::{self, select},
     strategy::Union,
+    string::string_regex,
 };
 use proptest_state_machine::ReferenceStateMachine;
 use typst::diag::{SourceDiagnostic, Warned};
-use typst_syntax::Span;
+use typst_syntax::{FileId, Span};
 
 use crate::compiler::{Metadata, NodeEntry, extract::NodeOutput};
 
@@ -57,14 +69,47 @@ impl ReferenceStateMachine for ReferenceCompiler {
     }
 
     fn apply(state: State, transition: &Transition) -> State {
+        match transition {
+            Transition::CreateFile(CreateFile { file_id, file }) => todo!(),
+            Transition::ReplaceFile(replace_file) => todo!(),
+            Transition::RemoveFile(remove_file) => todo!(),
+            Transition::AddNode(add_node) => todo!(),
+            Transition::RemoveNode(remove_node) => todo!(),
+            Transition::AddTransclusion(add_transclusion) => todo!(),
+            Transition::RemoveTransclusion(remove_transclusion) => todo!(),
+            Transition::AddLink(add_link) => todo!(),
+            Transition::RemoveLink(remove_link) => todo!(),
+            Transition::UpdateTitle(update_title) => todo!(),
+            Transition::UpdateBody(update_body) => todo!(),
+            Transition::EditMetadata(edit_metadata) => todo!(),
+            Transition::UpdateLinkTarget(update_link_target) => todo!(),
+            Transition::UpdateLinkContent(update_link_content) => todo!(),
+            Transition::UpdateTransclusionTarget(update_transclusion_target) => todo!(),
+            Transition::AddCompileError(add_compile_error) => todo!(),
+            Transition::RemoveCompileError(remove_compile_error) => todo!(),
+            Transition::AddCompileWarning(add_compile_warning) => todo!(),
+            Transition::RemoveCompileWarning(remove_compile_warning) => todo!(),
+            Transition::RenameNode(rename_node) => todo!(),
+        }
+    }
+
+    fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
         todo!()
     }
 }
 
-pub type CompiledMockFile = Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
+// pub type CompiledMockFile = Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>;
+
+#[derive(Debug, Clone)]
+pub struct MockFile {
+    pub nodes: HashMap<MockNodeId, MockNode>,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
+    pub identifier: MockNodeIdentifier,
     pub title: String,
     pub body: String,
     pub span: Span,
@@ -75,13 +120,13 @@ pub struct MockNode {
 
 #[derive(Debug, Clone)]
 pub struct MockTransclusion {
-    pub target: String,
+    pub target: MockNodeIdentifier,
     pub metadata: Metadata,
 }
 
 #[derive(Debug, Clone)]
 pub struct MockLink {
-    pub target: String,
+    pub target: MockNodeIdentifier,
     pub content: Option<String>,
     pub metadata: Metadata,
 }
@@ -91,8 +136,8 @@ impl From<MockNode> for NodeOutput {
         let mut body_html = String::new();
         let mut transclusion_metadata: HashMap<u32, Metadata> = HashMap::new();
         let mut link_metadata: HashMap<u32, Metadata> = HashMap::new();
-        let mut transclusions = Vec::new();
-        let mut links = Vec::new();
+        let mut transclusions = Vec::with_capacity(node.transclusions.len());
+        let mut links = Vec::with_capacity(node.links.len());
 
         if !node.body.is_empty() {
             write!(body_html, "<p>{}</p>", node.body).unwrap();
@@ -103,13 +148,13 @@ impl From<MockNode> for NodeOutput {
             write!(
                 body_html,
                 r#"<wb-transclude identifier="{}" counter="{counter}"></wb-transclude>"#,
-                transclusion.target,
+                transclusion.target.0,
             )
             .unwrap();
             if !transclusion.metadata.is_empty() {
                 transclusion_metadata.insert(counter, transclusion.metadata);
             }
-            transclusions.push(transclusion.target);
+            transclusions.push(transclusion.target.0.to_string());
         }
 
         for (counter, link) in node.links.into_iter().enumerate() {
@@ -118,13 +163,13 @@ impl From<MockNode> for NodeOutput {
             write!(
                 body_html,
                 r#"<a href="wb:{}" data-counter="{counter}">{content}</a>"#,
-                link.target,
+                link.target.0,
             )
             .unwrap();
             if !link.metadata.is_empty() {
                 link_metadata.insert(counter, link.metadata);
             }
-            links.push(link.target);
+            links.push(link.target.0.to_string());
         }
 
         let entry = NodeEntry {
@@ -145,46 +190,51 @@ impl From<MockNode> for NodeOutput {
     }
 }
 
+// We have `MockNodeId` and `MockNodeIdentifier` separately because we want to
+// allow duplicate ids. If we key by identifiers like the compiler does, our
+// data model can't express duplicates.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MockNodeId(pub u32);
 
-#[derive(Debug, Clone)]
-pub struct MockFileNode {
-    pub identifier: String,
-    pub node: MockNode,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MockNodeIdentifier(pub u32);
 
 #[derive(Clone, Debug, Default)]
-pub struct MockFile {
-    pub nodes: HashMap<MockNodeId, MockFileNode>,
+pub struct FileState {
+    pub nodes: HashSet<MockNodeId>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct State {
-    pub files: HashMap<NonZeroU16, MockFile>,
+    pub files: HashMap<NonZeroU16, FileState>,
+    pub nodes: HashMap<MockNodeId, MockNode>,
 }
 
 impl State {
     fn queries(&self) -> Queries {
-        let new_file_id = self
-            .files
-            .keys()
-            .max()
-            .map_or(NonZeroU16::new(1), |k| k.checked_add(1))
-            .unwrap();
-        let existing_file_ids: Cow<'static, [NonZeroU16]> = self.files.keys().copied().collect();
+        // let new_file_id = self
+        //     .files
+        //     .keys()
+        //     .max()
+        //     .map_or(NonZeroU16::new(1), |k| k.checked_add(1))
+        //     .unwrap();
+        // let existing_file_ids: Cow<'static, [NonZeroU16]> = self.files.keys().copied().collect();
 
-        Queries {
-            new_file_id,
-            existing_file_ids,
-        }
+        // Queries {
+        //     new_file_id,
+        //     existing_file_ids,
+        // }
+
+        todo!()
     }
 
     fn create_file_strategy(&self, queries: &Queries) -> impl Strategy<Value = CreateFile> + use<> {
-        let file_id = queries.new_file_id;
+        let file_id = queries.next_file_id;
 
+        // TODO:
         mock_file_strategy().prop_map(move |file| CreateFile { file_id, file })
     }
 
@@ -205,6 +255,7 @@ impl State {
         }
     }
 
+    // TODO: Is it worth trying to generate missing removes?
     fn remove_file_strategy(
         &self,
         queries: &Queries,
@@ -219,12 +270,28 @@ impl State {
         }
     }
 
-    // fn add_node_strategy(
-    //     &self,
-    //     queries: &Queries,
-    // ) -> Option<impl Strategy<Value = AddNode> + use<>> {
-    //     todo!()
-    // }
+    fn add_node_strategy(
+        &self,
+        queries: &Queries,
+    ) -> Option<impl Strategy<Value = AddNode> + use<>> {
+        let Queries {
+            existing_file_ids,
+            next_node_id,
+            ..
+        } = queries;
+
+        if !queries.existing_file_ids.is_empty() {
+            Some(
+                select(queries.existing_file_ids.clone()).prop_map(|file_id| AddNode {
+                    file_id,
+                    node_id: *next_node_id,
+                    node: todo!(),
+                }),
+            )
+        } else {
+            None
+        }
+    }
 
     // fn remove_node_strategy(
     //     &self,
@@ -533,10 +600,154 @@ pub enum MetadataOperation {
 }
 
 struct Queries {
-    new_file_id: NonZeroU16,
+    next_file_id: NonZeroU16,
     existing_file_ids: Cow<'static, [NonZeroU16]>,
+    next_node_id: MockNodeId,
+    existing_node_identifiers: Cow<'static, [MockNodeId]>,
+    missing_node_identifiers: Cow<'static, [MockNodeId]>,
+    next_missing_node_identifier: MockNodeId,
 }
 
-fn mock_file_strategy() -> BoxedStrategy<MockFile> {
+const METADATA_ENTRIES_MAX: usize = 6;
+const METADATA_VALUES_MAX: usize = 4;
+const NODE_TRANSCLUSIONS_MAX: usize = 5;
+const NODE_LINKS_MAX: usize = 5;
+
+fn mock_file_strategy() -> impl Strategy<Value = MockFile> {
     todo!()
+}
+
+fn mock_file_node_strategy(
+    file_id: NonZeroU16,
+    existing: Cow<'static, [String]>,
+    missing: Cow<'static, [String]>,
+    new: String,
+) -> impl Strategy<Value = MockFileNode> {
+    (
+        node_identifier_strategy(existing.clone(), missing),
+        mock_node_strategy(file_id, existing),
+    )
+        .prop_map(|(identifier, node)| MockFileNode { identifier, node })
+}
+
+fn mock_node_strategy(
+    file_id: NonZeroU16,
+    existing: Cow<'static, [MockNodeIdentifier]>,
+    missing: Cow<'static, [MockNodeIdentifier]>,
+    next_missing: MockNodeIdentifier,
+    next: MockNodeIdentifier,
+) -> impl Strategy<Value = MockNode> {
+    (
+        node_identifier_strategy(existing, missing, next),
+        title_strategy(),
+        body_strategy(),
+        span_strategy(file_id),
+        metadata_strategy(),
+        vec(
+            mock_transclusion_strategy(existing.clone(), missing.clone(), next_missing),
+            0..NODE_TRANSCLUSIONS_MAX,
+        ),
+        vec(
+            mock_link_strategy(existing, missing, next_missing),
+            0..NODE_LINKS_MAX,
+        ),
+    )
+        .prop_map(
+            |(identifier, title, body, span, metadata, transclusions, links)| MockNode {
+                identifier,
+                title,
+                body,
+                span,
+                metadata,
+                transclusions,
+                links,
+            },
+        )
+}
+
+fn span_strategy(file_id: NonZeroU16) -> impl Strategy<Value = Span> {
+    range_strategy().prop_map(move |range| Span::from_range(FileId::from_raw(file_id), range))
+}
+
+fn metadata_strategy() -> impl Strategy<Value = Metadata> {
+    hash_map(
+        metadata_key_strategy(),
+        vec(metadata_key_strategy(), 0..=METADATA_VALUES_MAX),
+        0..=METADATA_ENTRIES_MAX,
+    )
+}
+
+fn mock_transclusion_strategy(
+    existing: Cow<'static, [MockNodeIdentifier]>,
+    missing: Cow<'static, [MockNodeIdentifier]>,
+    next_missing: MockNodeIdentifier,
+) -> impl Strategy<Value = MockTransclusion> {
+    (
+        target_strategy(existing, missing, next_missing),
+        metadata_strategy(),
+    )
+        .prop_map(|(target, metadata)| MockTransclusion { target, metadata })
+}
+
+fn mock_link_strategy(
+    existing: Cow<'static, [MockNodeIdentifier]>,
+    missing: Cow<'static, [MockNodeIdentifier]>,
+    next_missing: MockNodeIdentifier,
+) -> impl Strategy<Value = MockLink> {
+    (
+        target_strategy(existing, missing, next_missing),
+        option::of(link_content_strategy()),
+        metadata_strategy(),
+    )
+        .prop_map(|(target, content, metadata)| MockLink {
+            target,
+            content,
+            metadata,
+        })
+}
+
+fn node_identifier_strategy(
+    existing: Cow<'static, [MockNodeIdentifier]>,
+    missing: Cow<'static, [MockNodeIdentifier]>,
+    next: MockNodeIdentifier,
+) -> impl Strategy<Value = MockNodeIdentifier> {
+    prop_oneof![select(existing), select(missing), Just(next)]
+}
+
+fn target_strategy(
+    existing: Cow<'static, [MockNodeIdentifier]>,
+    missing: Cow<'static, [MockNodeIdentifier]>,
+    next_missing: MockNodeIdentifier,
+) -> impl Strategy<Value = MockNodeIdentifier> {
+    prop_oneof![select(existing), select(missing), Just(next_missing)]
+}
+
+// Helpers
+
+fn body_strategy() -> impl Strategy<Value = String> {
+    "[a-z]*"
+}
+
+fn title_strategy() -> impl Strategy<Value = String> {
+    "[a-z]*"
+}
+
+fn identifier_strategy() -> impl Strategy<Value = String> {
+    "[a-z]{0,5}"
+}
+
+fn metadata_key_strategy() -> impl Strategy<Value = String> {
+    "[a-z]*"
+}
+
+fn link_content_strategy() -> impl Strategy<Value = String> {
+    "[a-z]+"
+}
+
+fn range_strategy() -> impl Strategy<Value = Range<usize>> {
+    any::<(usize, usize)>().prop_map(|(a, b)| {
+        let start = a.min(b);
+        let end = a.max(b);
+        start..end
+    })
 }
