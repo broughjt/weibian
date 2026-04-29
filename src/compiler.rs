@@ -589,6 +589,13 @@ fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
 
 // TODO: Future improvement: We have spans, we should not use detached for these diagnostics
 
+fn duplicate_node_identifier_diagnostic(name: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("duplicate node identifier across files: {name:?}"),
+    )
+}
+
 fn dangling_transclusion_diagnostic(name: &str) -> SourceDiagnostic {
     SourceDiagnostic::warning(
         Span::detached(),
