@@ -42,6 +42,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_LINK_WEIGHT: u32 = 1;
         const UPDATE_TITLE_WEIGHT: u32 = 1;
         const UPDATE_BODY_WEIGHT: u32 = 1;
+        const UPDATE_LINK_TARGET_WEIGHT: u32 = 1;
+        const UPDATE_LINK_CONTENT_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -117,6 +119,22 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 update_body.prop_map(Transition::UpdateBody).boxed(),
             ));
         }
+        if let Some(update_link_target) = UpdateLinkTarget::strategy(state, &queries) {
+            strategies.push((
+                UPDATE_LINK_TARGET_WEIGHT,
+                update_link_target
+                    .prop_map(Transition::UpdateLinkTarget)
+                    .boxed(),
+            ));
+        }
+        if let Some(update_link_content) = UpdateLinkContent::strategy(state, &queries) {
+            strategies.push((
+                UPDATE_LINK_CONTENT_WEIGHT,
+                update_link_content
+                    .prop_map(Transition::UpdateLinkContent)
+                    .boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -135,8 +153,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::UpdateTitle(update_title) => update_title.apply(state),
             Transition::UpdateBody(update_body) => update_body.apply(state),
             Transition::EditMetadata(edit_metadata) => todo!(),
-            Transition::UpdateLinkTarget(update_link_target) => todo!(),
-            Transition::UpdateLinkContent(update_link_content) => todo!(),
+            Transition::UpdateLinkTarget(update_link_target) => update_link_target.apply(state),
+            Transition::UpdateLinkContent(update_link_content) => update_link_content.apply(state),
             Transition::UpdateTransclusionTarget(update_transclusion_target) => todo!(),
             Transition::AddCompileError(add_compile_error) => todo!(),
             Transition::RemoveCompileError(remove_compile_error) => todo!(),
@@ -162,8 +180,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::UpdateTitle(update_title) => update_title.does_apply(state),
             Transition::UpdateBody(update_body) => update_body.does_apply(state),
             Transition::EditMetadata(edit_metadata) => todo!(),
-            Transition::UpdateLinkTarget(update_link_target) => todo!(),
-            Transition::UpdateLinkContent(update_link_content) => todo!(),
+            Transition::UpdateLinkTarget(update_link_target) => {
+                update_link_target.does_apply(state)
+            }
+            Transition::UpdateLinkContent(update_link_content) => {
+                update_link_content.does_apply(state)
+            }
             Transition::UpdateTransclusionTarget(update_transclusion_target) => todo!(),
             Transition::AddCompileError(add_compile_error) => todo!(),
             Transition::RemoveCompileError(remove_compile_error) => todo!(),
@@ -566,7 +588,7 @@ pub struct UpdateLinkTarget {
     pub file_id: FileId,
     pub node_id: MockNodeId,
     pub link_index: u32,
-    pub new_target: String,
+    pub new_target: MockNodeIdentifier,
 }
 
 #[derive(Debug, Clone)]
@@ -582,7 +604,7 @@ pub struct UpdateTransclusionTarget {
     pub file_id: FileId,
     pub node_id: MockNodeId,
     pub transclusion_index: u32,
-    pub new_target: String,
+    pub new_target: MockNodeIdentifier,
 }
 
 #[derive(Debug, Clone)]
@@ -613,7 +635,7 @@ pub struct RemoveCompileWarning {
 pub struct RenameNode {
     pub file_id: FileId,
     pub node_id: MockNodeId,
-    pub new_id: String,
+    pub new_id: MockNodeIdentifier,
 }
 
 #[derive(Debug, Clone)]
@@ -1277,6 +1299,110 @@ impl Event for UpdateBody {
     }
 }
 
+impl Event for UpdateLinkTarget {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_link_triples.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_link_triples.clone()),
+                    target_strategy(queries),
+                )
+                    .prop_map(|((file_id, node_id, link_index), new_target)| {
+                        UpdateLinkTarget {
+                            file_id,
+                            node_id,
+                            link_index,
+                            new_target,
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state
+                .nodes
+                .get(&self.node_id)
+                .is_some_and(|node| self.link_index < node.links.len() as u32)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let UpdateLinkTarget {
+            file_id: _,
+            node_id,
+            link_index,
+            new_target,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: UpdateLinkTarget target node disappeared before apply");
+        let link = node
+            .links
+            .get_mut(*link_index as usize)
+            .expect("bug: UpdateLinkTarget target link disappeared before apply");
+        link.target = *new_target;
+
+        state
+    }
+}
+
+impl Event for UpdateLinkContent {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_link_triples.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_link_triples.clone()),
+                    option::of(link_content_strategy()),
+                )
+                    .prop_map(|((file_id, node_id, link_index), new_content)| {
+                        UpdateLinkContent {
+                            file_id,
+                            node_id,
+                            link_index,
+                            new_content,
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state
+                .nodes
+                .get(&self.node_id)
+                .is_some_and(|node| self.link_index < node.links.len() as u32)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let UpdateLinkContent {
+            file_id: _,
+            node_id,
+            link_index,
+            new_content,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: UpdateLinkContent target node disappeared before apply");
+        let link = node
+            .links
+            .get_mut(*link_index as usize)
+            .expect("bug: UpdateLinkContent target link disappeared before apply");
+        link.content = new_content.clone();
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1490,6 +1616,46 @@ proptest! {
         prop_assert!(
             update_body.does_apply(&state),
             "{update_body:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn update_link_target_strategy_implies_does_apply(
+        (state, update_link_target) in state_strategy()
+            .prop_filter(
+                "UpdateLinkTarget needs an existing link",
+                |state| state.nodes.values().any(|node| !node.links.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = UpdateLinkTarget::strategy(&state, &queries)
+                    .expect("UpdateLinkTarget::strategy returns Some when links exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            update_link_target.does_apply(&state),
+            "{update_link_target:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn update_link_content_strategy_implies_does_apply(
+        (state, update_link_content) in state_strategy()
+            .prop_filter(
+                "UpdateLinkContent needs an existing link",
+                |state| state.nodes.values().any(|node| !node.links.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = UpdateLinkContent::strategy(&state, &queries)
+                    .expect("UpdateLinkContent::strategy returns Some when links exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            update_link_content.does_apply(&state),
+            "{update_link_content:?} fails does_apply in {state:?}",
         );
     }
 }
