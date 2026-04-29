@@ -36,6 +36,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_FILE_WEIGHT: u32 = 1;
         const ADD_NODE_WEIGHT: u32 = 1;
         const REMOVE_NODE_WEIGHT: u32 = 1;
+        const ADD_TRANSCLUSION_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -71,6 +72,14 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 remove_node.prop_map(Transition::RemoveNode).boxed(),
             ));
         }
+        if let Some(add_transclusion) = AddTransclusion::strategy(state, &queries) {
+            strategies.push((
+                ADD_TRANSCLUSION_WEIGHT,
+                add_transclusion
+                    .prop_map(Transition::AddTransclusion)
+                    .boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -82,7 +91,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveFile(remove_file) => remove_file.apply(state),
             Transition::AddNode(add_node) => add_node.apply(state),
             Transition::RemoveNode(remove_node) => remove_node.apply(state),
-            Transition::AddTransclusion(add_transclusion) => todo!(),
+            Transition::AddTransclusion(add_transclusion) => add_transclusion.apply(state),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
             Transition::AddLink(add_link) => todo!(),
             Transition::RemoveLink(remove_link) => todo!(),
@@ -107,7 +116,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveFile(remove_file) => remove_file.does_apply(state),
             Transition::AddNode(add_node) => add_node.does_apply(state),
             Transition::RemoveNode(remove_node) => remove_node.does_apply(state),
-            Transition::AddTransclusion(add_transclusion) => todo!(),
+            Transition::AddTransclusion(add_transclusion) => add_transclusion.does_apply(state),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
             Transition::AddLink(add_link) => todo!(),
             Transition::RemoveLink(remove_link) => todo!(),
@@ -915,8 +924,7 @@ impl Event for RemoveNode {
     }
 
     fn does_apply(&self, state: &State) -> bool {
-        state.files.contains_key(&self.file_id)
-            && state.files[&self.file_id].nodes.contains(&self.node_id)
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
     }
 
     fn apply(&self, mut state: State) -> State {
@@ -937,6 +945,48 @@ impl Event for RemoveNode {
             removed_from_nodes.is_some(),
             "bug: RemoveNode targeted a node id missing from the global node store"
         );
+
+        state
+    }
+}
+
+impl Event for AddTransclusion {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_pairs.clone()),
+                    mock_transclusion_strategy(queries),
+                )
+                    .prop_map(|((file_id, node_id), transclusion)| {
+                        AddTransclusion {
+                            file_id,
+                            node_id,
+                            transclusion,
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let AddTransclusion {
+            file_id: _,
+            node_id,
+            transclusion,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: AddTransclusion target node disappeared before apply");
+        node.transclusions.push(transclusion.clone());
 
         state
     }
@@ -1047,6 +1097,23 @@ proptest! {
         prop_assert!(
             remove_node.does_apply(&state),
             "{remove_node:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn add_transclusion_strategy_implies_does_apply(
+        (state, add_transclusion) in state_strategy()
+            .prop_filter("AddTransclusion needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = AddTransclusion::strategy(&state, &queries)
+                    .expect("AddTransclusion::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            add_transclusion.does_apply(&state),
+            "{add_transclusion:?} fails does_apply in {state:?}",
         );
     }
 }
