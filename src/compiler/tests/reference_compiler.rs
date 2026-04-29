@@ -50,6 +50,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_COMPILE_ERROR_WEIGHT: u32 = 1;
         const ADD_COMPILE_WARNING_WEIGHT: u32 = 1;
         const REMOVE_COMPILE_WARNING_WEIGHT: u32 = 1;
+        const RENAME_NODE_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -189,6 +190,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
                     .boxed(),
             ));
         }
+        if let Some(rename_node) = RenameNode::strategy(state, &queries) {
+            strategies.push((
+                RENAME_NODE_WEIGHT,
+                rename_node.prop_map(Transition::RenameNode).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -220,7 +227,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveCompileWarning(remove_compile_warning) => {
                 remove_compile_warning.apply(state)
             }
-            Transition::RenameNode(rename_node) => todo!(),
+            Transition::RenameNode(rename_node) => rename_node.apply(state),
         }
     }
 
@@ -259,7 +266,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveCompileWarning(remove_compile_warning) => {
                 remove_compile_warning.does_apply(state)
             }
-            Transition::RenameNode(rename_node) => todo!(),
+            Transition::RenameNode(rename_node) => rename_node.does_apply(state),
         }
     }
 }
@@ -560,45 +567,6 @@ impl State {
             next_missing_node_identifier,
         }
     }
-
-    // fn create_file_strategy(&self, queries: &Queries) -> impl Strategy<Value = CreateFile> + use<> {
-    //     let file_id = queries.next_file_id;
-
-    //     // TODO:
-    //     mock_file_strategy().prop_map(move |file| CreateFile { file_id, file })
-    // }
-
-    // fn replace_file_strategy(
-    //     &self,
-    //     queries: &Queries,
-    // ) -> Option<impl Strategy<Value = ReplaceFile> + use<>> {
-    //     if !queries.existing_file_ids.is_empty() {
-    //         Some(
-    //             (
-    //                 select(queries.existing_file_ids.clone()),
-    //                 mock_file_strategy(),
-    //             )
-    //                 .prop_map(move |(file_id, file)| ReplaceFile { file_id, file }),
-    //         )
-    //     } else {
-    //         None
-    //     }
-    // }
-
-    // // TODO: Is it worth trying to generate missing removes?
-    // fn remove_file_strategy(
-    //     &self,
-    //     queries: &Queries,
-    // ) -> Option<impl Strategy<Value = RemoveFile> + use<>> {
-    //     if !queries.existing_file_ids.is_empty() {
-    //         Some(
-    //             select(queries.existing_file_ids.clone())
-    //                 .prop_map(|file_id| RemoveFile { file_id }),
-    //         )
-    //     } else {
-    //         None
-    //     }
-    // }
 }
 
 #[derive(Debug, Clone)]
@@ -1898,6 +1866,46 @@ impl Event for RemoveCompileWarning {
     }
 }
 
+impl Event for RenameNode {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_pairs.clone()),
+                    node_identifier_strategy(queries),
+                )
+                    .prop_map(|((file_id, node_id), new_id)| RenameNode {
+                        file_id,
+                        node_id,
+                        new_id,
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RenameNode {
+            file_id: _,
+            node_id,
+            new_id,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: RenameNode target node disappeared before apply");
+        node.identifier = *new_id;
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -2265,6 +2273,23 @@ proptest! {
         prop_assert!(
             remove_compile_warning.does_apply(&state),
             "{remove_compile_warning:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn rename_node_strategy_implies_does_apply(
+        (state, rename_node) in state_strategy()
+            .prop_filter("RenameNode needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RenameNode::strategy(&state, &queries)
+                    .expect("RenameNode::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            rename_node.does_apply(&state),
+            "{rename_node:?} fails does_apply in {state:?}",
         );
     }
 }
