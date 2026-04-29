@@ -38,6 +38,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_NODE_WEIGHT: u32 = 1;
         const ADD_TRANSCLUSION_WEIGHT: u32 = 1;
         const REMOVE_TRANSCLUSION_WEIGHT: u32 = 1;
+        const ADD_LINK_WEIGHT: u32 = 1;
+        const REMOVE_LINK_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -89,6 +91,18 @@ impl ReferenceStateMachine for ReferenceCompiler {
                     .boxed(),
             ));
         }
+        if let Some(add_link) = AddLink::strategy(state, &queries) {
+            strategies.push((
+                ADD_LINK_WEIGHT,
+                add_link.prop_map(Transition::AddLink).boxed(),
+            ));
+        }
+        if let Some(remove_link) = RemoveLink::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_LINK_WEIGHT,
+                remove_link.prop_map(Transition::RemoveLink).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -102,8 +116,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveNode(remove_node) => remove_node.apply(state),
             Transition::AddTransclusion(add_transclusion) => add_transclusion.apply(state),
             Transition::RemoveTransclusion(remove_transclusion) => remove_transclusion.apply(state),
-            Transition::AddLink(add_link) => todo!(),
-            Transition::RemoveLink(remove_link) => todo!(),
+            Transition::AddLink(add_link) => add_link.apply(state),
+            Transition::RemoveLink(remove_link) => remove_link.apply(state),
             Transition::UpdateTitle(update_title) => todo!(),
             Transition::UpdateBody(update_body) => todo!(),
             Transition::EditMetadata(edit_metadata) => todo!(),
@@ -129,8 +143,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveTransclusion(remove_transclusion) => {
                 remove_transclusion.does_apply(state)
             }
-            Transition::AddLink(add_link) => todo!(),
-            Transition::RemoveLink(remove_link) => todo!(),
+            Transition::AddLink(add_link) => add_link.does_apply(state),
+            Transition::RemoveLink(remove_link) => remove_link.does_apply(state),
             Transition::UpdateTitle(update_title) => todo!(),
             Transition::UpdateBody(update_body) => todo!(),
             Transition::EditMetadata(edit_metadata) => todo!(),
@@ -277,6 +291,24 @@ impl State {
         existing_file_node_transclusion_triples
             .sort_by_key(|(file_id, node_id, index)| (file_id.into_raw(), node_id.0, *index));
 
+        let mut existing_file_node_link_triples: Vec<(FileId, MockNodeId, u32)> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, file)| {
+                file.nodes.iter().copied().flat_map(move |node_id| {
+                    let link_len = self
+                        .nodes
+                        .get(&node_id)
+                        .expect("bug: file-owned node missing from global node store")
+                        .links
+                        .len() as u32;
+                    (0..link_len).map(move |index| (file_id, node_id, index))
+                })
+            })
+            .collect();
+        existing_file_node_link_triples
+            .sort_by_key(|(file_id, node_id, index)| (file_id.into_raw(), node_id.0, *index));
+
         let next_node_id = MockNodeId(
             self.nodes
                 .keys()
@@ -331,6 +363,7 @@ impl State {
             existing_file_node_transclusion_triples: Cow::Owned(
                 existing_file_node_transclusion_triples,
             ),
+            existing_file_node_link_triples: Cow::Owned(existing_file_node_link_triples),
             next_node_id,
             next_node_identifier,
             existing_node_identifiers: Cow::Owned(existing_sorted),
@@ -607,6 +640,7 @@ struct Queries {
     existing_file_ids: Cow<'static, [FileId]>,
     existing_file_node_pairs: Cow<'static, [(FileId, MockNodeId)]>,
     existing_file_node_transclusion_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
+    existing_file_node_link_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
     next_node_id: MockNodeId,
     next_node_identifier: MockNodeIdentifier,
     existing_node_identifiers: Cow<'static, [MockNodeIdentifier]>,
@@ -1067,6 +1101,88 @@ impl Event for RemoveTransclusion {
     }
 }
 
+impl Event for AddLink {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_pairs.clone()),
+                    mock_link_strategy(queries),
+                )
+                    .prop_map(|((file_id, node_id), link)| AddLink {
+                        file_id,
+                        node_id,
+                        link,
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let AddLink {
+            file_id: _,
+            node_id,
+            link,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: AddLink target node disappeared before apply");
+        node.links.push(link.clone());
+
+        state
+    }
+}
+
+impl Event for RemoveLink {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_link_triples.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_node_link_triples.clone()).prop_map(
+                    |(file_id, node_id, index)| RemoveLink {
+                        file_id,
+                        node_id,
+                        index,
+                    },
+                ),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state
+                .nodes
+                .get(&self.node_id)
+                .is_some_and(|node| self.index < node.links.len() as u32)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveLink {
+            file_id: _,
+            node_id,
+            index,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: RemoveLink target node disappeared before apply");
+        node.links.remove(*index as usize);
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1209,6 +1325,43 @@ proptest! {
         prop_assert!(
             remove_transclusion.does_apply(&state),
             "{remove_transclusion:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn add_link_strategy_implies_does_apply(
+        (state, add_link) in state_strategy()
+            .prop_filter("AddLink needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = AddLink::strategy(&state, &queries)
+                    .expect("AddLink::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            add_link.does_apply(&state),
+            "{add_link:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_link_strategy_implies_does_apply(
+        (state, remove_link) in state_strategy()
+            .prop_filter(
+                "RemoveLink needs an existing link",
+                |state| state.nodes.values().any(|node| !node.links.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveLink::strategy(&state, &queries)
+                    .expect("RemoveLink::strategy returns Some when links exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_link.does_apply(&state),
+            "{remove_link:?} fails does_apply in {state:?}",
         );
     }
 }
