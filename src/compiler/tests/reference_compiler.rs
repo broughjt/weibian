@@ -291,10 +291,9 @@ pub struct FileState {
     pub warnings: Vec<String>,
 }
 
-// TODO: Invariant — every `MockNodeId` in `nodes` is owned by exactly one
-// `FileState` (i.e. appears in exactly one `files[*].nodes`). All
-// `Event::apply` impls must maintain this. Worth writing a property test that
-// asserts the invariant after each transition.
+// Invariant: every `MockNodeId` in `nodes` is owned by exactly one `FileState`
+// (i.e. appears in exactly one `files[*].nodes`). All `Event::apply` impls must
+// maintain this. There is a test for this below.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     pub files: HashMap<FileId, FileState>,
@@ -1921,6 +1920,21 @@ fn state_and_next_transition_strategy() -> impl Strategy<Value = (State, Transit
 }
 
 proptest! {
+    #[test]
+    fn every_node_is_owned_by_exactly_one_file_state(state in state_strategy()) {
+        for node_id in state.nodes.keys() {
+            let owners = state
+                .files
+                .values()
+                .filter(|file| file.nodes.contains(node_id))
+                .count();
+            prop_assert!(
+                owners == 1,
+                "{node_id:?} is owned by {owners} FileStates (expected 1) in {state:?}",
+            );
+        }
+    }
+
     #[test]
     fn transitions_satisfy_preconditions(
         (state, transition) in state_and_next_transition_strategy()
