@@ -40,6 +40,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_TRANSCLUSION_WEIGHT: u32 = 1;
         const ADD_LINK_WEIGHT: u32 = 1;
         const REMOVE_LINK_WEIGHT: u32 = 1;
+        const UPDATE_TITLE_WEIGHT: u32 = 1;
+        const UPDATE_BODY_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -103,6 +105,18 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 remove_link.prop_map(Transition::RemoveLink).boxed(),
             ));
         }
+        if let Some(update_title) = UpdateTitle::strategy(state, &queries) {
+            strategies.push((
+                UPDATE_TITLE_WEIGHT,
+                update_title.prop_map(Transition::UpdateTitle).boxed(),
+            ));
+        }
+        if let Some(update_body) = UpdateBody::strategy(state, &queries) {
+            strategies.push((
+                UPDATE_BODY_WEIGHT,
+                update_body.prop_map(Transition::UpdateBody).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -118,8 +132,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveTransclusion(remove_transclusion) => remove_transclusion.apply(state),
             Transition::AddLink(add_link) => add_link.apply(state),
             Transition::RemoveLink(remove_link) => remove_link.apply(state),
-            Transition::UpdateTitle(update_title) => todo!(),
-            Transition::UpdateBody(update_body) => todo!(),
+            Transition::UpdateTitle(update_title) => update_title.apply(state),
+            Transition::UpdateBody(update_body) => update_body.apply(state),
             Transition::EditMetadata(edit_metadata) => todo!(),
             Transition::UpdateLinkTarget(update_link_target) => todo!(),
             Transition::UpdateLinkContent(update_link_content) => todo!(),
@@ -145,8 +159,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
             }
             Transition::AddLink(add_link) => add_link.does_apply(state),
             Transition::RemoveLink(remove_link) => remove_link.does_apply(state),
-            Transition::UpdateTitle(update_title) => todo!(),
-            Transition::UpdateBody(update_body) => todo!(),
+            Transition::UpdateTitle(update_title) => update_title.does_apply(state),
+            Transition::UpdateBody(update_body) => update_body.does_apply(state),
             Transition::EditMetadata(edit_metadata) => todo!(),
             Transition::UpdateLinkTarget(update_link_target) => todo!(),
             Transition::UpdateLinkContent(update_link_content) => todo!(),
@@ -1183,6 +1197,86 @@ impl Event for RemoveLink {
     }
 }
 
+impl Event for UpdateTitle {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_pairs.clone()),
+                    title_strategy(),
+                )
+                    .prop_map(|((file_id, node_id), title)| UpdateTitle {
+                        file_id,
+                        node_id,
+                        title,
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let UpdateTitle {
+            file_id: _,
+            node_id,
+            title,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: UpdateTitle target node disappeared before apply");
+        node.title = title.clone();
+
+        state
+    }
+}
+
+impl Event for UpdateBody {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_pairs.clone()),
+                    body_strategy(),
+                )
+                    .prop_map(|((file_id, node_id), body)| UpdateBody {
+                        file_id,
+                        node_id,
+                        body,
+                    }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id) && state.nodes.contains_key(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let UpdateBody {
+            file_id: _,
+            node_id,
+            body,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: UpdateBody target node disappeared before apply");
+        node.body = body.clone();
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1362,6 +1456,40 @@ proptest! {
         prop_assert!(
             remove_link.does_apply(&state),
             "{remove_link:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn update_title_strategy_implies_does_apply(
+        (state, update_title) in state_strategy()
+            .prop_filter("UpdateTitle needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = UpdateTitle::strategy(&state, &queries)
+                    .expect("UpdateTitle::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            update_title.does_apply(&state),
+            "{update_title:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn update_body_strategy_implies_does_apply(
+        (state, update_body) in state_strategy()
+            .prop_filter("UpdateBody needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = UpdateBody::strategy(&state, &queries)
+                    .expect("UpdateBody::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            update_body.does_apply(&state),
+            "{update_body:?} fails does_apply in {state:?}",
         );
     }
 }
