@@ -37,6 +37,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const ADD_NODE_WEIGHT: u32 = 1;
         const REMOVE_NODE_WEIGHT: u32 = 1;
         const ADD_TRANSCLUSION_WEIGHT: u32 = 1;
+        const REMOVE_TRANSCLUSION_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -80,6 +81,14 @@ impl ReferenceStateMachine for ReferenceCompiler {
                     .boxed(),
             ));
         }
+        if let Some(remove_transclusion) = RemoveTransclusion::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_TRANSCLUSION_WEIGHT,
+                remove_transclusion
+                    .prop_map(Transition::RemoveTransclusion)
+                    .boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -92,7 +101,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::AddNode(add_node) => add_node.apply(state),
             Transition::RemoveNode(remove_node) => remove_node.apply(state),
             Transition::AddTransclusion(add_transclusion) => add_transclusion.apply(state),
-            Transition::RemoveTransclusion(remove_transclusion) => todo!(),
+            Transition::RemoveTransclusion(remove_transclusion) => remove_transclusion.apply(state),
             Transition::AddLink(add_link) => todo!(),
             Transition::RemoveLink(remove_link) => todo!(),
             Transition::UpdateTitle(update_title) => todo!(),
@@ -117,7 +126,9 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::AddNode(add_node) => add_node.does_apply(state),
             Transition::RemoveNode(remove_node) => remove_node.does_apply(state),
             Transition::AddTransclusion(add_transclusion) => add_transclusion.does_apply(state),
-            Transition::RemoveTransclusion(remove_transclusion) => todo!(),
+            Transition::RemoveTransclusion(remove_transclusion) => {
+                remove_transclusion.does_apply(state)
+            }
             Transition::AddLink(add_link) => todo!(),
             Transition::RemoveLink(remove_link) => todo!(),
             Transition::UpdateTitle(update_title) => todo!(),
@@ -248,6 +259,24 @@ impl State {
             .collect();
         existing_file_node_pairs.sort_by_key(|(file_id, node_id)| (file_id.into_raw(), node_id.0));
 
+        let mut existing_file_node_transclusion_triples: Vec<(FileId, MockNodeId, u32)> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, file)| {
+                file.nodes.iter().copied().flat_map(move |node_id| {
+                    let transclusion_len = self
+                        .nodes
+                        .get(&node_id)
+                        .expect("bug: file-owned node missing from global node store")
+                        .transclusions
+                        .len() as u32;
+                    (0..transclusion_len).map(move |index| (file_id, node_id, index))
+                })
+            })
+            .collect();
+        existing_file_node_transclusion_triples
+            .sort_by_key(|(file_id, node_id, index)| (file_id.into_raw(), node_id.0, *index));
+
         let next_node_id = MockNodeId(
             self.nodes
                 .keys()
@@ -299,6 +328,9 @@ impl State {
             next_file_id,
             existing_file_ids: Cow::Owned(existing_file_ids),
             existing_file_node_pairs: Cow::Owned(existing_file_node_pairs),
+            existing_file_node_transclusion_triples: Cow::Owned(
+                existing_file_node_transclusion_triples,
+            ),
             next_node_id,
             next_node_identifier,
             existing_node_identifiers: Cow::Owned(existing_sorted),
@@ -574,6 +606,7 @@ struct Queries {
     next_file_id: FileId,
     existing_file_ids: Cow<'static, [FileId]>,
     existing_file_node_pairs: Cow<'static, [(FileId, MockNodeId)]>,
+    existing_file_node_transclusion_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
     next_node_id: MockNodeId,
     next_node_identifier: MockNodeIdentifier,
     existing_node_identifiers: Cow<'static, [MockNodeIdentifier]>,
@@ -992,6 +1025,48 @@ impl Event for AddTransclusion {
     }
 }
 
+impl Event for RemoveTransclusion {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_transclusion_triples.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_node_transclusion_triples.clone()).prop_map(
+                    |(file_id, node_id, index)| RemoveTransclusion {
+                        file_id,
+                        node_id,
+                        index,
+                    },
+                ),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state
+                .nodes
+                .get(&self.node_id)
+                .is_some_and(|node| self.index < node.transclusions.len() as u32)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveTransclusion {
+            file_id: _,
+            node_id,
+            index,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: RemoveTransclusion target node disappeared before apply");
+        node.transclusions.remove(*index as usize);
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1114,6 +1189,26 @@ proptest! {
         prop_assert!(
             add_transclusion.does_apply(&state),
             "{add_transclusion:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_transclusion_strategy_implies_does_apply(
+        (state, remove_transclusion) in state_strategy()
+            .prop_filter(
+                "RemoveTransclusion needs an existing transclusion",
+                |state| state.nodes.values().any(|node| !node.transclusions.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveTransclusion::strategy(&state, &queries)
+                    .expect("RemoveTransclusion::strategy returns Some when transclusions exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_transclusion.does_apply(&state),
+            "{remove_transclusion:?} fails does_apply in {state:?}",
         );
     }
 }
