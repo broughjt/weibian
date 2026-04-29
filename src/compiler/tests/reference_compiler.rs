@@ -42,6 +42,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const REMOVE_LINK_WEIGHT: u32 = 1;
         const UPDATE_TITLE_WEIGHT: u32 = 1;
         const UPDATE_BODY_WEIGHT: u32 = 1;
+        const EDIT_METADATA_WEIGHT: u32 = 1;
         const UPDATE_LINK_TARGET_WEIGHT: u32 = 1;
         const UPDATE_LINK_CONTENT_WEIGHT: u32 = 1;
         const UPDATE_TRANSCLUSION_TARGET_WEIGHT: u32 = 1;
@@ -120,6 +121,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 update_body.prop_map(Transition::UpdateBody).boxed(),
             ));
         }
+        if let Some(edit_metadata) = EditMetadata::strategy(state, &queries) {
+            strategies.push((
+                EDIT_METADATA_WEIGHT,
+                edit_metadata.prop_map(Transition::EditMetadata).boxed(),
+            ));
+        }
         if let Some(update_link_target) = UpdateLinkTarget::strategy(state, &queries) {
             strategies.push((
                 UPDATE_LINK_TARGET_WEIGHT,
@@ -163,7 +170,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveLink(remove_link) => remove_link.apply(state),
             Transition::UpdateTitle(update_title) => update_title.apply(state),
             Transition::UpdateBody(update_body) => update_body.apply(state),
-            Transition::EditMetadata(edit_metadata) => todo!(),
+            Transition::EditMetadata(edit_metadata) => edit_metadata.apply(state),
             Transition::UpdateLinkTarget(update_link_target) => update_link_target.apply(state),
             Transition::UpdateLinkContent(update_link_content) => update_link_content.apply(state),
             Transition::UpdateTransclusionTarget(update_transclusion_target) => {
@@ -192,7 +199,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::RemoveLink(remove_link) => remove_link.does_apply(state),
             Transition::UpdateTitle(update_title) => update_title.does_apply(state),
             Transition::UpdateBody(update_body) => update_body.does_apply(state),
-            Transition::EditMetadata(edit_metadata) => todo!(),
+            Transition::EditMetadata(edit_metadata) => edit_metadata.does_apply(state),
             Transition::UpdateLinkTarget(update_link_target) => {
                 update_link_target.does_apply(state)
             }
@@ -298,6 +305,41 @@ impl State {
         }
     }
 
+    fn metadata(&self, node_id: MockNodeId, target: &MetadataTarget) -> Option<&Metadata> {
+        let node = self.nodes.get(&node_id)?;
+
+        match target {
+            MetadataTarget::Node => Some(&node.metadata),
+            MetadataTarget::Link { index } => {
+                node.links.get(*index as usize).map(|link| &link.metadata)
+            }
+            MetadataTarget::Transclusion { index } => node
+                .transclusions
+                .get(*index as usize)
+                .map(|transclusion| &transclusion.metadata),
+        }
+    }
+
+    fn metadata_mut(
+        &mut self,
+        node_id: MockNodeId,
+        target: &MetadataTarget,
+    ) -> Option<&mut Metadata> {
+        let node = self.nodes.get_mut(&node_id)?;
+
+        match target {
+            MetadataTarget::Node => Some(&mut node.metadata),
+            MetadataTarget::Link { index } => node
+                .links
+                .get_mut(*index as usize)
+                .map(|link| &mut link.metadata),
+            MetadataTarget::Transclusion { index } => node
+                .transclusions
+                .get_mut(*index as usize)
+                .map(|transclusion| &mut transclusion.metadata),
+        }
+    }
+
     fn queries(&self) -> Queries {
         let next_file_id = FileId::from_raw(
             self.files
@@ -360,6 +402,37 @@ impl State {
         existing_file_node_link_triples
             .sort_by_key(|(file_id, node_id, index)| (file_id.into_raw(), node_id.0, *index));
 
+        let mut existing_metadata_targets: Vec<(FileId, MockNodeId, MetadataTarget)> =
+            existing_file_node_pairs
+                .iter()
+                .map(|&(file_id, node_id)| (file_id, node_id, MetadataTarget::Node))
+                .chain(
+                    existing_file_node_link_triples
+                        .iter()
+                        .map(|&(file_id, node_id, index)| {
+                            (file_id, node_id, MetadataTarget::Link { index })
+                        }),
+                )
+                .chain(existing_file_node_transclusion_triples.iter().map(
+                    |&(file_id, node_id, index)| {
+                        (file_id, node_id, MetadataTarget::Transclusion { index })
+                    },
+                ))
+                .collect();
+        existing_metadata_targets.sort_by_key(|(file_id, node_id, target)| {
+            let target_discriminant = match target {
+                MetadataTarget::Node => (0u8, 0u32),
+                MetadataTarget::Link { index } => (1u8, *index),
+                MetadataTarget::Transclusion { index } => (2u8, *index),
+            };
+            (
+                file_id.into_raw(),
+                node_id.0,
+                target_discriminant.0,
+                target_discriminant.1,
+            )
+        });
+
         let next_node_id = MockNodeId(
             self.nodes
                 .keys()
@@ -415,6 +488,7 @@ impl State {
                 existing_file_node_transclusion_triples,
             ),
             existing_file_node_link_triples: Cow::Owned(existing_file_node_link_triples),
+            existing_metadata_targets: Cow::Owned(existing_metadata_targets),
             next_node_id,
             next_node_identifier,
             existing_node_identifiers: Cow::Owned(existing_sorted),
@@ -692,6 +766,7 @@ struct Queries {
     existing_file_node_pairs: Cow<'static, [(FileId, MockNodeId)]>,
     existing_file_node_transclusion_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
     existing_file_node_link_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
+    existing_metadata_targets: Cow<'static, [(FileId, MockNodeId, MetadataTarget)]>,
     next_node_id: MockNodeId,
     next_node_identifier: MockNodeIdentifier,
     existing_node_identifiers: Cow<'static, [MockNodeIdentifier]>,
@@ -854,6 +929,68 @@ fn range_strategy() -> impl Strategy<Value = Range<usize>> {
         let end = a.max(b);
         start..end
     })
+}
+
+fn metadata_operation_strategy(
+    metadata: &Metadata,
+) -> impl Strategy<Value = MetadataOperation> + use<> {
+    let mut strategies: Vec<BoxedStrategy<MetadataOperation>> = vec![
+        metadata_strategy()
+            .prop_map(MetadataOperation::ReplaceAll)
+            .boxed(),
+        Just(MetadataOperation::Clear).boxed(),
+        (
+            metadata_key_strategy(),
+            vec(metadata_key_strategy(), 0..=METADATA_VALUES_MAX),
+        )
+            .prop_map(|(key, values)| MetadataOperation::InsertKey { key, values })
+            .boxed(),
+    ];
+
+    let mut keys: Vec<String> = metadata.keys().cloned().collect();
+    keys.sort();
+    keys.dedup();
+    let keys: Cow<'static, [String]> = Cow::Owned(keys);
+
+    if !keys.is_empty() {
+        strategies.push(
+            select(keys.clone())
+                .prop_map(|key| MetadataOperation::RemoveKey { key })
+                .boxed(),
+        );
+        strategies.push(
+            (select(keys), metadata_key_strategy())
+                .prop_map(|(key, value)| MetadataOperation::AppendValue { key, value })
+                .boxed(),
+        );
+    }
+
+    let key_indices: Cow<'static, [(String, usize)]> = Cow::Owned(
+        metadata
+            .iter()
+            .flat_map(|(key, values)| (0..values.len()).map(move |index| (key.clone(), index)))
+            .collect(),
+    );
+    if !key_indices.is_empty() {
+        strategies.push(
+            select(key_indices.clone())
+                .prop_map(|(key, index)| MetadataOperation::RemoveValue { key, index })
+                .boxed(),
+        );
+        strategies.push(
+            (select(key_indices), metadata_key_strategy())
+                .prop_map(
+                    |((key, index), new_value)| MetadataOperation::ReplaceValue {
+                        key,
+                        index,
+                        new_value,
+                    },
+                )
+                .boxed(),
+        );
+    }
+
+    Union::new(strategies).boxed()
 }
 
 trait Event {
@@ -1314,6 +1451,101 @@ impl Event for UpdateBody {
     }
 }
 
+impl Event for EditMetadata {
+    fn strategy(state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_metadata_targets.is_empty() {
+            return None;
+        }
+
+        // I don't think there's any way to avoid lifetime hell with the closure
+        // below without doing something like this. We'd need to precompute all
+        // possible inputs to `metadata_operation_strategy`, which isn't much
+        // better than cloning the whole state.
+        let state = state.clone();
+
+        Some(
+            select(queries.existing_metadata_targets.clone())
+                .prop_flat_map(move |(file_id, node_id, target)| {
+                    let metadata = state
+                        .metadata(node_id, &target)
+                        .cloned()
+                        .expect("bug: metadata target missing from state");
+                    let operation_strategy = metadata_operation_strategy(&metadata);
+
+                    (Just((file_id, node_id, target)), operation_strategy)
+                })
+                .prop_map(|((file_id, node_id, target), operation)| EditMetadata {
+                    file_id,
+                    node_id,
+                    target,
+                    operation,
+                }),
+        )
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        let Some(metadata) = state.metadata(self.node_id, &self.target) else {
+            return false;
+        };
+
+        match &self.operation {
+            MetadataOperation::ReplaceAll(_)
+            | MetadataOperation::Clear
+            | MetadataOperation::InsertKey { .. } => true,
+            MetadataOperation::RemoveKey { key } | MetadataOperation::AppendValue { key, .. } => {
+                metadata.contains_key(key)
+            }
+            MetadataOperation::RemoveValue { key, index }
+            | MetadataOperation::ReplaceValue { key, index, .. } => metadata
+                .get(key)
+                .is_some_and(|values| *index < values.len()),
+        }
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let metadata = state
+            .metadata_mut(self.node_id, &self.target)
+            .expect("bug: EditMetadata target disappeared before apply");
+        match &self.operation {
+            MetadataOperation::ReplaceAll(new_metadata) => {
+                *metadata = new_metadata.clone();
+            }
+            MetadataOperation::InsertKey { key, values } => {
+                metadata.insert(key.clone(), values.clone());
+            }
+            MetadataOperation::RemoveKey { key } => {
+                let removed = metadata.remove(key);
+                assert!(removed.is_some(), "bug: RemoveKey targeted a missing key");
+            }
+            MetadataOperation::AppendValue { key, value } => {
+                let values = metadata
+                    .get_mut(key)
+                    .expect("bug: AppendValue targeted a missing key");
+                values.push(value.clone());
+            }
+            MetadataOperation::RemoveValue { key, index } => {
+                let values = metadata
+                    .get_mut(key)
+                    .expect("bug: RemoveValue targeted a missing key");
+                values.remove(*index);
+            }
+            MetadataOperation::ReplaceValue {
+                key,
+                index,
+                new_value,
+            } => {
+                let values = metadata
+                    .get_mut(key)
+                    .expect("bug: ReplaceValue targeted a missing key");
+                values[*index] = new_value.clone();
+            }
+            MetadataOperation::Clear => metadata.clear(),
+        }
+
+        state
+    }
+}
+
 impl Event for UpdateLinkTarget {
     fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
         if queries.existing_file_node_link_triples.is_empty() {
@@ -1685,6 +1917,23 @@ proptest! {
         prop_assert!(
             update_body.does_apply(&state),
             "{update_body:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn edit_metadata_strategy_implies_does_apply(
+        (state, edit_metadata) in state_strategy()
+            .prop_filter("EditMetadata needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = EditMetadata::strategy(&state, &queries)
+                    .expect("EditMetadata::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            edit_metadata.does_apply(&state),
+            "{edit_metadata:?} fails does_apply in {state:?}",
         );
     }
 
