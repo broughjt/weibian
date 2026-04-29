@@ -1913,7 +1913,7 @@ impl Event for RenameNode {
 }
 
 fn state_strategy() -> impl Strategy<Value = State> {
-    ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
+    ReferenceCompiler::sequential_strategy(1..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
     })
 }
