@@ -16,7 +16,7 @@ use proptest::{
 };
 use proptest_state_machine::ReferenceStateMachine;
 use typst::diag::{SourceDiagnostic, Warned};
-use typst_syntax::{FileId, Span};
+use typst_syntax::{FileId, RootedPath, Span, VirtualPath, VirtualRoot};
 
 use crate::compiler::{Metadata, extract::NodeOutput, tests::model::*};
 
@@ -393,15 +393,17 @@ impl State {
     }
 
     fn queries(&self) -> Queries {
-        let next_file_id = FileId::from_raw(
-            self.files
-                .keys()
-                .map(|id| id.into_raw())
-                .max()
-                .map_or(NonZeroU16::new(1).unwrap(), |raw| {
-                    raw.checked_add(1).expect("file id overflow")
-                }),
-        );
+        let used_ids: HashSet<FileId> = self.files.keys().copied().collect();
+        let next_file_id = (1..=u16::MAX)
+            .filter_map(NonZeroU16::new)
+            .map(|n| {
+                FileId::new(RootedPath::new(
+                    VirtualRoot::Project,
+                    VirtualPath::new(format!("/file_{n}.typ")).unwrap(),
+                ))
+            })
+            .find(|id| !used_ids.contains(id))
+            .expect("file id space exhausted");
 
         let mut existing_file_ids: Vec<FileId> = self.files.keys().copied().collect();
         existing_file_ids.sort_by_key(|id| id.into_raw());
@@ -914,7 +916,12 @@ fn node_identifier_strategy(
 fn file_id_strategy() -> impl Strategy<Value = FileId> {
     any::<u16>()
         .prop_filter_map("FileIds need to be nonzero", NonZeroU16::new)
-        .prop_map(FileId::from_raw)
+        .prop_map(|n| {
+            FileId::new(RootedPath::new(
+                VirtualRoot::Project,
+                VirtualPath::new(format!("/file_{n}.typ")).unwrap(),
+            ))
+        })
 }
 
 fn span_strategy() -> impl Strategy<Value = Span> {
