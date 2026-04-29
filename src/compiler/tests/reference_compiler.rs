@@ -27,7 +27,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
     type Transition = Transition;
 
     fn init_state() -> BoxedStrategy<State> {
-        todo!()
+        Just(State::default()).boxed()
     }
 
     fn transitions(state: &State) -> BoxedStrategy<Transition> {
@@ -295,7 +295,7 @@ pub struct FileState {
 // `FileState` (i.e. appears in exactly one `files[*].nodes`). All
 // `Event::apply` impls must maintain this. Worth writing a property test that
 // asserts the invariant after each transition.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct State {
     pub files: HashMap<FileId, FileState>,
     pub nodes: HashMap<MockNodeId, MockNode>,
