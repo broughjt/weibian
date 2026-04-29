@@ -46,6 +46,10 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const UPDATE_LINK_TARGET_WEIGHT: u32 = 1;
         const UPDATE_LINK_CONTENT_WEIGHT: u32 = 1;
         const UPDATE_TRANSCLUSION_TARGET_WEIGHT: u32 = 1;
+        const ADD_COMPILE_ERROR_WEIGHT: u32 = 1;
+        const REMOVE_COMPILE_ERROR_WEIGHT: u32 = 1;
+        const ADD_COMPILE_WARNING_WEIGHT: u32 = 1;
+        const REMOVE_COMPILE_WARNING_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -153,6 +157,38 @@ impl ReferenceStateMachine for ReferenceCompiler {
                     .boxed(),
             ));
         }
+        if let Some(add_compile_error) = AddCompileError::strategy(state, &queries) {
+            strategies.push((
+                ADD_COMPILE_ERROR_WEIGHT,
+                add_compile_error
+                    .prop_map(Transition::AddCompileError)
+                    .boxed(),
+            ));
+        }
+        if let Some(remove_compile_error) = RemoveCompileError::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_COMPILE_ERROR_WEIGHT,
+                remove_compile_error
+                    .prop_map(Transition::RemoveCompileError)
+                    .boxed(),
+            ));
+        }
+        if let Some(add_compile_warning) = AddCompileWarning::strategy(state, &queries) {
+            strategies.push((
+                ADD_COMPILE_WARNING_WEIGHT,
+                add_compile_warning
+                    .prop_map(Transition::AddCompileWarning)
+                    .boxed(),
+            ));
+        }
+        if let Some(remove_compile_warning) = RemoveCompileWarning::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_COMPILE_WARNING_WEIGHT,
+                remove_compile_warning
+                    .prop_map(Transition::RemoveCompileWarning)
+                    .boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -176,10 +212,14 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::UpdateTransclusionTarget(update_transclusion_target) => {
                 update_transclusion_target.apply(state)
             }
-            Transition::AddCompileError(add_compile_error) => todo!(),
-            Transition::RemoveCompileError(remove_compile_error) => todo!(),
-            Transition::AddCompileWarning(add_compile_warning) => todo!(),
-            Transition::RemoveCompileWarning(remove_compile_warning) => todo!(),
+            Transition::AddCompileError(add_compile_error) => add_compile_error.apply(state),
+            Transition::RemoveCompileError(remove_compile_error) => {
+                remove_compile_error.apply(state)
+            }
+            Transition::AddCompileWarning(add_compile_warning) => add_compile_warning.apply(state),
+            Transition::RemoveCompileWarning(remove_compile_warning) => {
+                remove_compile_warning.apply(state)
+            }
             Transition::RenameNode(rename_node) => todo!(),
         }
     }
@@ -209,10 +249,16 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::UpdateTransclusionTarget(update_transclusion_target) => {
                 update_transclusion_target.does_apply(state)
             }
-            Transition::AddCompileError(add_compile_error) => todo!(),
-            Transition::RemoveCompileError(remove_compile_error) => todo!(),
-            Transition::AddCompileWarning(add_compile_warning) => todo!(),
-            Transition::RemoveCompileWarning(remove_compile_warning) => todo!(),
+            Transition::AddCompileError(add_compile_error) => add_compile_error.does_apply(state),
+            Transition::RemoveCompileError(remove_compile_error) => {
+                remove_compile_error.does_apply(state)
+            }
+            Transition::AddCompileWarning(add_compile_warning) => {
+                add_compile_warning.does_apply(state)
+            }
+            Transition::RemoveCompileWarning(remove_compile_warning) => {
+                remove_compile_warning.does_apply(state)
+            }
             Transition::RenameNode(rename_node) => todo!(),
         }
     }
@@ -433,6 +479,22 @@ impl State {
             )
         });
 
+        let mut existing_file_error_pairs: Vec<(FileId, usize)> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, file)| (0..file.errors.len()).map(move |index| (file_id, index)))
+            .collect();
+        existing_file_error_pairs.sort_by_key(|(file_id, index)| (file_id.into_raw(), *index));
+
+        let mut existing_file_warning_pairs: Vec<(FileId, usize)> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, file)| {
+                (0..file.warnings.len()).map(move |index| (file_id, index))
+            })
+            .collect();
+        existing_file_warning_pairs.sort_by_key(|(file_id, index)| (file_id.into_raw(), *index));
+
         let next_node_id = MockNodeId(
             self.nodes
                 .keys()
@@ -489,6 +551,8 @@ impl State {
             ),
             existing_file_node_link_triples: Cow::Owned(existing_file_node_link_triples),
             existing_metadata_targets: Cow::Owned(existing_metadata_targets),
+            existing_file_error_pairs: Cow::Owned(existing_file_error_pairs),
+            existing_file_warning_pairs: Cow::Owned(existing_file_warning_pairs),
             next_node_id,
             next_node_identifier,
             existing_node_identifiers: Cow::Owned(existing_sorted),
@@ -767,6 +831,8 @@ struct Queries {
     existing_file_node_transclusion_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
     existing_file_node_link_triples: Cow<'static, [(FileId, MockNodeId, u32)]>,
     existing_metadata_targets: Cow<'static, [(FileId, MockNodeId, MetadataTarget)]>,
+    existing_file_error_pairs: Cow<'static, [(FileId, usize)]>,
+    existing_file_warning_pairs: Cow<'static, [(FileId, usize)]>,
     next_node_id: MockNodeId,
     next_node_identifier: MockNodeIdentifier,
     existing_node_identifiers: Cow<'static, [MockNodeIdentifier]>,
@@ -1704,6 +1770,134 @@ impl Event for UpdateTransclusionTarget {
     }
 }
 
+impl Event for AddCompileError {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_ids.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_ids.clone()),
+                    compile_error_strategy(),
+                )
+                    .prop_map(|(file_id, error)| AddCompileError { file_id, error }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let AddCompileError { file_id, error } = self;
+
+        let file = state
+            .files
+            .get_mut(file_id)
+            .expect("bug: AddCompileError target file disappeared before apply");
+        file.errors.push(error.clone());
+
+        state
+    }
+}
+
+impl Event for RemoveCompileError {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_error_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_error_pairs.clone())
+                    .prop_map(|(file_id, index)| RemoveCompileError { file_id, index }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state
+            .files
+            .get(&self.file_id)
+            .is_some_and(|file| self.index < file.errors.len())
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveCompileError { file_id, index } = self;
+
+        let file = state
+            .files
+            .get_mut(file_id)
+            .expect("bug: RemoveCompileError target file disappeared before apply");
+        file.errors.remove(*index);
+
+        state
+    }
+}
+
+impl Event for AddCompileWarning {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_ids.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_ids.clone()),
+                    compile_warning_strategy(),
+                )
+                    .prop_map(|(file_id, warning)| AddCompileWarning { file_id, warning }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let AddCompileWarning { file_id, warning } = self;
+
+        let file = state
+            .files
+            .get_mut(file_id)
+            .expect("bug: AddCompileWarning target file disappeared before apply");
+        file.warnings.push(warning.clone());
+
+        state
+    }
+}
+
+impl Event for RemoveCompileWarning {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_warning_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_warning_pairs.clone())
+                    .prop_map(|(file_id, index)| RemoveCompileWarning { file_id, index }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state
+            .files
+            .get(&self.file_id)
+            .is_some_and(|file| self.index < file.warnings.len())
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveCompileWarning { file_id, index } = self;
+
+        let file = state
+            .files
+            .get_mut(file_id)
+            .expect("bug: RemoveCompileWarning target file disappeared before apply");
+        file.warnings.remove(*index);
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1994,6 +2188,83 @@ proptest! {
         prop_assert!(
             update_transclusion_target.does_apply(&state),
             "{update_transclusion_target:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn add_compile_error_strategy_implies_does_apply(
+        (state, add_compile_error) in state_strategy()
+            .prop_filter("AddCompileError needs an existing file", |state| !state.files.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = AddCompileError::strategy(&state, &queries)
+                    .expect("AddCompileError::strategy returns Some when files exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            add_compile_error.does_apply(&state),
+            "{add_compile_error:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_compile_error_strategy_implies_does_apply(
+        (state, remove_compile_error) in state_strategy()
+            .prop_filter(
+                "RemoveCompileError needs an existing compile error",
+                |state| state.files.values().any(|file| !file.errors.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveCompileError::strategy(&state, &queries)
+                    .expect("RemoveCompileError::strategy returns Some when compile errors exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_compile_error.does_apply(&state),
+            "{remove_compile_error:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn add_compile_warning_strategy_implies_does_apply(
+        (state, add_compile_warning) in state_strategy()
+            .prop_filter(
+                "AddCompileWarning needs an existing file",
+                |state| !state.files.is_empty(),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = AddCompileWarning::strategy(&state, &queries)
+                    .expect("AddCompileWarning::strategy returns Some when files exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            add_compile_warning.does_apply(&state),
+            "{add_compile_warning:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_compile_warning_strategy_implies_does_apply(
+        (state, remove_compile_warning) in state_strategy()
+            .prop_filter(
+                "RemoveCompileWarning needs an existing compile warning",
+                |state| state.files.values().any(|file| !file.warnings.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveCompileWarning::strategy(&state, &queries)
+                    .expect("RemoveCompileWarning::strategy returns Some when compile warnings exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_compile_warning.does_apply(&state),
+            "{remove_compile_warning:?} fails does_apply in {state:?}",
         );
     }
 }
