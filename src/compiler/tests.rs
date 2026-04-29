@@ -3,17 +3,19 @@ mod process_stateless;
 mod reference_compiler;
 mod render;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU16};
 
 use ecow::EcoVec;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use typst::diag::{Severity, SourceDiagnostic};
+use typst_syntax::Span;
 
 use crate::compiler::{
-    CompileDiagnostics, Compiler, ProcessDiagnostics,
+    CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics,
     tests::{
+        model::{MockNode, MockNodeIdentifier},
         process_stateless::process_stateless,
-        reference_compiler::{ReferenceCompiler, Transition},
+        reference_compiler::{MockFile, MockNodeId, ReferenceCompiler, State, Transition, file_id},
         render::{MockRenderer, RenderBackmatter, RenderBody, RenderNode},
     },
 };
@@ -56,13 +58,7 @@ impl StateMachineTest for IncrementalMatchesStateless {
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
-        for (name, node) in plan.writes {
-            state.filesystem.insert(name, node);
-        }
-        for name in plan.deletes {
-            state.filesystem.remove(&name);
-        }
+        apply_plan(plan, &mut state.filesystem);
 
         state
     }
@@ -71,18 +67,17 @@ impl StateMachineTest for IncrementalMatchesStateless {
         state: &Self::SystemUnderTest,
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
-            process_stateless(ref_state).expect("stateless reference must succeed");
+        assert_matches_stateless(state, ref_state);
+    }
+}
 
-        assert_eq!(state.filesystem, expected_output);
-        assert_eq!(
-            normalize_compile_diagnostics(state.compiler.compile_diagnostics()),
-            normalize_compile_diagnostics(&expected_compile_diagnostics),
-        );
-        assert_eq!(
-            normalize_process_diagnostics(state.compiler.process_diagnostics()),
-            normalize_process_diagnostics(&expected_process_diagnostics),
-        );
+fn apply_plan(plan: OutputPlan<RenderNode>, filesystem: &mut HashMap<String, RenderNode>) {
+    // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
+    for (name, node) in plan.writes {
+        filesystem.insert(name, node);
+    }
+    for name in plan.deletes {
+        filesystem.remove(&name);
     }
 }
 
@@ -115,4 +110,238 @@ fn normalize_process_diagnostics(d: &ProcessDiagnostics) -> ProcessDiagnostics {
 prop_state_machine! {
     #[test]
     fn incremental_matches_stateless(sequential 1..20 => IncrementalMatchesStateless);
+}
+
+fn assert_matches_stateless(incremental: &IncrementalCompiler, state: &State) {
+    let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
+        process_stateless(state).expect("stateless reference must succeed");
+
+    assert_eq!(incremental.filesystem, expected_output);
+    assert_eq!(
+        normalize_compile_diagnostics(incremental.compiler.compile_diagnostics()),
+        normalize_compile_diagnostics(&expected_compile_diagnostics),
+    );
+    assert_eq!(
+        normalize_process_diagnostics(incremental.compiler.process_diagnostics()),
+        normalize_process_diagnostics(&expected_process_diagnostics),
+    );
+}
+
+#[test]
+fn duplicate_identifier_after_compile_error_recovery_matches_stateless() {
+    let mut reference = State::default();
+    let mut incremental = IncrementalCompiler::default();
+
+    let file1 = file_id(NonZeroU16::new(1).unwrap());
+    reference.insert_file(
+        file1,
+        MockFile {
+            nodes: [(
+                MockNodeId(0),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: vec!["compile error".into()],
+            warnings: vec!["compile warning".into()],
+        },
+    );
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    let file2 = file_id(NonZeroU16::new(2).unwrap());
+    reference.insert_file(
+        file2,
+        MockFile {
+            nodes: [(
+                MockNodeId(1),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    incremental
+        .compiler
+        ._update(file2, reference.compile_file(file2));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    reference.files.get_mut(&file1).unwrap().errors.clear();
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+}
+
+#[test]
+fn duplicate_identifier_resolves_when_other_file_is_deleted() {
+    let mut reference = State::default();
+    let mut incremental = IncrementalCompiler::default();
+
+    let file1 = file_id(NonZeroU16::new(1).unwrap());
+    reference.insert_file(
+        file1,
+        MockFile {
+            nodes: [(
+                MockNodeId(0),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    let file2 = file_id(NonZeroU16::new(2).unwrap());
+    reference.insert_file(
+        file2,
+        MockFile {
+            nodes: [(
+                MockNodeId(1),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    incremental
+        .compiler
+        ._update(file2, reference.compile_file(file2));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    reference.remove_file(file1);
+    incremental.compiler.remove(file1);
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+}
+
+#[test]
+fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
+    let mut reference = State::default();
+    let mut incremental = IncrementalCompiler::default();
+
+    let file1 = file_id(NonZeroU16::new(1).unwrap());
+    reference.insert_file(
+        file1,
+        MockFile {
+            nodes: [(
+                MockNodeId(0),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    let file2 = file_id(NonZeroU16::new(2).unwrap());
+    reference.insert_file(
+        file2,
+        MockFile {
+            nodes: [(
+                MockNodeId(1),
+                MockNode {
+                    identifier: MockNodeIdentifier(0),
+                    title: Default::default(),
+                    body: Default::default(),
+                    span: Span::detached(),
+                    metadata: Default::default(),
+                    transclusions: Default::default(),
+                    links: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    incremental
+        .compiler
+        ._update(file2, reference.compile_file(file2));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    reference
+        .files
+        .get_mut(&file1)
+        .unwrap()
+        .errors
+        .push("compile error".into());
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
 }
