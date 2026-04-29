@@ -1,234 +1,512 @@
-use std::fmt;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::{fmt, fs};
 
-use ecow::eco_format;
+use anyhow::anyhow;
+use clap::{ArgAction, Parser, Subcommand, ValueHint, builder::ValueParser};
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::args::{CompileArgs, ProcessArgs, WorldArgs};
-use crate::error::StrResult;
+pub const NODE_TEMPLATE: &str = "node.html";
+pub const TRANSCLUSION_TEMPLATE: &str = "transclusion.html";
+pub const LINK_TEMPLATE: &str = "link.html";
+pub const BACKMATTER_TEMPLATE: &str = "backmatter.html";
 
-const DEFAULT_CONFIG_PATH: &str = ".wb/config.toml";
+const DEFAULT_CONFIG_NAME: &str = "weibian.toml";
 
-#[derive(Debug, Default, Deserialize)]
+/// The overall structure of the help.
+#[rustfmt::skip]
+const HELP_TEMPLATE: &str = "\
+Weibian (wb) {version}
+
+{usage-heading} {usage}
+
+{all-args}{after-help}\
+";
+
+/// The Weibian CLI.
+#[derive(Debug, Clone, Parser)]
+#[clap(
+    name = "wb",
+    version = env!("CARGO_PKG_VERSION"),
+    author,
+    help_template = HELP_TEMPLATE,
+    max_term_width = 80,
+)]
+pub struct Arguments {
+    /// Path to a Weibian configuration file.
+    #[arg(
+        long = "config-file",
+        value_name = "PATH",
+        value_hint = ValueHint::FilePath,
+        global = true
+    )]
+    pub config_file: Option<PathBuf>,
+
+    /// Pass a KEY=VALUE input to Typst via sys.inputs.
+    #[arg(
+        long = "input",
+        value_name = "KEY=VALUE",
+        action = ArgAction::Append,
+        value_parser = ValueParser::new(parse_system_input_pair),
+        global = true,
+    )]
+    pub inputs: Vec<(String, String)>,
+
+    /// The command to run.
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// What to do.
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Builds the static site.
+    #[command(visible_alias = "b")]
+    Build,
+
+    /// Watches source files and recompiles on changes.
+    #[command(visible_alias = "w")]
+    Watch,
+}
+
+/// The raw deserialized contents of `weibian.toml`.
+#[derive(Debug, Deserialize)]
 pub struct WeibianConfig {
-    #[serde(default, alias = "directories")]
+    #[serde(default)]
     pub files: FilesConfig,
 
     #[serde(default)]
+    pub templates: TemplatesConfig,
+
+    #[serde(default)]
     pub site: SiteConfig,
+
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct FilesConfig {
-    pub input_dir: Option<PathBuf>,
-    pub output_dir: Option<PathBuf>,
-    pub public_dir: Option<PathBuf>,
-    #[serde(default, deserialize_with = "deserialize_glob_list")]
-    pub include: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_glob_list")]
-    pub exclude: Vec<String>,
+    pub input_directory: Option<PathBuf>,
+    pub output_directory: Option<PathBuf>,
+    pub public_directory: Option<PathBuf>,
+
+    #[serde(default, deserialize_with = "deserialize_globset")]
+    pub include: GlobSet,
+
+    #[serde(default, deserialize_with = "deserialize_globset")]
+    pub exclude: GlobSet,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplatesConfig {
+    pub node: PathBuf,
+    pub transclusion: PathBuf,
+    pub link: PathBuf,
+    pub backmatter: PathBuf,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            node: PathBuf::from(NODE_TEMPLATE),
+            transclusion: PathBuf::from(TRANSCLUSION_TEMPLATE),
+            link: PathBuf::from(LINK_TEMPLATE),
+            backmatter: PathBuf::from(BACKMATTER_TEMPLATE),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SiteConfig {
-    pub domain: Option<String>,
-    pub root_dir: Option<String>,
+    pub root_directory: Option<String>,
     pub trailing_slash: Option<bool>,
-}
-#[derive(Debug, Clone)]
-pub struct SiteSettings {
+    pub index_node: Option<String>,
     pub domain: Option<String>,
-    pub root_dir: String,
+}
+
+/// The subset of configuration used by [`crate::compiler::Compiler::process`]
+/// to render node HTML. Separated so tests can construct a minimal config
+/// without touching the filesystem.
+#[derive(Debug)]
+pub struct RenderConfig {
+    pub root_directory: String,
     pub trailing_slash: bool,
+    pub index_node: String,
+    pub domain: String,
+    pub environment: minijinja::Environment<'static>,
 }
 
-#[derive(Debug, Clone)]
-pub struct InputFilters {
-    include: GlobSet,
-    exclude: GlobSet,
-    include_all: bool,
-    has_exclude: bool,
-}
-
-impl InputFilters {
-    pub fn new(include: &[String], exclude: &[String]) -> StrResult<Self> {
-        let include_set = build_globset(include, "include")?;
-        let exclude_set = build_globset(exclude, "exclude")?;
-        Ok(Self {
-            include: include_set,
-            exclude: exclude_set,
-            include_all: include.is_empty(),
-            has_exclude: !exclude.is_empty(),
-        })
-    }
-
-    pub fn allows(&self, relative_path: &Path) -> bool {
-        if self.exclude.is_match(relative_path) {
-            return false;
+impl RenderConfig {
+    pub fn href(&self, id: &str) -> String {
+        if self.trailing_slash {
+            format!("{}{id}/", self.root_directory)
+        } else {
+            format!("{}{id}.html", self.root_directory)
         }
-        if self.include_all {
-            return true;
-        }
-        self.include.is_match(relative_path)
-    }
-
-    pub fn has_filters(&self) -> bool {
-        self.has_exclude || !self.include_all
     }
 }
 
-/// A preprocessed `CompileCommand` with config defaults applied.
-#[derive(Debug, Clone)]
+/// The fully resolved build configuration.
+#[derive(Debug)]
 pub struct BuildConfig {
+    /// The directory of the `weibian.toml` file.
+    pub root: PathBuf,
+    /// The Typst project root and file scan root. Defaults to `root`.
     pub input_directory: PathBuf,
-    pub input_filters: InputFilters,
-    pub public_directory: PathBuf,
     pub output_directory: PathBuf,
-    pub site: SiteSettings,
-    pub world: WorldArgs,
-    pub process: ProcessArgs,
-}
-
-pub fn load_config(config_path: Option<&Path>) -> StrResult<WeibianConfig> {
-    let (path, is_default) = match config_path {
-        Some(path) => (path.to_path_buf(), false),
-        None => (PathBuf::from(DEFAULT_CONFIG_PATH), true),
-    };
-
-    if !path.exists() {
-        if is_default {
-            return Ok(WeibianConfig::default());
-        }
-        return Err(eco_format!("config file {} does not exist", path.display()));
-    }
-
-    Figment::new()
-        .merge(Toml::file(&path))
-        .extract::<WeibianConfig>()
-        .map_err(|err| eco_format!("failed to load config {}: {err}", path.display()))
+    pub public_directory: Option<PathBuf>,
+    pub include: GlobSet,
+    pub exclude: GlobSet,
+    pub inputs: HashMap<String, String>,
+    pub render: RenderConfig,
 }
 
 impl BuildConfig {
-    pub fn from(args: &CompileArgs, config: &WeibianConfig) -> StrResult<Self> {
-        let input_directory =
-            resolve_dir(args.input.as_ref(), config.files.input_dir.as_ref(), "typ");
-        let input_filters = InputFilters::new(&config.files.include, &config.files.exclude)?;
-        let public_directory = resolve_dir(
-            args.public.as_ref(),
-            config.files.public_dir.as_ref(),
-            "public",
-        );
-        let output_directory = resolve_dir(
-            args.output.as_ref(),
-            config.files.output_dir.as_ref(),
-            "dist",
-        );
+    pub fn try_load(
+        config_file: Option<PathBuf>,
+        cli_inputs: Vec<(String, String)>,
+    ) -> anyhow::Result<Self> {
+        let (root, config) = load_config(config_file)?;
 
-        let domain = args
+        let input_directory = config
+            .files
+            .input_directory
+            .map(|p| if p.is_absolute() { p } else { root.join(p) })
+            .unwrap_or_else(|| root.clone());
+
+        let public_directory = config
+            .files
+            .public_directory
+            .map(|p| if p.is_absolute() { p } else { root.join(p) });
+
+        let include = if config.files.include.is_empty() {
+            GlobSetBuilder::new().add(Glob::new("**/*.typ")?).build()?
+        } else {
+            config.files.include
+        };
+
+        let output_directory = config
+            .files
+            .output_directory
+            .unwrap_or_else(|| root.join("dist"));
+
+        let root_directory = normalize_root_directory(config.site.root_directory.as_deref());
+        let trailing_slash = config.site.trailing_slash.unwrap_or(false);
+        let index_node = config
             .site
-            .domain
-            .clone()
-            .or_else(|| config.site.domain.clone());
-        let root_dir = normalize_root_dir(
-            args.site
-                .root_dir
-                .as_deref()
-                .or(config.site.root_dir.as_deref()),
-        );
-        let trailing_slash = args
-            .site
-            .trailing_slash
-            .unwrap_or(config.site.trailing_slash.unwrap_or(false));
+            .index_node
+            .unwrap_or_else(|| "index".to_string());
+        let domain = config.site.domain.unwrap_or_default();
+
+        let mut inputs: HashMap<String, String> = config.inputs;
+
+        inputs.extend(cli_inputs);
+
+        // Compiler-generated wb-* keys always win.
+        inputs.insert("wb-domain".into(), domain.clone());
+        inputs.insert("wb-root-directory".into(), root_directory.clone());
+        inputs.insert("wb-trailing-slash".into(), trailing_slash.to_string());
+        inputs.insert("wb-target".into(), "html".into());
+
+        let node_template_path = if config.templates.node.is_absolute() {
+            config.templates.node
+        } else {
+            root.join(config.templates.node)
+        };
+        let node_template_source = fs::read_to_string(&node_template_path).map_err(|e| {
+            anyhow!(
+                "failed to read node template {}: {e}",
+                node_template_path.display()
+            )
+        })?;
+        let mut environment = minijinja::Environment::new();
+
+        environment
+            .add_template_owned(NODE_TEMPLATE, node_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse node template {}: {e}",
+                    node_template_path.display()
+                )
+            })?;
+
+        let transclusion_template_path = if config.templates.transclusion.is_absolute() {
+            config.templates.transclusion
+        } else {
+            root.join(config.templates.transclusion)
+        };
+        let transclusion_template_source = fs::read_to_string(&transclusion_template_path)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to read transclusion template {}: {e}",
+                    transclusion_template_path.display()
+                )
+            })?;
+        environment
+            .add_template_owned(TRANSCLUSION_TEMPLATE, transclusion_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse transclusion template {}: {e}",
+                    transclusion_template_path.display()
+                )
+            })?;
+
+        let link_template_path = if config.templates.link.is_absolute() {
+            config.templates.link
+        } else {
+            root.join(config.templates.link)
+        };
+        let link_template_source = fs::read_to_string(&link_template_path).map_err(|e| {
+            anyhow!(
+                "failed to read link template {}: {e}",
+                link_template_path.display()
+            )
+        })?;
+        environment
+            .add_template_owned(LINK_TEMPLATE, link_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse link template {}: {e}",
+                    link_template_path.display()
+                )
+            })?;
+
+        let backmatter_template_path = if config.templates.backmatter.is_absolute() {
+            config.templates.backmatter
+        } else {
+            root.join(config.templates.backmatter)
+        };
+        let backmatter_template_source =
+            fs::read_to_string(&backmatter_template_path).map_err(|e| {
+                anyhow!(
+                    "failed to read backmatter template {}: {e}",
+                    backmatter_template_path.display()
+                )
+            })?;
+        environment
+            .add_template_owned(BACKMATTER_TEMPLATE, backmatter_template_source)
+            .map_err(|e| {
+                anyhow!(
+                    "failed to parse backmatter template {}: {e}",
+                    backmatter_template_path.display()
+                )
+            })?;
+
+        environment.add_filter("demote_headings", filter_demote_headings);
+        environment.add_filter("disable_numbering", filter_disable_numbering);
+
         Ok(Self {
+            root,
             input_directory,
-            input_filters,
-            public_directory,
             output_directory,
-            site: SiteSettings {
-                domain,
-                root_dir,
+            public_directory,
+            include,
+            exclude: config.files.exclude,
+            inputs,
+            render: RenderConfig {
+                root_directory,
                 trailing_slash,
+                index_node,
+                domain,
+                environment,
             },
-            world: args.world.clone(),
-            process: args.process.clone(),
         })
     }
-}
 
-fn build_globset(patterns: &[String], label: &str) -> StrResult<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let glob = Glob::new(pattern)
-            .map_err(|err| eco_format!("invalid {label} glob \"{pattern}\": {err}"))?;
-        builder.add(glob);
+    pub fn output_path(&self, id: &str) -> PathBuf {
+        if self.render.trailing_slash && id != self.render.index_node {
+            self.output_directory.join(id).join("index.html")
+        } else {
+            self.output_directory.join(format!("{id}.html"))
+        }
     }
-    builder
-        .build()
-        .map_err(|err| eco_format!("failed to build {label} glob set: {err}"))
+
+    pub fn is_match(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.input_directory)
+            .ok()
+            .is_some_and(|relative| {
+                self.include.is_match(relative) && !self.exclude.is_match(relative)
+            })
+    }
 }
 
-fn deserialize_glob_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct GlobListVisitor;
-
-    impl<'de> Visitor<'de> for GlobListVisitor {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string or a list of strings")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value.to_string()])
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value])
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut values = Vec::new();
-            while let Some(value) = seq.next_element::<String>()? {
-                values.push(value);
+fn load_config(config_file: Option<PathBuf>) -> anyhow::Result<(PathBuf, WeibianConfig)> {
+    let (root, config_path) = match config_file {
+        Some(path) => {
+            if !path.exists() {
+                return Err(anyhow!("config file {} does not exist", path.display()));
             }
-            Ok(values)
+            let root = path
+                .parent()
+                .ok_or_else(|| anyhow!("config path {} has no parent", path.display()))?
+                .to_path_buf();
+
+            (root, path)
+        }
+        None => {
+            let root = find_project_root()?;
+            let config_path = root.join(DEFAULT_CONFIG_NAME);
+
+            (root, config_path)
+        }
+    };
+
+    let config = Figment::new()
+        .merge(Toml::file(&config_path))
+        .extract::<WeibianConfig>()
+        .map_err(|err| anyhow!("failed to load config {}: {err}", config_path.display()))?;
+
+    Ok((root, config))
+}
+
+fn find_project_root() -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| anyhow::Error::from(error).context("Failed to get current directory"))?;
+
+    let mut directory = cwd.as_path();
+    loop {
+        if directory.join(DEFAULT_CONFIG_NAME).exists() {
+            return Ok(directory.to_path_buf());
+        }
+        match directory.parent() {
+            Some(parent) => directory = parent,
+            None => {
+                return Err(anyhow!(
+                    "could not find {} in {} or any parent directory",
+                    DEFAULT_CONFIG_NAME,
+                    cwd.display()
+                ));
+            }
+        }
+    }
+}
+
+pub fn copy_directory_recursive(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    use walkdir::WalkDir;
+
+    for entry in WalkDir::new(src) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src)?;
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
         }
     }
 
-    deserializer.deserialize_any(GlobListVisitor)
+    Ok(())
 }
 
-fn resolve_dir(cli: Option<&PathBuf>, config: Option<&PathBuf>, default: &str) -> PathBuf {
-    cli.cloned()
-        .or_else(|| config.cloned())
-        .unwrap_or_else(|| PathBuf::from(default))
+fn filter_demote_headings(html: String, levels: Option<u32>) -> String {
+    demote_headings_html(html, levels.unwrap_or(1) as usize)
 }
 
-fn normalize_root_dir(raw: Option<&str>) -> String {
-    let mut root = raw.unwrap_or("/").trim().to_string();
-    if root.is_empty() {
-        root = "/".to_string();
+fn filter_disable_numbering(html: String) -> String {
+    let document = dom_query::Document::from(html.as_str());
+    let selection = document.select("h1, h2, h3, h4, h5, h6");
+    selection.add_class("disable-numbering");
+    document.select("body").inner_html().to_string()
+}
+
+// TODO: move this somewhere more appropriate
+fn demote_headings_html(html: String, levels: usize) -> String {
+    if levels == 0 {
+        return html;
     }
+
+    let document = dom_query::Document::from(html.as_str());
+
+    for n in (1u8..=6).rev() {
+        let m = (n as usize + levels).min(6) as u8;
+        if m == n {
+            continue;
+        }
+
+        let selection = document.select(&format!("h{n}"));
+
+        selection.rename(&format!("h{m}"));
+        selection.set_attr("data-demoted", &levels.to_string());
+    }
+
+    document.select("body").inner_html().to_string()
+}
+
+fn parse_system_input_pair(s: &str) -> Result<(String, String), clap::Error> {
+    s.split_once('=')
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("--input value must be KEY=VALUE, got: {s:?}\n"),
+            )
+        })
+}
+
+fn normalize_root_directory(raw: Option<&str>) -> String {
+    let mut root = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string();
     if !root.starts_with('/') {
         root.insert(0, '/');
     }
     if !root.ends_with('/') {
         root.push('/');
     }
+
     root
+}
+
+fn deserialize_globset<'de, D>(deserializer: D) -> Result<GlobSet, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct GlobSetVisitor;
+
+    impl<'de> Visitor<'de> for GlobSetVisitor {
+        type Value = GlobSet;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a glob string or list of glob strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let mut builder = GlobSetBuilder::new();
+            builder.add(Glob::new(value).map_err(E::custom)?);
+            builder.build().map_err(E::custom)
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut builder = GlobSetBuilder::new();
+            while let Some(pattern) = seq.next_element::<String>()? {
+                builder.add(Glob::new(&pattern).map_err(de::Error::custom)?);
+            }
+            builder.build().map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(GlobSetVisitor)
 }

@@ -1,0 +1,1705 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+use dom_query::{Document, Selection};
+use ecow::{EcoVec, eco_format};
+use typst::World;
+use typst::diag::{Severity, SourceDiagnostic, Warned};
+use typst::foundations::{Dict, NativeElement, Packed, Repr, Value};
+use typst::introspection::{Introspector, MetadataElem};
+use typst::syntax::Span;
+use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
+
+use super::{Metadata, NodeEntry};
+
+const HTML_MESSAGE: &str = "html export is under active development and incomplete";
+const NO_WB_NODE: &str = "source file produced no wb-node";
+const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
+const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
+const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
+const WB_NODE_MISSING_TITLE: &str = "wb-node's first child must be a wb-title element";
+const WB_SUBNODE_MISSING_TITLE: &str = "wb-subnode's first child must be a wb-title element";
+const WB_SUBNODE_MISSING_TRANSCLUDE: &str = "wb-subnode is missing the transclude attribute";
+const WB_TRANSCLUDE_MISSING_IDENTIFIER: &str = "wb-transclude is missing an identifier";
+const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter attribute";
+const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
+const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
+const BUG_UNCONSUMED_NODE_METADATA: &str = "bug: unconsumed node metadata";
+const BUG_DUPLICATE_IDENTIFIER: &str =
+    "bug: duplicate node identifier slipped past collect_node_spans";
+
+#[derive(Clone, Debug)]
+pub struct NodeOutput {
+    pub entry: NodeEntry,
+    pub transclusions: Vec<String>,
+    pub links: Vec<String>,
+}
+
+/// Compiles a source file and extracts its nodes.
+pub fn compile<W: World>(
+    world: &W,
+) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
+    let Warned {
+        output: result,
+        mut warnings,
+    } = typst::compile::<typst_html::HtmlDocument>(world);
+
+    // Discard warnings about html being an unstable feature, html is kind
+    // of the whole game here
+    warnings.retain(|diagnostic: &mut SourceDiagnostic| {
+        !(diagnostic.severity == Severity::Warning && diagnostic.message == HTML_MESSAGE)
+    });
+
+    let output = result.and_then(|html_document| {
+        typst_html::html(&html_document).and_then(|html| {
+            let (spans, span_errors) = collect_node_spans(&html_document);
+            let (node, transclusion, link, meta_errors) =
+                collect_metadata(html_document.introspector().as_ref(), &spans);
+            let mut errors = span_errors;
+            errors.extend(meta_errors);
+
+            if errors.is_empty() {
+                let file_output = FileOutput {
+                    html,
+                    spans,
+                    metadata: MetadataMaps {
+                        node,
+                        transclusion,
+                        link,
+                    },
+                };
+
+                extract(file_output)
+            } else {
+                Err(errors)
+            }
+        })
+    });
+
+    Warned { output, warnings }
+}
+
+#[derive(Clone, Debug)]
+struct FileOutput {
+    pub html: String,
+    pub spans: HashMap<String, Span>,
+    pub metadata: MetadataMaps,
+}
+
+#[derive(Clone, Debug)]
+struct MetadataMaps {
+    node: HashMap<String, Metadata>,
+    transclusion: HashMap<u32, Metadata>,
+    link: HashMap<u32, Metadata>,
+}
+
+/// Parses the HTML in `output` into a map of node IDs to node entries.
+///
+/// Returns `Err` with all collected diagnostics if any validation errors occur,
+/// or `Ok` with the node map on success.
+fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+    let FileOutput {
+        html,
+        spans,
+        mut metadata,
+    } = output;
+    let mut errors = EcoVec::new();
+    let document = Document::from(html);
+    let mut nodes = HashMap::with_capacity(spans.len());
+    let mut synthetic_counter: u32 = document
+        .select("wb-transclude")
+        .iter()
+        .filter_map(|e| e.attr("counter")?.parse::<u32>().ok())
+        .chain(metadata.transclusion.keys().copied())
+        .max()
+        .map_or(0, |n| {
+            n.checked_add(1).expect("transclusion counter overflow")
+        });
+
+    // Process subnodes deepest-first: reversed pre-order ensures a
+    // nested subnode is always processed before its parent subnode.
+    for subnode in document.select("wb-subnode").iter().rev() {
+        let Some((identifier, output)) =
+            extract_node_content(&subnode, true, &spans, &mut metadata, &mut errors)
+        else {
+            continue;
+        };
+        let transclude = match subnode.attr("transclude").as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            Some(other) => {
+                errors.push(invalid_transclude_value_diagnostic(other));
+                continue;
+            }
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    output.entry.span,
+                    WB_SUBNODE_MISSING_TRANSCLUDE,
+                ));
+                continue;
+            }
+        };
+
+        if transclude {
+            let counter = synthetic_counter;
+            synthetic_counter = synthetic_counter
+                .checked_add(1)
+                .expect("transclusion counter overflow");
+
+            if !output.entry.node_metadata.is_empty() {
+                metadata
+                    .transclusion
+                    .insert(counter, output.entry.node_metadata.clone());
+            }
+            subnode.replace_with_html(format!(
+                r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
+            ));
+        } else {
+            subnode.remove();
+        }
+
+        let displaced = nodes.insert(identifier, output);
+        assert!(displaced.is_none(), "{BUG_DUPLICATE_IDENTIFIER}");
+    }
+
+    // Extract the wb-node after subnodes have been replaced/removed.
+    let mut node_iter = document.select("wb-node").iter();
+
+    match node_iter.next() {
+        None => {
+            errors.push(SourceDiagnostic::error(Span::detached(), NO_WB_NODE));
+        }
+        Some(wb_node) => {
+            if let Some((identifier, output)) =
+                extract_node_content(&wb_node, false, &spans, &mut metadata, &mut errors)
+            {
+                let displaced = nodes.insert(identifier, output);
+                assert!(
+                    displaced.is_none(),
+                    "bug: duplicate node identifier slipped past collect_node_spans"
+                );
+            }
+
+            errors.extend(node_iter.map(|extra| {
+                let span = extra
+                    .attr("identifier")
+                    .map(|id| {
+                        spans
+                            .get(id.as_ref())
+                            .copied()
+                            .expect("bug: no span found for wb-node identifier")
+                    })
+                    .unwrap_or(Span::detached());
+
+                SourceDiagnostic::error(span, MULTIPLE_WB_NODES)
+            }));
+        }
+    }
+
+    assert!(metadata.node.is_empty(), "{BUG_UNCONSUMED_NODE_METADATA}");
+    for counter in metadata.transclusion.keys().copied() {
+        errors.push(orphaned_transclusion_metadata_diagnostic(counter));
+    }
+    for counter in metadata.link.keys().copied() {
+        errors.push(orphaned_link_metadata_diagnostic(counter));
+    }
+
+    if errors.is_empty() {
+        Ok(nodes)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Extracts the content of a `wb-node` or `wb-subnode` element into a
+/// [`NodeOutput`], collecting its transclusions and links and consuming its
+/// metadata from the provided maps.
+///
+/// Returns `None` (pushing an error) if the identifier attribute is missing or
+/// if the element's first child is not a `wb-title` element.
+fn extract_node_content(
+    element: &Selection,
+    is_subnode: bool,
+    spans: &HashMap<String, Span>,
+    metadata: &mut MetadataMaps,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> Option<(String, NodeOutput)> {
+    let (transclusions, transclusion_metadata) = collect_transclusions(element, metadata, errors);
+    let (links, link_metadata) = collect_links(element, metadata, errors);
+
+    let Some(identifier) = element.attr("identifier") else {
+        errors.push(missing_identifier_diagnostic(is_subnode));
+        return None;
+    };
+    let identifier = identifier.to_string();
+    let span = spans
+        .get(&identifier)
+        .copied()
+        .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
+
+    let node_metadata = metadata.node.remove(&identifier).unwrap_or_default();
+
+    let title_selection = element.children().first();
+    if !title_selection
+        .nodes()
+        .first()
+        .is_some_and(|n| n.has_name("wb-title"))
+    {
+        errors.push(missing_title_diagnostic(is_subnode));
+        return None;
+    }
+    let title = title_selection.inner_html().to_string();
+    let title_text = title_selection.text().to_string();
+    title_selection.remove();
+
+    let body_html = element.inner_html().to_string();
+
+    Some((
+        identifier,
+        NodeOutput {
+            entry: NodeEntry {
+                body_html,
+                title,
+                title_text,
+                span,
+                node_metadata,
+                transclusion_metadata,
+                link_metadata,
+            },
+            transclusions,
+            links,
+        },
+    ))
+}
+
+/// Collects transclusion targets and their metadata from `wb-transclude`
+/// elements within `element`.
+fn collect_transclusions(
+    element: &Selection,
+    metadata: &mut MetadataMaps,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> (Vec<String>, HashMap<u32, Metadata>) {
+    let mut targets = Vec::new();
+    let mut node_metadata = HashMap::new();
+    for wb_transclude in element.select("wb-transclude").iter() {
+        let id = match wb_transclude.attr("identifier").as_deref() {
+            Some(id) => id.to_owned(),
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    WB_TRANSCLUDE_MISSING_IDENTIFIER,
+                ));
+                continue;
+            }
+        };
+        let counter = match wb_transclude.attr("counter").as_deref() {
+            Some(n) => match n.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    errors.push(invalid_transclude_counter_diagnostic(n));
+                    continue;
+                }
+            },
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    WB_TRANSCLUDE_MISSING_COUNTER,
+                ));
+                continue;
+            }
+        };
+
+        if let Some(meta) = metadata.transclusion.remove(&counter) {
+            node_metadata.insert(counter, meta);
+        }
+        targets.push(id);
+    }
+    (targets, node_metadata)
+}
+
+/// Collects link targets and their metadata from `<a href="wb:...">` elements
+/// within `element`.
+fn collect_links(
+    element: &Selection,
+    metadata: &mut MetadataMaps,
+    errors: &mut EcoVec<SourceDiagnostic>,
+) -> (Vec<String>, HashMap<u32, Metadata>) {
+    let mut targets = Vec::new();
+    let mut node_metadata = HashMap::new();
+    let links_iter = element.select("a").iter().filter_map(|element| {
+        element
+            .attr("href")
+            .and_then(|href| href.strip_prefix("wb:").map(ToOwned::to_owned))
+            .map(|identifier| (element, identifier))
+    });
+    for (anchor, id) in links_iter {
+        let counter = match anchor.attr("data-counter").as_deref() {
+            Some(n) => match n.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    errors.push(invalid_link_counter_diagnostic(n));
+                    continue;
+                }
+            },
+            None => {
+                errors.push(SourceDiagnostic::error(
+                    Span::detached(),
+                    LINK_MISSING_COUNTER,
+                ));
+                continue;
+            }
+        };
+
+        if let Some(meta) = metadata.link.remove(&counter) {
+            node_metadata.insert(counter, meta);
+        }
+        targets.push(id);
+    }
+    (targets, node_metadata)
+}
+
+/// Queries the introspector for `#metadata(...)` elements that carry node or
+/// transclusion call-site metadata, and returns them as two separate maps.
+///
+/// Metadata elements are identified by a `wb-metadata` key whose value is a
+/// two-element array `[kind, discriminant]`:
+/// - `["node", identifier]`      — node/subnode metadata, keyed by identifier string
+/// - `["transclude", counter]`   — transclusion call-site metadata, keyed by counter integer
+/// - `["link", counter]`         — link call-site metadata, keyed by counter integer
+///
+/// Errors are pushed for:
+/// - `wb-metadata` present but not a two-element array of the expected shape
+/// - node identifier not present in `spans` (unknown node)
+/// - duplicate entries for the same node or counter
+#[allow(clippy::type_complexity)]
+fn collect_metadata<I: Introspector>(
+    introspector: &I,
+    spans: &HashMap<String, Span>,
+) -> (
+    HashMap<String, Metadata>,
+    HashMap<u32, Metadata>,
+    HashMap<u32, Metadata>,
+    EcoVec<SourceDiagnostic>,
+) {
+    let selector = MetadataElem::ELEM.select();
+    let items = introspector.query(&selector);
+    let mut errors = EcoVec::new();
+    let mut node_result: HashMap<String, Metadata> = HashMap::new();
+    let mut transclusion_result: HashMap<u32, Metadata> = HashMap::new();
+    let mut link_result: HashMap<u32, Metadata> = HashMap::new();
+
+    for item in &items {
+        let Some((dictionary, wb_metadata)) =
+            Packed::<MetadataElem>::from_ref(item).and_then(|meta| match &meta.value {
+                Value::Dict(dictionary) => dictionary
+                    .get("wb-metadata")
+                    .ok()
+                    .map(|wb_metadata| (dictionary, wb_metadata)),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        let Value::Array(array) = wb_metadata else {
+            errors.push(SourceDiagnostic::error(
+                item.span(),
+                "\"wb-metadata\" must be a [kind, discriminant] array",
+            ));
+            continue;
+        };
+
+        let mut iter = array.iter();
+        match (iter.next(), iter.next()) {
+            (Some(Value::Str(kind)), Some(discriminant)) => match kind.as_str() {
+                "node" => {
+                    let Value::Str(identifier) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" node identifier must be a string",
+                        ));
+                        continue;
+                    };
+                    let identifier = identifier.to_string();
+
+                    if !spans.contains_key(&identifier) {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            eco_format!("metadata for unknown node: {identifier:?}"),
+                        ));
+                        continue;
+                    }
+
+                    match node_result.entry(identifier) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(e) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!("duplicate metadata for node: {:?}", e.key()),
+                            ));
+                        }
+                    }
+                }
+                "transclude" => {
+                    let Value::Int(counter_i64) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" transclude counter must be an integer",
+                        ));
+                        continue;
+                    };
+                    let counter = match u32::try_from(*counter_i64) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "\"wb-metadata\" transclude counter out of range: {counter_i64}"
+                                ),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    match transclusion_result.entry(counter) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(entry) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "duplicate metadata for transclusion counter: {}",
+                                    entry.key()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                "link" => {
+                    let Value::Int(counter_i64) = discriminant else {
+                        errors.push(SourceDiagnostic::error(
+                            item.span(),
+                            "\"wb-metadata\" link counter must be an integer",
+                        ));
+                        continue;
+                    };
+                    let counter = match u32::try_from(*counter_i64) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "\"wb-metadata\" link counter out of range: {counter_i64}"
+                                ),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    match link_result.entry(counter) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(normalize_metadata(dictionary));
+                        }
+                        Entry::Occupied(entry) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!("duplicate metadata for link counter: {}", entry.key()),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    errors.push(SourceDiagnostic::error(
+                        item.span(),
+                        eco_format!("unknown \"wb-metadata\" kind: {:?}", kind.as_str()),
+                    ));
+                }
+            },
+            _ => {
+                errors.push(SourceDiagnostic::error(
+                    item.span(),
+                    "\"wb-metadata\" must be a two-element [kind, discriminant] array",
+                ));
+            }
+        }
+    }
+
+    (node_result, transclusion_result, link_result, errors)
+}
+
+// TODO: Maybe use EcoVec here
+fn normalize_metadata(dictionary: &Dict) -> HashMap<String, Vec<String>> {
+    let mut result = HashMap::with_capacity(dictionary.len().saturating_sub(1));
+
+    for (key, value) in dictionary.iter() {
+        if key.as_str() == "wb-metadata" {
+            continue;
+        }
+        let values: Vec<String> = match value {
+            Value::None => continue,
+            Value::Str(s) => vec![s.to_string()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|v| match v {
+                    Value::None => None,
+                    Value::Str(s) => Some(s.to_string()),
+                    other => Some(other.repr().to_string()),
+                })
+                .collect(),
+            other => vec![other.repr().to_string()],
+        };
+        if !values.is_empty() {
+            result.insert(key.to_string(), values);
+        }
+    }
+
+    result
+}
+
+/// Walks `document`'s element tree once (iterative DFS), returning a map from
+/// each node identifier to the span of its `wb-node` or `wb-subnode` element,
+/// plus errors for any duplicate identifiers found within the document.
+fn collect_node_spans(
+    document: &HtmlDocument,
+) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
+    let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
+    let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
+    let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
+
+    let mut spans = HashMap::new();
+    let mut errors = EcoVec::new();
+    let mut stack = vec![document.root()];
+
+    while let Some(element) = stack.pop() {
+        if (element.tag == wb_node || element.tag == wb_subnode)
+            && let Some(id) = element.attrs.get(identifier)
+        {
+            match spans.entry(id.to_string()) {
+                Entry::Occupied(_) => {
+                    errors.push(SourceDiagnostic::error(
+                        element.span,
+                        eco_format!("duplicate node identifier: {id:?}"),
+                    ));
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(element.span);
+                }
+            }
+        }
+        for child in element.children.iter().rev() {
+            if let HtmlNode::Element(child_elem) = child {
+                stack.push(child_elem);
+            }
+        }
+    }
+
+    (spans, errors)
+}
+
+fn missing_identifier_diagnostic(is_subnode: bool) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        if is_subnode {
+            WB_SUBNODE_MISSING_IDENTIFIER
+        } else {
+            WB_NODE_MISSING_IDENTIFIER
+        },
+    )
+}
+
+fn missing_title_diagnostic(is_subnode: bool) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        if is_subnode {
+            WB_SUBNODE_MISSING_TITLE
+        } else {
+            WB_NODE_MISSING_TITLE
+        },
+    )
+}
+
+fn invalid_transclude_value_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("wb-subnode has invalid transclude value: {value:?}"),
+    )
+}
+
+fn invalid_transclude_counter_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("wb-transclude has invalid counter: {value:?}"),
+    )
+}
+
+fn invalid_link_counter_diagnostic(value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("link has invalid data-counter: {value:?}"),
+    )
+}
+
+fn orphaned_transclusion_metadata_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!(
+            "transclusion metadata for counter {counter} has no corresponding wb-transclude element"
+        ),
+    )
+}
+
+fn orphaned_link_metadata_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("link metadata for counter {counter} has no corresponding link element"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::fmt::Write;
+
+    use dom_query::Document;
+    use proptest::prelude::*;
+    use typst::syntax::Span;
+
+    use typst::diag::SourceDiagnostic;
+
+    use super::*;
+    use crate::compiler::Metadata;
+
+    fn transclude_counters(html: &str) -> Vec<String> {
+        Document::from(html)
+            .select("wb-transclude[counter]")
+            .iter()
+            .filter_map(|e| e.attr("counter").map(|c| c.to_string()))
+            .collect()
+    }
+
+    fn link_counters(html: &str) -> Vec<String> {
+        Document::from(html)
+            .select("a[data-counter]")
+            .iter()
+            .filter_map(|e| e.attr("data-counter").map(|c| c.to_string()))
+            .collect()
+    }
+
+    fn check_body_html(node: &MockNode, body_html: &str) -> Result<(), TestCaseError> {
+        let document = Document::from(body_html);
+        for element in &node.body {
+            match element {
+                MockElement::Text(t) => {
+                    prop_assert!(
+                        body_html.contains(t.as_str()),
+                        "text {t:?} not found in body_html: {body_html:?}",
+                    );
+                }
+                MockElement::Link(l) => {
+                    let selector = format!(r#"a[href="wb:{}"]"#, l.target);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "link to {:?} not found in body_html: {body_html:?}",
+                        l.target,
+                    );
+                }
+                MockElement::Transclusion(t) => {
+                    let selector = format!(r#"wb-transclude[identifier="{}"]"#, t.target);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "transclude of {:?} not found in body_html: {body_html:?}",
+                        t.target,
+                    );
+                }
+                MockElement::Subnode(s) if s.transclude => {
+                    let selector = format!(r#"wb-transclude[identifier="{}"]"#, s.node.identifier);
+                    prop_assert!(
+                        document.select(&selector).exists(),
+                        "synthetic transclude for {:?} not found in body_html: {body_html:?}",
+                        s.node.identifier,
+                    );
+                }
+                MockElement::Subnode(s) => {
+                    let selector = format!(r#"wb-subnode[identifier="{}"]"#, s.node.identifier);
+                    prop_assert!(
+                        !document.select(&selector).exists(),
+                        "non-transcluded subnode {:?} found in body_html: {body_html:?}",
+                        s.node.identifier,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    const METADATA_VEC_COUNT_MAX: usize = 10;
+    const METADATA_ENTRIES_COUNT_MAX: usize = 16;
+    const BODY_ELEMENTS_MAX: usize = 16;
+    const BODY_DEPTH: u32 = 4;
+    const BODY_DESIRED_SIZE: u32 = 32;
+    const BODY_BRANCH_SIZE: u32 = 8;
+
+    #[derive(Debug, Clone)]
+    struct MockFile {
+        primary: MockNode,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockNode {
+        identifier: String,
+        title: String,
+        metadata: Option<Metadata>,
+        body: Vec<MockElement>,
+    }
+
+    #[derive(Debug, Clone)]
+    enum MockElement {
+        Text(String),
+        Link(MockLink),
+        Transclusion(MockTransclusion),
+        Subnode(MockSubnode),
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockSubnode {
+        node: MockNode,
+        transclude: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockLink {
+        target: String,
+        content: Option<String>,
+        metadata: Option<Metadata>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockTransclusion {
+        target: String,
+        metadata: Option<Metadata>,
+    }
+
+    #[derive(Debug)]
+    struct ExpectedOutput {
+        title: String,
+        node_metadata: Metadata,
+        transclusions: Vec<String>,
+        links: Vec<String>,
+        transclusion_metadata: HashMap<u32, Metadata>,
+        link_metadata: HashMap<u32, Metadata>,
+    }
+
+    impl MockFile {
+        fn walk(&self, mut f: impl FnMut(&MockNode, bool)) {
+            let mut stack: Vec<(&MockNode, bool)> = vec![(&self.primary, false)];
+            while let Some((node, is_subnode)) = stack.pop() {
+                f(node, is_subnode);
+                for element in node.body.iter().rev() {
+                    if let MockElement::Subnode(subnode) = element {
+                        stack.push((&subnode.node, true));
+                    }
+                }
+            }
+        }
+
+        fn walk_mut(&mut self, mut f: impl FnMut(&mut MockNode, bool)) {
+            let mut stack: Vec<(&mut MockNode, bool)> = vec![(&mut self.primary, false)];
+            while let Some((node, is_subnode)) = stack.pop() {
+                f(node, is_subnode);
+                for element in node.body.iter_mut().rev() {
+                    if let MockElement::Subnode(subnode) = element {
+                        stack.push((&mut subnode.node, true));
+                    }
+                }
+            }
+        }
+
+        fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
+            let mut html = String::new();
+            let mut spans = HashMap::new();
+            let mut file_node_metadata = HashMap::new();
+            let mut file_transclusion_metadata = HashMap::new();
+            let mut file_link_metadata = HashMap::new();
+            let mut synthetic_transclusions: Vec<(String, Option<Metadata>)> = Vec::new();
+            let mut transclusion_counter = 0u32;
+            let mut link_counter = 0u32;
+            let mut expected = HashMap::new();
+
+            enum Work<'a> {
+                /// Open a node: write its opening tag + title, then push its
+                /// body elements (reversed) followed by a Close.
+                Open {
+                    node: &'a MockNode,
+                    tag: &'static str,
+                    option_transclude: Option<bool>,
+                },
+                /// Process a single leaf body element.
+                Element(&'a MockElement),
+                /// Close the current node: write the closing tag, register
+                /// span/metadata, finalize the expected output.
+                Close {
+                    identifier: &'a str,
+                    tag: &'static str,
+                    title: &'a str,
+                    node_metadata: &'a Option<Metadata>,
+                },
+            }
+
+            struct EdgeInfo {
+                owner_identifier: String,
+                transclusions: Vec<String>,
+                links: Vec<String>,
+                transclusion_metadata: HashMap<u32, Metadata>,
+                link_metadata: HashMap<u32, Metadata>,
+            }
+
+            let mut stack: Vec<Work> = vec![Work::Open {
+                node: &self.primary,
+                tag: "wb-node",
+                option_transclude: None,
+            }];
+            let mut edge_stack: Vec<EdgeInfo> = Vec::new();
+
+            while let Some(work) = stack.pop() {
+                match work {
+                    Work::Open {
+                        node,
+                        tag,
+                        option_transclude,
+                    } => {
+                        write!(html, r#"<{tag} identifier="{}""#, node.identifier).unwrap();
+                        if let Some(transclude) = option_transclude {
+                            let value = if transclude { "true" } else { "false" };
+                            write!(html, r#" transclude="{value}""#).unwrap();
+                        }
+                        html.push('>');
+                        write!(html, "<wb-title>{}</wb-title>", node.title).unwrap();
+
+                        stack.push(Work::Close {
+                            identifier: &node.identifier,
+                            tag,
+                            title: &node.title,
+                            node_metadata: &node.metadata,
+                        });
+                        stack.extend(node.body.iter().rev().map(Work::Element));
+
+                        edge_stack.push(EdgeInfo {
+                            owner_identifier: node.identifier.clone(),
+                            transclusions: Vec::new(),
+                            links: Vec::new(),
+                            transclusion_metadata: HashMap::new(),
+                            link_metadata: HashMap::new(),
+                        });
+                    }
+                    Work::Element(element) => {
+                        let edges = edge_stack.last_mut().unwrap();
+
+                        match element {
+                            MockElement::Text(text) => {
+                                write!(html, "<p>{text}</p>").unwrap();
+                            }
+                            MockElement::Link(link) => {
+                                let counter = link_counter;
+                                link_counter += 1;
+                                let content = link.content.as_deref().unwrap_or_default();
+                                write!(
+                                    html,
+                                    r#"<a href="wb:{}" data-counter="{counter}">{content}</a>"#,
+                                    link.target,
+                                )
+                                .unwrap();
+                                if let Some(metadata) = &link.metadata
+                                    && !metadata.is_empty()
+                                {
+                                    assert!(
+                                        file_link_metadata
+                                            .insert(counter, metadata.clone())
+                                            .is_none(),
+                                        "duplicate link metadata: {counter}",
+                                    );
+                                    assert!(
+                                        edges
+                                            .link_metadata
+                                            .insert(counter, metadata.clone())
+                                            .is_none(),
+                                        "duplicate expected link metadata: {counter}",
+                                    );
+                                }
+                                edges.links.push(link.target.clone());
+                            }
+                            MockElement::Transclusion(t) => {
+                                let counter = transclusion_counter;
+                                transclusion_counter += 1;
+                                write!(
+                                    html,
+                                    r#"<wb-transclude identifier="{}" counter="{counter}"></wb-transclude>"#,
+                                    t.target,
+                                )
+                                .unwrap();
+                                if let Some(metadata) = &t.metadata
+                                    && !metadata.is_empty()
+                                {
+                                    assert!(
+                                        file_transclusion_metadata
+                                            .insert(counter, metadata.clone())
+                                            .is_none(),
+                                        "duplicate transclusion metadata: {counter}",
+                                    );
+                                    assert!(
+                                        edges
+                                            .transclusion_metadata
+                                            .insert(counter, metadata.clone())
+                                            .is_none(),
+                                        "duplicate expected transclusion metadata: {counter}",
+                                    );
+                                }
+                                edges.transclusions.push(t.target.clone());
+                            }
+                            MockElement::Subnode(subnode) => {
+                                if subnode.transclude {
+                                    edges.transclusions.push(subnode.node.identifier.clone());
+                                    synthetic_transclusions.push((
+                                        edges.owner_identifier.clone(),
+                                        subnode.node.metadata.clone(),
+                                    ));
+                                }
+                                // Push the subnode as a new `Open` work item. It
+                                // will be fully processed before we we continue
+                                // with the current node's remaining elements.
+                                stack.push(Work::Open {
+                                    node: &subnode.node,
+                                    tag: "wb-subnode",
+                                    option_transclude: Some(subnode.transclude),
+                                });
+                            }
+                        }
+                    }
+                    Work::Close {
+                        identifier,
+                        tag,
+                        title,
+                        node_metadata,
+                    } => {
+                        write!(html, "</{tag}>").unwrap();
+
+                        assert!(
+                            spans
+                                .insert(identifier.to_owned(), Span::detached())
+                                .is_none(),
+                            "duplicate span: {identifier}",
+                        );
+                        if let Some(metadata) = node_metadata
+                            && !metadata.is_empty()
+                        {
+                            assert!(
+                                file_node_metadata
+                                    .insert(identifier.to_owned(), metadata.clone())
+                                    .is_none(),
+                                "duplicate node metadata: {identifier}",
+                            );
+                        }
+
+                        let edges = edge_stack.pop().unwrap();
+                        expected.insert(
+                            identifier.to_owned(),
+                            ExpectedOutput {
+                                title: title.to_owned(),
+                                node_metadata: node_metadata.clone().unwrap_or_default(),
+                                transclusions: edges.transclusions,
+                                links: edges.links,
+                                transclusion_metadata: edges.transclusion_metadata,
+                                link_metadata: edges.link_metadata,
+                            },
+                        );
+                    }
+                }
+            }
+
+            let mut synthetic_counter = transclusion_counter;
+            for (owner_identifier, metadata) in synthetic_transclusions.into_iter().rev() {
+                let counter = synthetic_counter;
+                synthetic_counter = synthetic_counter
+                    .checked_add(1)
+                    .expect("synthetic transclusion counter overflow");
+
+                if let Some(metadata) = metadata
+                    && !metadata.is_empty()
+                {
+                    assert!(
+                        expected
+                            .get_mut(&owner_identifier)
+                            .expect("bug: missing expected owner for synthetic transclusion")
+                            .transclusion_metadata
+                            .insert(counter, metadata)
+                            .is_none(),
+                        "duplicate expected synthetic transclusion metadata: {counter}",
+                    );
+                }
+            }
+
+            let file_output = FileOutput {
+                html,
+                spans,
+                metadata: MetadataMaps {
+                    node: file_node_metadata,
+                    transclusion: file_transclusion_metadata,
+                    link: file_link_metadata,
+                },
+            };
+
+            (file_output, expected)
+        }
+    }
+
+    fn metadata_strategy() -> impl Strategy<Value = Metadata> {
+        proptest::collection::hash_map(
+            "[a-z]+",
+            proptest::collection::vec("[a-z0-9]+", 0..=METADATA_VEC_COUNT_MAX),
+            0..=METADATA_ENTRIES_COUNT_MAX,
+        )
+    }
+
+    fn leaf_element_strategy() -> impl Strategy<Value = MockElement> {
+        prop_oneof![
+            "[a-z ]{1,15}".prop_map(MockElement::Text),
+            (
+                "[a-z][a-z0-9]{0,7}",
+                proptest::option::of("[a-z ]{1,10}"),
+                proptest::option::of(metadata_strategy()),
+            )
+                .prop_map(|(target, content, metadata)| MockElement::Link(MockLink {
+                    target,
+                    content,
+                    metadata,
+                })),
+            (
+                "[a-z][a-z0-9]{0,7}",
+                proptest::option::of(metadata_strategy())
+            )
+                .prop_map(|(target, metadata)| {
+                    MockElement::Transclusion(MockTransclusion { target, metadata })
+                }),
+        ]
+    }
+
+    fn node_strategy(
+        body: impl Strategy<Value = Vec<MockElement>>,
+    ) -> impl Strategy<Value = MockNode> {
+        (
+            "[A-Za-z ]{0,12}",
+            proptest::option::of(metadata_strategy()),
+            body,
+        )
+            .prop_map(|(title, metadata, body)| MockNode {
+                identifier: String::new(),
+                title,
+                metadata,
+                body,
+            })
+    }
+
+    fn element_strategy() -> impl Strategy<Value = MockElement> {
+        leaf_element_strategy().prop_recursive(
+            BODY_DEPTH,
+            BODY_DESIRED_SIZE,
+            BODY_BRANCH_SIZE,
+            |inner| {
+                prop_oneof![
+                    3 => leaf_element_strategy(),
+                    1 => (
+                        node_strategy(proptest::collection::vec(inner, 0..=BODY_ELEMENTS_MAX)),
+                        proptest::bool::ANY,
+                    )
+                        .prop_map(|(node, transclude)| MockElement::Subnode(MockSubnode {
+                            node,
+                            transclude,
+                        })),
+                ]
+            },
+        )
+    }
+
+    fn mock_file_strategy() -> impl Strategy<Value = MockFile> {
+        node_strategy(proptest::collection::vec(
+            element_strategy(),
+            0..=BODY_ELEMENTS_MAX,
+        ))
+        .prop_map(|primary| {
+            let mut file = MockFile { primary };
+            let mut next_id = 0u32;
+            file.walk_mut(|node, _| {
+                node.identifier = format!("n{next_id}");
+                next_id = next_id
+                    .checked_add(1)
+                    .expect("node identifier counter overflow");
+            });
+            file
+        })
+    }
+
+    #[test]
+    fn missing_wb_node() {
+        let output = FileOutput {
+            html: String::new(),
+            spans: HashMap::new(),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert!(errors.iter().any(|e| e.message == NO_WB_NODE));
+    }
+
+    #[test]
+    fn multiple_wb_nodes() {
+        let output = FileOutput {
+            html: concat!(
+                r#"<wb-node identifier="n0"><wb-title>A</wb-title></wb-node>"#,
+                r#"<wb-node identifier="n1"><wb-title>B</wb-title></wb-node>"#,
+            )
+            .to_owned(),
+            spans: HashMap::from([
+                ("n0".to_owned(), Span::detached()),
+                ("n1".to_owned(), Span::detached()),
+            ]),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert!(errors.iter().any(|e| e.message == MULTIPLE_WB_NODES));
+    }
+
+    proptest! {
+        #[test]
+        fn happy_case(mut file in mock_file_strategy()) {
+            let (file_output, expected_nodes) = file.render();
+            let actual_nodes = extract(file_output).unwrap();
+
+            prop_assert_eq!(actual_nodes.len(), expected_nodes.len());
+
+            let mut id_to_node: HashMap<String, MockNode> = HashMap::new();
+            file.walk_mut(|node, _is_subnode| { id_to_node.insert(node.identifier.clone(), node.clone()); });
+
+            for (id, expected) in &expected_nodes {
+                let actual = &actual_nodes[id.as_str()];
+
+                prop_assert_eq!(&actual.entry.title, &expected.title);
+                prop_assert_eq!(&actual.entry.title_text, &expected.title);
+                prop_assert_eq!(&actual.entry.node_metadata, &expected.node_metadata);
+                prop_assert_eq!(&actual.transclusions, &expected.transclusions);
+                prop_assert_eq!(&actual.links, &expected.links);
+                prop_assert_eq!(&actual.entry.transclusion_metadata, &expected.transclusion_metadata);
+                prop_assert_eq!(&actual.entry.link_metadata, &expected.link_metadata);
+
+                prop_assert!(actual.entry.transclusion_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.entry.link_metadata.values().all(|m| !m.is_empty()));
+
+                let document = Document::from(actual.entry.body_html.as_str());
+
+                prop_assert!(document.select("wb-subnode").iter().next().is_none());
+                prop_assert!(document.select("wb-title").iter().next().is_none());
+
+                check_body_html(&id_to_node[id.as_str()], &actual.entry.body_html)?;
+            }
+        }
+
+        #[test]
+        fn missing_node_identifier(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| ids.push((node.identifier.clone(), is_subnode)));
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 1..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, _) in &ids {
+                let selector = format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).remove_attr("identifier");
+                output.spans.remove(id);
+                output.metadata.node.remove(id);
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|(_, is_subnode)| missing_identifier_diagnostic(*is_subnode))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_span(
+            (file, id) in mock_file_strategy().prop_flat_map(|file| {
+                let mut ids = Vec::new();
+                file.walk(|node, _| ids.push(node.identifier.clone()));
+                proptest::sample::select(ids).prop_map(move |id| (file.clone(), id))
+            })
+        ) {
+            let (mut output, _) = file.render();
+            output.spans.remove(&id);
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_NO_SPAN_FOR_IDENTIFIER),
+                "unexpected panic message: {message:?}",
+            );
+        }
+
+        #[test]
+        fn extra_node_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let missing_id = output
+                .spans
+                .keys()
+                .find_map(|id| (!output.metadata.node.contains_key(id)).then(|| format!("{id}-bogus")))
+                .unwrap_or_else(|| "bogus".to_owned());
+            output.metadata.node.insert(
+                missing_id,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_UNCONSUMED_NODE_METADATA),
+                "unexpected panic message: {message:?}",
+            );
+        }
+
+        #[test]
+        fn extra_transclusion_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let extra_counter = output
+                .metadata.transclusion
+                .keys()
+                .copied()
+                .chain(
+                    transclude_counters(&output.html)
+                        .into_iter()
+                        .map(|counter| counter.parse::<u32>().unwrap()),
+                )
+                .max()
+                .map_or(0, |counter| counter + 1);
+            output.metadata.transclusion.insert(
+                extra_counter,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let actual = extract(output).unwrap_err().to_vec();
+            let expected = vec![orphaned_transclusion_metadata_diagnostic(extra_counter)];
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn extra_link_metadata(
+            file in mock_file_strategy()
+        ) {
+            let (mut output, _) = file.render();
+            let extra_counter = output
+                .metadata.link
+                .keys()
+                .copied()
+                .chain(
+                    link_counters(&output.html)
+                        .into_iter()
+                        .map(|counter| counter.parse::<u32>().unwrap()),
+                )
+                .max()
+                .map_or(0, |counter| counter + 1);
+            output.metadata.link.insert(
+                extra_counter,
+                HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
+            );
+
+            let actual = extract(output).unwrap_err().to_vec();
+            let expected = vec![orphaned_link_metadata_diagnostic(extra_counter)];
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn duplicate_node_identifier(
+            (file, picked, k) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, _| ids.push(node.identifier.clone()));
+                    let k = (ids.len() / 2).max(1);
+                    (Just(file), Just(ids), 1usize..=k)
+                })
+                .prop_filter("need at least 2 nodes for a duplicate pair", |(_, ids, _): &(MockFile, Vec<String>, usize)| {
+                    ids.len() >= 2
+                })
+                .prop_flat_map(|(file, ids, k)| {
+                    proptest::sample::subsequence(ids, 2 * k)
+                        .prop_map(move |picked| (file.clone(), picked, k))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (target_id, source_id) in picked[..k].iter().zip(picked[k..2 * k].iter()) {
+                let selector = format!(
+                    r#"wb-node[identifier="{target_id}"], wb-subnode[identifier="{target_id}"]"#
+                );
+                document.select(&selector).set_attr("identifier", source_id);
+                output.spans.remove(target_id);
+                output.metadata.node.remove(target_id);
+            }
+            output.html = document.html().to_string();
+
+            let result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| extract(output))
+            );
+            let error = result.expect_err("expected a panic");
+            let message = error.downcast_ref::<&str>()
+                .copied()
+                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                .unwrap();
+            prop_assert!(
+                message.contains(BUG_DUPLICATE_IDENTIFIER),
+                "unexpected panic message: {message:?}",
+            );
+        }
+
+        #[test]
+        fn missing_title(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| ids.push((node.identifier.clone(), is_subnode)));
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 1..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, _) in &ids {
+                let selector =
+                    format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).children().first().remove();
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|(_, is_subnode)| missing_title_diagnostic(*is_subnode))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_attribute(
+            (file, ids) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| {
+                        if is_subnode {
+                            ids.push(node.identifier.clone());
+                        }
+                    });
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 0..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+                .prop_filter("need at least one subnode", |(_, ids)| !ids.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for id in &ids {
+                let selector = format!(r#"wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).remove_attr("transclude");
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = ids
+                .iter()
+                .map(|_| SourceDiagnostic::error(Span::detached(), WB_SUBNODE_MISSING_TRANSCLUDE))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_transclude_attribute_value(
+            (file, ids, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let mut ids = Vec::new();
+                    file.walk(|node, is_subnode| {
+                        if is_subnode {
+                            ids.push(node.identifier.clone());
+                        }
+                    });
+                    let n = ids.len();
+                    proptest::sample::subsequence(ids, 0..=n)
+                        .prop_map(move |stripped| (file.clone(), stripped))
+                })
+                .prop_filter("need at least one subnode", |(_, ids)| !ids.is_empty())
+                .prop_flat_map(|(file, ids)| {
+                    let n = ids.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}".prop_filter("not true or false", |s| {
+                            s != "true" && s != "false"
+                        }),
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), ids.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            for (id, value) in ids.iter().zip(values.iter()) {
+                let selector = format!(r#"wb-subnode[identifier="{id}"]"#);
+                document.select(&selector).set_attr("transclude", value.as_str());
+            }
+            output.html = document.html().to_string();
+
+            let mut expected: Vec<SourceDiagnostic> = values
+                .iter()
+                .map(|v| invalid_transclude_value_diagnostic(v))
+                .collect();
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_identifier(
+            (mut output, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (output.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+        ) {
+            let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
+            for counter in &counters {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).remove_attr("identifier");
+                let counter_u32: u32 = counter.parse().unwrap();
+                if output.metadata.transclusion.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_IDENTIFIER));
+            }
+            output.html = document.html().to_string();
+
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_transclude_counter(
+            (file, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
+            for counter in &counters {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).remove_attr("counter");
+                let counter_u32: u32 = counter.parse().unwrap();
+                if output.metadata.transclusion.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), WB_TRANSCLUDE_MISSING_COUNTER));
+            }
+            output.html = document.html().to_string();
+
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_transclude_counter(
+            (file, counters, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = transclude_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one transclude", |(_, counters)| !counters.is_empty())
+                .prop_flat_map(|(file, counters)| {
+                    let n = counters.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}",
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), counters.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
+            for (counter, value) in counters.iter().zip(values.iter()) {
+                let selector = format!(r#"wb-transclude[counter="{counter}"]"#);
+                document.select(&selector).set_attr("counter", value.as_str());
+                let counter_u32: u32 = counter.parse().unwrap();
+                if output.metadata.transclusion.contains_key(&counter_u32) {
+                    expected.push(orphaned_transclusion_metadata_diagnostic(counter_u32));
+                }
+                expected.push(invalid_transclude_counter_diagnostic(value));
+            }
+            output.html = document.html().to_string();
+
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn missing_link_counter(
+            (file, counters) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = link_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one link", |(_, counters)| !counters.is_empty())
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
+            for counter in &counters {
+                let selector = format!(r#"a[data-counter="{counter}"]"#);
+                document.select(&selector).remove_attr("data-counter");
+                let counter_u32: u32 = counter.parse().unwrap();
+                if output.metadata.link.contains_key(&counter_u32) {
+                    expected.push(orphaned_link_metadata_diagnostic(counter_u32));
+                }
+                expected.push(SourceDiagnostic::error(Span::detached(), LINK_MISSING_COUNTER));
+            }
+            output.html = document.html().to_string();
+
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn invalid_link_counter(
+            (file, counters, values) in mock_file_strategy()
+                .prop_flat_map(|file| {
+                    let (output, _) = file.render();
+                    let counters = link_counters(&output.html);
+                    let n = counters.len();
+                    proptest::sample::subsequence(counters, 0..=n)
+                        .prop_map(move |selected| (file.clone(), selected))
+                })
+                .prop_filter("need at least one link", |(_, counters)| !counters.is_empty())
+                .prop_flat_map(|(file, counters)| {
+                    let n = counters.len();
+                    proptest::collection::vec(
+                        "[a-z]{1,8}",
+                        n,
+                    )
+                    .prop_map(move |values| (file.clone(), counters.clone(), values))
+                })
+        ) {
+            let (mut output, _) = file.render();
+
+            let document = Document::from(output.html.as_str());
+            let mut expected: Vec<SourceDiagnostic> = Vec::new();
+            for (counter, value) in counters.iter().zip(values.iter()) {
+                let selector = format!(r#"a[data-counter="{counter}"]"#);
+                document.select(&selector).set_attr("data-counter", value.as_str());
+                let counter_u32: u32 = counter.parse().unwrap();
+                if output.metadata.link.contains_key(&counter_u32) {
+                    expected.push(orphaned_link_metadata_diagnostic(counter_u32));
+                }
+                expected.push(invalid_link_counter_diagnostic(value));
+            }
+            output.html = document.html().to_string();
+
+            let mut actual = extract(output).unwrap_err().to_vec();
+
+            actual.sort_by(|a, b| a.message.cmp(&b.message));
+            expected.sort_by(|a, b| a.message.cmp(&b.message));
+
+            prop_assert_eq!(actual, expected);
+        }
+    }
+}
