@@ -34,6 +34,8 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const CREATE_FILE_WEIGHT: u32 = 2;
         const REPLACE_FILE_WEIGHT: u32 = 1;
         const REMOVE_FILE_WEIGHT: u32 = 1;
+        const ADD_NODE_WEIGHT: u32 = 1;
+        const REMOVE_NODE_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -63,6 +65,12 @@ impl ReferenceStateMachine for ReferenceCompiler {
                 add_node.prop_map(Transition::AddNode).boxed(),
             ));
         }
+        if let Some(remove_node) = RemoveNode::strategy(state, &queries) {
+            strategies.push((
+                REMOVE_NODE_WEIGHT,
+                remove_node.prop_map(Transition::RemoveNode).boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -73,7 +81,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::ReplaceFile(replace_file) => replace_file.apply(state),
             Transition::RemoveFile(remove_file) => remove_file.apply(state),
             Transition::AddNode(add_node) => add_node.apply(state),
-            Transition::RemoveNode(remove_node) => todo!(),
+            Transition::RemoveNode(remove_node) => remove_node.apply(state),
             Transition::AddTransclusion(add_transclusion) => todo!(),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
             Transition::AddLink(add_link) => todo!(),
@@ -98,7 +106,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::ReplaceFile(replace_file) => replace_file.does_apply(state),
             Transition::RemoveFile(remove_file) => remove_file.does_apply(state),
             Transition::AddNode(add_node) => add_node.does_apply(state),
-            Transition::RemoveNode(remove_node) => todo!(),
+            Transition::RemoveNode(remove_node) => remove_node.does_apply(state),
             Transition::AddTransclusion(add_transclusion) => todo!(),
             Transition::RemoveTransclusion(remove_transclusion) => todo!(),
             Transition::AddLink(add_link) => todo!(),
@@ -219,6 +227,18 @@ impl State {
         let mut existing_file_ids: Vec<FileId> = self.files.keys().copied().collect();
         existing_file_ids.sort_by_key(|id| id.into_raw());
 
+        let mut existing_file_node_pairs: Vec<(FileId, MockNodeId)> = self
+            .files
+            .iter()
+            .flat_map(|(&file_id, file)| {
+                file.nodes
+                    .iter()
+                    .copied()
+                    .map(move |node_id| (file_id, node_id))
+            })
+            .collect();
+        existing_file_node_pairs.sort_by_key(|(file_id, node_id)| (file_id.into_raw(), node_id.0));
+
         let next_node_id = MockNodeId(
             self.nodes
                 .keys()
@@ -269,6 +289,7 @@ impl State {
         Queries {
             next_file_id,
             existing_file_ids: Cow::Owned(existing_file_ids),
+            existing_file_node_pairs: Cow::Owned(existing_file_node_pairs),
             next_node_id,
             next_node_identifier,
             existing_node_identifiers: Cow::Owned(existing_sorted),
@@ -543,6 +564,7 @@ pub enum MetadataOperation {
 struct Queries {
     next_file_id: FileId,
     existing_file_ids: Cow<'static, [FileId]>,
+    existing_file_node_pairs: Cow<'static, [(FileId, MockNodeId)]>,
     next_node_id: MockNodeId,
     next_node_identifier: MockNodeIdentifier,
     existing_node_identifiers: Cow<'static, [MockNodeIdentifier]>,
@@ -553,7 +575,6 @@ struct Queries {
 const CREATE_FILE_NODE_MAX: usize = 5;
 const CREATE_FILE_COMPILE_ERRORS_MAX: usize = 3;
 const CREATE_FILE_COMPILE_WARNINGS_MAX: usize = 3;
-const ADD_NODE_WEIGHT: u32 = 1;
 const METADATA_ENTRIES_MAX: usize = 6;
 const METADATA_VALUES_MAX: usize = 4;
 const NODE_TRANSCLUSIONS_MAX: usize = 5;
@@ -881,6 +902,46 @@ impl Event for AddNode {
     }
 }
 
+impl Event for RemoveNode {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_pairs.is_empty() {
+            None
+        } else {
+            Some(
+                select(queries.existing_file_node_pairs.clone())
+                    .prop_map(|(file_id, node_id)| RemoveNode { file_id, node_id }),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state.files[&self.file_id].nodes.contains(&self.node_id)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let RemoveNode { file_id, node_id } = self;
+
+        let file = state
+            .files
+            .get_mut(file_id)
+            .expect("bug: RemoveNode target file disappeared before apply");
+        let removed_from_file = file.nodes.remove(node_id);
+        assert!(
+            removed_from_file,
+            "bug: RemoveNode targeted a node id not owned by the target file"
+        );
+
+        let removed_from_nodes = state.nodes.remove(node_id);
+        assert!(
+            removed_from_nodes.is_some(),
+            "bug: RemoveNode targeted a node id missing from the global node store"
+        );
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -969,6 +1030,23 @@ proptest! {
         prop_assert!(
             add_node.does_apply(&state),
             "{add_node:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn remove_node_strategy_implies_does_apply(
+        (state, remove_node) in state_strategy()
+            .prop_filter("RemoveNode needs an existing node", |state| !state.nodes.is_empty())
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = RemoveNode::strategy(&state, &queries)
+                    .expect("RemoveNode::strategy returns Some when nodes exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            remove_node.does_apply(&state),
+            "{remove_node:?} fails does_apply in {state:?}",
         );
     }
 }
