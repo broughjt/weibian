@@ -44,6 +44,7 @@ impl ReferenceStateMachine for ReferenceCompiler {
         const UPDATE_BODY_WEIGHT: u32 = 1;
         const UPDATE_LINK_TARGET_WEIGHT: u32 = 1;
         const UPDATE_LINK_CONTENT_WEIGHT: u32 = 1;
+        const UPDATE_TRANSCLUSION_TARGET_WEIGHT: u32 = 1;
 
         let mut strategies: Vec<(u32, BoxedStrategy<Transition>)> = Vec::new();
 
@@ -135,6 +136,16 @@ impl ReferenceStateMachine for ReferenceCompiler {
                     .boxed(),
             ));
         }
+        if let Some(update_transclusion_target) =
+            UpdateTransclusionTarget::strategy(state, &queries)
+        {
+            strategies.push((
+                UPDATE_TRANSCLUSION_TARGET_WEIGHT,
+                update_transclusion_target
+                    .prop_map(Transition::UpdateTransclusionTarget)
+                    .boxed(),
+            ));
+        }
 
         Union::new_weighted(strategies).boxed()
     }
@@ -155,7 +166,9 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::EditMetadata(edit_metadata) => todo!(),
             Transition::UpdateLinkTarget(update_link_target) => update_link_target.apply(state),
             Transition::UpdateLinkContent(update_link_content) => update_link_content.apply(state),
-            Transition::UpdateTransclusionTarget(update_transclusion_target) => todo!(),
+            Transition::UpdateTransclusionTarget(update_transclusion_target) => {
+                update_transclusion_target.apply(state)
+            }
             Transition::AddCompileError(add_compile_error) => todo!(),
             Transition::RemoveCompileError(remove_compile_error) => todo!(),
             Transition::AddCompileWarning(add_compile_warning) => todo!(),
@@ -186,7 +199,9 @@ impl ReferenceStateMachine for ReferenceCompiler {
             Transition::UpdateLinkContent(update_link_content) => {
                 update_link_content.does_apply(state)
             }
-            Transition::UpdateTransclusionTarget(update_transclusion_target) => todo!(),
+            Transition::UpdateTransclusionTarget(update_transclusion_target) => {
+                update_transclusion_target.does_apply(state)
+            }
             Transition::AddCompileError(add_compile_error) => todo!(),
             Transition::RemoveCompileError(remove_compile_error) => todo!(),
             Transition::AddCompileWarning(add_compile_warning) => todo!(),
@@ -1403,6 +1418,60 @@ impl Event for UpdateLinkContent {
     }
 }
 
+impl Event for UpdateTransclusionTarget {
+    fn strategy(_state: &State, queries: &Queries) -> Option<impl Strategy<Value = Self> + use<>> {
+        if queries.existing_file_node_transclusion_triples.is_empty() {
+            None
+        } else {
+            Some(
+                (
+                    select(queries.existing_file_node_transclusion_triples.clone()),
+                    target_strategy(queries),
+                )
+                    .prop_map(
+                        |((file_id, node_id, transclusion_index), new_target)| {
+                            UpdateTransclusionTarget {
+                                file_id,
+                                node_id,
+                                transclusion_index,
+                                new_target,
+                            }
+                        },
+                    ),
+            )
+        }
+    }
+
+    fn does_apply(&self, state: &State) -> bool {
+        state.files.contains_key(&self.file_id)
+            && state
+                .nodes
+                .get(&self.node_id)
+                .is_some_and(|node| self.transclusion_index < node.transclusions.len() as u32)
+    }
+
+    fn apply(&self, mut state: State) -> State {
+        let UpdateTransclusionTarget {
+            file_id: _,
+            node_id,
+            transclusion_index,
+            new_target,
+        } = self;
+
+        let node = state
+            .nodes
+            .get_mut(node_id)
+            .expect("bug: UpdateTransclusionTarget target node disappeared before apply");
+        let transclusion = node
+            .transclusions
+            .get_mut(*transclusion_index as usize)
+            .expect("bug: UpdateTransclusionTarget target transclusion disappeared before apply");
+        transclusion.target = *new_target;
+
+        state
+    }
+}
+
 fn state_strategy() -> impl Strategy<Value = State> {
     ReferenceCompiler::sequential_strategy(0..20usize).prop_map(|(initial, transitions, _)| {
         transitions.iter().fold(initial, ReferenceCompiler::apply)
@@ -1656,6 +1725,26 @@ proptest! {
         prop_assert!(
             update_link_content.does_apply(&state),
             "{update_link_content:?} fails does_apply in {state:?}",
+        );
+    }
+
+    #[test]
+    fn update_transclusion_target_strategy_implies_does_apply(
+        (state, update_transclusion_target) in state_strategy()
+            .prop_filter(
+                "UpdateTransclusionTarget needs an existing transclusion",
+                |state| state.nodes.values().any(|node| !node.transclusions.is_empty()),
+            )
+            .prop_flat_map(|state| {
+                let queries = state.queries();
+                let strategy = UpdateTransclusionTarget::strategy(&state, &queries)
+                    .expect("UpdateTransclusionTarget::strategy returns Some when transclusions exist");
+                (Just(state), strategy)
+            })
+    ) {
+        prop_assert!(
+            update_transclusion_target.does_apply(&state),
+            "{update_transclusion_target:?} fails does_apply in {state:?}",
         );
     }
 }
