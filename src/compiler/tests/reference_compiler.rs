@@ -301,10 +301,37 @@ pub struct State {
 }
 
 impl State {
-    /// Builds the `_update` payload that the incremental compiler would
-    /// receive after compiling this file: errors and warnings translated
-    /// into [`SourceDiagnostic`]s, and (when there are no errors) all the
-    /// file's nodes converted into [`NodeOutput`]s keyed by identifier.
+    pub fn insert_file(&mut self, file_id: FileId, file: MockFile) {
+        let MockFile {
+            nodes,
+            errors,
+            warnings,
+        } = file;
+
+        if self.files.contains_key(&file_id) {
+            self.remove_file_nodes(file_id);
+        }
+
+        self.files.insert(
+            file_id,
+            FileState {
+                nodes: nodes.keys().copied().collect(),
+                errors,
+                warnings,
+            },
+        );
+        self.nodes.extend(nodes);
+    }
+
+    pub fn remove_file(&mut self, file_id: FileId) {
+        self.remove_file_nodes(file_id);
+        let removed = self.files.remove(&file_id);
+        assert!(
+            removed.is_some(),
+            "bug: file disappeared before State::remove_file removed it"
+        );
+    }
+
     pub fn compile_file(
         &self,
         file_id: FileId,
@@ -913,15 +940,17 @@ fn node_identifier_strategy(
     Union::new(strategies)
 }
 
+pub fn file_id(n: NonZeroU16) -> FileId {
+    FileId::new(RootedPath::new(
+        VirtualRoot::Project,
+        VirtualPath::new(format!("/file_{n}.typ")).unwrap(),
+    ))
+}
+
 fn file_id_strategy() -> impl Strategy<Value = FileId> {
     any::<u16>()
         .prop_filter_map("FileIds need to be nonzero", NonZeroU16::new)
-        .prop_map(|n| {
-            FileId::new(RootedPath::new(
-                VirtualRoot::Project,
-                VirtualPath::new(format!("/file_{n}.typ")).unwrap(),
-            ))
-        })
+        .prop_map(file_id)
 }
 
 fn span_strategy() -> impl Strategy<Value = Span> {
@@ -1056,25 +1085,8 @@ impl Event for CreateFile {
     }
 
     fn apply(&self, mut state: State) -> State {
-        let CreateFile {
-            file_id,
-            file:
-                MockFile {
-                    nodes,
-                    errors,
-                    warnings,
-                },
-        } = self.clone();
-
-        state.files.insert(
-            file_id,
-            FileState {
-                nodes: nodes.keys().copied().collect(),
-                errors,
-                warnings,
-            },
-        );
-        state.nodes.extend(nodes);
+        let CreateFile { file_id, file } = self.clone();
+        state.insert_file(file_id, file);
 
         state
     }
@@ -1100,26 +1112,8 @@ impl Event for ReplaceFile {
     }
 
     fn apply(&self, mut state: State) -> State {
-        let ReplaceFile {
-            file_id,
-            file:
-                MockFile {
-                    nodes,
-                    errors,
-                    warnings,
-                },
-        } = self.clone();
-
-        state.remove_file_nodes(file_id);
-        state.files.insert(
-            file_id,
-            FileState {
-                nodes: nodes.keys().copied().collect(),
-                errors,
-                warnings,
-            },
-        );
-        state.nodes.extend(nodes);
+        let ReplaceFile { file_id, file } = self.clone();
+        state.insert_file(file_id, file);
 
         state
     }
@@ -1143,13 +1137,7 @@ impl Event for RemoveFile {
 
     fn apply(&self, mut state: State) -> State {
         let RemoveFile { file_id } = self;
-
-        state.remove_file_nodes(*file_id);
-        let removed = state.files.remove(file_id);
-        assert!(
-            removed.is_some(),
-            "bug: file disappeared before RemoveFile::apply removed it"
-        );
+        state.remove_file(*file_id);
 
         state
     }
