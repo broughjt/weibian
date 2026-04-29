@@ -13,6 +13,8 @@ use crate::compiler::{
     Backmatter, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
     build_backmatter_input, build_body_input, build_node_input, cycle_diagnostics,
     dangling_link_diagnostic, dangling_transclusion_diagnostic,
+    duplicate_node_identifier_diagnostic,
+    extract::NodeOutput,
     render::Render,
     tests::{
         reference_compiler::State,
@@ -35,7 +37,9 @@ pub fn process_stateless(
     let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
     let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
+    let mut process_diagnostics: ProcessDiagnostics = HashMap::new();
 
+    let mut occurrences: HashMap<NodeId, Vec<(FileId, NodeOutput)>> = HashMap::new();
     for &file_id in state.files.keys() {
         let Warned { output, warnings } = state.compile_file(file_id);
 
@@ -46,24 +50,10 @@ pub fn process_stateless(
                 }
                 for (identifier, node_output) in file_nodes {
                     let node_id = interner.intern(identifier.as_str());
-
-                    for transclusion_id in node_output
-                        .transclusions
-                        .iter()
-                        .map(|t| interner.intern(t.as_str()))
-                    {
-                        transclusions.add_edge(node_id, transclusion_id, ());
-                    }
-                    for link_id in node_output
-                        .links
-                        .iter()
-                        .map(|l| interner.intern(l.as_str()))
-                    {
-                        links.add_edge(node_id, link_id, ());
-                    }
-
-                    node_to_file.insert(node_id, file_id);
-                    nodes.insert(node_id, node_output.entry);
+                    occurrences
+                        .entry(node_id)
+                        .or_default()
+                        .push((file_id, node_output));
                 }
             }
             Err(errors) => {
@@ -72,7 +62,37 @@ pub fn process_stateless(
         }
     }
 
-    let mut process_diagnostics: ProcessDiagnostics = HashMap::new();
+    for (node_id, mut sources) in occurrences {
+        assert!(!sources.is_empty());
+
+        if sources.len() == 1 {
+            let (file_id, node_output) = sources.pop().expect("len checked");
+            for transclusion_id in node_output
+                .transclusions
+                .iter()
+                .map(|t| interner.intern(t.as_str()))
+            {
+                transclusions.add_edge(node_id, transclusion_id, ());
+            }
+            for link_id in node_output
+                .links
+                .iter()
+                .map(|l| interner.intern(l.as_str()))
+            {
+                links.add_edge(node_id, link_id, ());
+            }
+            node_to_file.insert(node_id, file_id);
+            nodes.insert(node_id, node_output.entry);
+        } else {
+            let name = interner.name(node_id);
+            for (file_id, _) in sources {
+                process_diagnostics
+                    .entry(file_id)
+                    .or_default()
+                    .push(duplicate_node_identifier_diagnostic(name));
+            }
+        }
+    }
 
     for (source, destination, _) in transclusions
         .all_edges()
