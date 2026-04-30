@@ -194,12 +194,8 @@ pub fn process_stateless(
         rendered_bodies.insert(id, rendered_body);
 
         let backmatter = collect_backmatter(id, &links, &transclusions);
-        let rendered_backmatter = renderer.render_backmatter(build_backmatter_input(
-            id,
-            &nodes,
-            &backmatter,
-            &interner,
-        ))?;
+        let rendered_backmatter = renderer
+            .render_backmatter(build_backmatter_input(&nodes, &backmatter, &interner))?;
         rendered_backmatters.insert(id, rendered_backmatter);
 
         let rendered_node = renderer.render_node(build_node_input(

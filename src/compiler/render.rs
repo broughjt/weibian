@@ -59,7 +59,6 @@ pub struct ResolvedTransclusion<'a, Body> {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BackmatterInput<'a> {
-    pub node: (String, BackmatterNode<'a>),
     pub contexts: Vec<(String, Option<BackmatterNode<'a>>)>,
     pub backlinks: Vec<(String, Option<BackmatterNode<'a>>)>,
     pub outlinks: Vec<(String, Option<BackmatterNode<'a>>)>,
@@ -269,14 +268,6 @@ impl Render for JinjaRenderer<'_> {
         let backlinks: Vec<_> = input.backlinks.iter().map(node_context).collect();
         let outlinks: Vec<_> = input.outlinks.iter().map(node_context).collect();
 
-        let self_context = minijinja::context! {
-            id => input.node.0.as_str(),
-            href => minijinja::Value::from_safe_string(self.config.href(&input.node.0)),
-            title => input.node.1.title,
-            title_text => input.node.1.title_text,
-            metadata => input.node.1.metadata,
-        };
-
         self.backmatter_template
             .render(minijinja::context! {
                 backmatter => minijinja::context! {
@@ -284,15 +275,9 @@ impl Render for JinjaRenderer<'_> {
                     backlinks => backlinks,
                     outlinks => outlinks,
                 },
-                node => self_context,
                 site => &self.site_context,
             })
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to render backmatter template for {}: {e}",
-                    input.node.0
-                )
-            })
+            .map_err(|e| anyhow::anyhow!("failed to render backmatter template: {e}"))
     }
 
     fn render_node(&self, input: NodeInput<'_, String, String>) -> anyhow::Result<String> {

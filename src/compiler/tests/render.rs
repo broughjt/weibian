@@ -101,13 +101,11 @@ impl Render for MockRenderer {
         }
 
         let BackmatterInput {
-            node,
             contexts,
             backlinks,
             outlinks,
         } = input;
         Ok(RenderBackmatter {
-            node: (node.0, to_render_backmatter_node(node.1)),
             contexts: contexts
                 .into_iter()
                 .map(|(id, opt)| (id, opt.map(to_render_backmatter_node)))
@@ -191,7 +189,6 @@ pub struct RenderBackmatterNode {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RenderBackmatter {
-    pub node: (String, RenderBackmatterNode),
     pub contexts: Vec<(String, Option<RenderBackmatterNode>)>,
     pub backlinks: Vec<(String, Option<RenderBackmatterNode>)>,
     pub outlinks: Vec<(String, Option<RenderBackmatterNode>)>,

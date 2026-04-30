@@ -419,7 +419,7 @@ impl<T, U> Compiler<T, U> {
                     .backmatters
                     .get(&id)
                     .expect("bug: renderable node has no backmatter after pass 1");
-                let input = build_backmatter_input(id, &self.nodes, backmatter, &self.interner);
+                let input = build_backmatter_input(&self.nodes, backmatter, &self.interner);
                 let rendered_backmatter = renderer.render_backmatter(input)?;
 
                 self.rendered_backmatters.insert(id, rendered_backmatter);
@@ -765,21 +765,10 @@ fn build_body_input<'a, B>(
 }
 
 fn build_backmatter_input<'a>(
-    id: NodeId,
     nodes: &'a HashMap<NodeId, NodeEntry>,
     backmatter: &'a Backmatter,
     interner: &'a NodeInterner,
 ) -> BackmatterInput<'a> {
-    let entry = &nodes[&id];
-    let node = (
-        interner.name(id).to_owned(),
-        BackmatterNode {
-            title: entry.title.as_str(),
-            title_text: entry.title_text.as_str(),
-            metadata: &entry.node_metadata,
-        },
-    );
-
     let backmatter_set = |ids: &HashSet<NodeId>| -> Vec<(String, Option<BackmatterNode<'a>>)> {
         let mut items: Vec<(String, Option<BackmatterNode<'a>>)> = ids
             .iter()
@@ -799,7 +788,6 @@ fn build_backmatter_input<'a>(
     };
 
     BackmatterInput {
-        node,
         contexts: backmatter_set(&backmatter.contexts),
         backlinks: backmatter_set(&backmatter.backlinks),
         outlinks: backmatter_set(&backmatter.outlinks),
