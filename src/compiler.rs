@@ -613,7 +613,8 @@ fn dangling_link_diagnostic(name: &str) -> SourceDiagnostic {
 fn cycle_diagnostics<'a>(
     pairs: impl Iterator<Item = (FileId, &'a str)>,
 ) -> Vec<(FileId, SourceDiagnostic)> {
-    let (files, names): (HashSet<FileId>, Vec<&str>) = pairs.unzip();
+    let (files, mut names): (HashSet<FileId>, Vec<&str>) = pairs.unzip();
+    names.sort();
     let message = eco_format!("transclusion cycle: {}", names.join(", "));
 
     files
