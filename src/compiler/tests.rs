@@ -345,3 +345,63 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
     apply_plan(plan, &mut incremental.filesystem);
     assert_matches_stateless(&incremental, &reference);
 }
+
+#[test]
+fn duplicate_identifier_third_file_gets_diagnostic() {
+    let mut reference = State::default();
+    let mut incremental = IncrementalCompiler::default();
+
+    // Each file contributes a single node with the same identifier
+    // (MockNodeIdentifier(0)).
+    let mock_file = |node_id: MockNodeId| MockFile {
+        nodes: [(
+            node_id,
+            MockNode {
+                identifier: MockNodeIdentifier(0),
+                title: Default::default(),
+                body: Default::default(),
+                span: Span::detached(),
+                metadata: Default::default(),
+                transclusions: Default::default(),
+                links: Default::default(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    let file1 = file_id(NonZeroU16::new(1).unwrap());
+    reference.insert_file(file1, mock_file(MockNodeId(0)));
+    incremental
+        .compiler
+        ._update(file1, reference.compile_file(file1));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    let file2 = file_id(NonZeroU16::new(2).unwrap());
+    reference.insert_file(file2, mock_file(MockNodeId(1)));
+    incremental
+        .compiler
+        ._update(file2, reference.compile_file(file2));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+
+    // file_3 also claims the identifier. The identifier was already
+    // duplicated and stays duplicated — its canonical state did not
+    // change. If `_process` early-returns because nothing landed in
+    // dirty/removed, the cached process_diagnostics from the previous
+    // call will only mention file_1 and file_2; file_3's duplicate
+    // diagnostic will be missing.
+    let file3 = file_id(NonZeroU16::new(3).unwrap());
+    reference.insert_file(file3, mock_file(MockNodeId(2)));
+    incremental
+        .compiler
+        ._update(file3, reference.compile_file(file3));
+    let plan = incremental.compiler._process(&MockRenderer).unwrap();
+    apply_plan(plan, &mut incremental.filesystem);
+    assert_matches_stateless(&incremental, &reference);
+}
