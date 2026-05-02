@@ -11,3 +11,7 @@ This is mostly well-written Rust. The author is clearly thinking in Rust-y terms
 The main weakness is not “bad Rust”, it is “too much logic concentrated in one fragile place”. [src/compiler.rs:161](/home/jackson/repositories/weibian/src/compiler.rs#L161) is a dense state machine with several interacting graphs and dirty sets. The comments show the author understands the invariants, which is good, but that function now wants stronger decomposition and real tests.
 
 So my verdict is: above-average Rust, good architectural instincts, not yet polished or hardened enough to call exemplary. I would trust the design more than the current verification level. If you want, I can turn this into a prioritized cleanup plan.
+
+# From Me
+
+- All the diagnostics should have attached spans

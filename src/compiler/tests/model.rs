@@ -83,6 +83,7 @@ impl From<MockNode> for NodeOutput {
         };
 
         NodeOutput {
+            identifier: node.identifier.0.to_string(),
             entry,
             transclusions,
             links,

@@ -48,7 +48,7 @@ impl<T, U> Compiler<T, U> {
     /// Compiles a single source file and splits it into nodes, updating the
     /// node store and diagnostics.
     ///
-    /// Typst compile errors and node-splitting errors (e.g. duplicate node IDs)
+    /// Typst compile errors and node-splitting errors
     /// are stored as diagnostics rather than returned as errors.
     pub fn update<W: World>(&mut self, world: &W, id: FileId) {
         self._update(id, extract::compile(world));
@@ -57,7 +57,7 @@ impl<T, U> Compiler<T, U> {
     fn _update(
         &mut self,
         id: FileId,
-        compiled: Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>>,
+        compiled: Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>>,
     ) {
         let Warned {
             output: result,
@@ -71,31 +71,31 @@ impl<T, U> Compiler<T, U> {
                 // partial acceptance: let valid nodes through and only reject
                 // nodes that actually have duplicate identifiers.
 
-                // TODO:
-                let nodes: HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)> = extracted_nodes
-                    .into_iter()
-                    .map(
-                        |(
-                            name,
-                            NodeOutput {
-                                entry,
-                                transclusions,
-                                links,
-                            },
-                        )| {
-                            let node_id = self.interner.intern(name);
-                            let transclusions = transclusions
-                                .iter()
-                                .map(|t| self.interner.intern(t.as_str()))
-                                .collect();
-                            let links = links
-                                .iter()
-                                .map(|l| self.interner.intern(l.as_str()))
-                                .collect();
-                            (node_id, (entry, transclusions, links))
-                        },
-                    )
-                    .collect();
+                // Temporary compatibility shim: extraction now preserves
+                // duplicate node occurrences, while the compiler store is
+                // still keyed by identifier. Until process-time duplicate
+                // handling is implemented, keep the previous deterministic
+                // last-occurrence-wins behavior at this boundary.
+                let mut nodes: HashMap<NodeId, (NodeEntry, Vec<NodeId>, Vec<NodeId>)> =
+                    HashMap::with_capacity(extracted_nodes.len());
+                for NodeOutput {
+                    identifier,
+                    entry,
+                    transclusions,
+                    links,
+                } in extracted_nodes
+                {
+                    let node_id = self.interner.intern(identifier);
+                    let transclusions = transclusions
+                        .iter()
+                        .map(|t| self.interner.intern(t.as_str()))
+                        .collect();
+                    let links = links
+                        .iter()
+                        .map(|l| self.interner.intern(l.as_str()))
+                        .collect();
+                    nodes.insert(node_id, (entry, transclusions, links));
+                }
 
                 let mut metadata_dirty_from_update = HashSet::new();
                 // Compare new title/metadata against old entries before
@@ -589,6 +589,7 @@ fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
 
 // TODO: Future improvement: We have spans, we should not use detached for these diagnostics
 
+#[cfg(test)]
 fn duplicate_node_identifier_diagnostic(name: &str) -> SourceDiagnostic {
     SourceDiagnostic::error(
         Span::detached(),

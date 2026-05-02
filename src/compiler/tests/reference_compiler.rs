@@ -335,7 +335,7 @@ impl State {
     pub fn compile_file(
         &self,
         file_id: FileId,
-    ) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
+    ) -> Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>> {
         let file = &self.files[&file_id];
 
         let warnings: EcoVec<SourceDiagnostic> = file
@@ -352,16 +352,11 @@ impl State {
         let output = if !errors.is_empty() {
             Err(errors)
         } else {
-            let nodes: HashMap<String, NodeOutput> = file
-                .nodes
-                .iter()
-                .map(|node_id| {
-                    let mock = &self.nodes[node_id];
-                    (
-                        mock.identifier.0.to_string(),
-                        NodeOutput::from(mock.clone()),
-                    )
-                })
+            let mut node_ids: Vec<MockNodeId> = file.nodes.iter().copied().collect();
+            node_ids.sort_by_key(|id| id.0);
+            let nodes: Vec<NodeOutput> = node_ids
+                .into_iter()
+                .map(|node_id| NodeOutput::from(self.nodes[&node_id].clone()))
                 .collect();
             Ok(nodes)
         };

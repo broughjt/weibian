@@ -48,8 +48,8 @@ pub fn process_stateless(
                 if !warnings.is_empty() {
                     compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
                 }
-                for (identifier, node_output) in file_nodes {
-                    let node_id = interner.intern(identifier.as_str());
+                for node_output in file_nodes {
+                    let node_id = interner.intern(node_output.identifier.as_str());
                     occurrences
                         .entry(node_id)
                         .or_default()
@@ -194,8 +194,8 @@ pub fn process_stateless(
         rendered_bodies.insert(id, rendered_body);
 
         let backmatter = collect_backmatter(id, &links, &transclusions);
-        let rendered_backmatter = renderer
-            .render_backmatter(build_backmatter_input(&nodes, &backmatter, &interner))?;
+        let rendered_backmatter =
+            renderer.render_backmatter(build_backmatter_input(&nodes, &backmatter, &interner))?;
         rendered_backmatters.insert(id, rendered_backmatter);
 
         let rendered_node = renderer.render_node(build_node_input(

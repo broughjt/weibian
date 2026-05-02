@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use dom_query::{Document, Selection};
 use ecow::{EcoVec, eco_format};
@@ -17,28 +17,26 @@ const NO_WB_NODE: &str = "source file produced no wb-node";
 const MULTIPLE_WB_NODES: &str = "source file produced multiple wb-node elements";
 const WB_NODE_MISSING_IDENTIFIER: &str = "wb-node is missing an identifier";
 const WB_SUBNODE_MISSING_IDENTIFIER: &str = "wb-subnode is missing an identifier";
+const WB_NODE_MISSING_COUNTER: &str = "wb-node is missing a counter attribute";
+const WB_SUBNODE_MISSING_COUNTER: &str = "wb-subnode is missing a counter attribute";
 const WB_NODE_MISSING_TITLE: &str = "wb-node's first child must be a wb-title element";
 const WB_SUBNODE_MISSING_TITLE: &str = "wb-subnode's first child must be a wb-title element";
 const WB_SUBNODE_MISSING_TRANSCLUDE: &str = "wb-subnode is missing the transclude attribute";
 const WB_TRANSCLUDE_MISSING_IDENTIFIER: &str = "wb-transclude is missing an identifier";
 const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter attribute";
 const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
-const BUG_NO_SPAN_FOR_IDENTIFIER: &str = "bug: no span found for node identifier";
-const BUG_UNCONSUMED_NODE_METADATA: &str = "bug: unconsumed node metadata";
-const BUG_DUPLICATE_IDENTIFIER: &str =
-    "bug: duplicate node identifier slipped past collect_node_spans";
+const BUG_NO_SPAN_FOR_COUNTER: &str = "bug: no span found for node counter";
 
 #[derive(Clone, Debug)]
 pub struct NodeOutput {
+    pub identifier: String,
     pub entry: NodeEntry,
     pub transclusions: Vec<String>,
     pub links: Vec<String>,
 }
 
 /// Compiles a source file and extracts its nodes.
-pub fn compile<W: World>(
-    world: &W,
-) -> Warned<Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>>> {
+pub fn compile<W: World>(world: &W) -> Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>> {
     let Warned {
         output: result,
         mut warnings,
@@ -82,22 +80,22 @@ pub fn compile<W: World>(
 #[derive(Clone, Debug)]
 struct FileOutput {
     pub html: String,
-    pub spans: HashMap<String, Span>,
+    pub spans: HashMap<u32, Span>,
     pub metadata: MetadataMaps,
 }
 
 #[derive(Clone, Debug)]
 struct MetadataMaps {
-    node: HashMap<String, Metadata>,
+    node: HashMap<u32, Metadata>,
     transclusion: HashMap<u32, Metadata>,
     link: HashMap<u32, Metadata>,
 }
 
-/// Parses the HTML in `output` into a map of node IDs to node entries.
+/// Parses the HTML in `output` into extracted node occurrences.
 ///
 /// Returns `Err` with all collected diagnostics if any validation errors occur,
-/// or `Ok` with the node map on success.
-fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<SourceDiagnostic>> {
+/// or `Ok` with the node vector on success.
+fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>> {
     let FileOutput {
         html,
         spans,
@@ -105,7 +103,8 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
     } = output;
     let mut errors = EcoVec::new();
     let document = Document::from(html);
-    let mut nodes = HashMap::with_capacity(spans.len());
+    let mut nodes = Vec::with_capacity(spans.len());
+    let mut seen_node_counters = HashSet::with_capacity(spans.len());
     let mut synthetic_counter: u32 = document
         .select("wb-transclude")
         .iter()
@@ -119,11 +118,17 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((identifier, output)) =
-            extract_node_content(&subnode, true, &spans, &mut metadata, &mut errors)
-        else {
+        let Some((node_counter, output)) = extract_node_content(
+            &subnode,
+            true,
+            &spans,
+            &mut metadata,
+            &mut seen_node_counters,
+            &mut errors,
+        ) else {
             continue;
         };
+        let identifier = output.identifier.clone();
         let transclude = match subnode.attr("transclude").as_deref() {
             Some("true") => true,
             Some("false") => false,
@@ -158,8 +163,7 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
             subnode.remove();
         }
 
-        let displaced = nodes.insert(identifier, output);
-        assert!(displaced.is_none(), "{BUG_DUPLICATE_IDENTIFIER}");
+        nodes.push((node_counter, output));
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -170,24 +174,26 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
             errors.push(SourceDiagnostic::error(Span::detached(), NO_WB_NODE));
         }
         Some(wb_node) => {
-            if let Some((identifier, output)) =
-                extract_node_content(&wb_node, false, &spans, &mut metadata, &mut errors)
-            {
-                let displaced = nodes.insert(identifier, output);
-                assert!(
-                    displaced.is_none(),
-                    "bug: duplicate node identifier slipped past collect_node_spans"
-                );
+            if let Some((node_counter, output)) = extract_node_content(
+                &wb_node,
+                false,
+                &spans,
+                &mut metadata,
+                &mut seen_node_counters,
+                &mut errors,
+            ) {
+                nodes.push((node_counter, output));
             }
 
             errors.extend(node_iter.map(|extra| {
                 let span = extra
-                    .attr("identifier")
-                    .map(|id| {
+                    .attr("counter")
+                    .and_then(|counter| counter.parse::<u32>().ok())
+                    .map(|counter| {
                         spans
-                            .get(id.as_ref())
+                            .get(&counter)
                             .copied()
-                            .expect("bug: no span found for wb-node identifier")
+                            .expect("bug: no span found for wb-node counter")
                     })
                     .unwrap_or(Span::detached());
 
@@ -196,16 +202,32 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
         }
     }
 
-    assert!(metadata.node.is_empty(), "{BUG_UNCONSUMED_NODE_METADATA}");
-    for counter in metadata.transclusion.keys().copied() {
-        errors.push(orphaned_transclusion_metadata_diagnostic(counter));
-    }
-    for counter in metadata.link.keys().copied() {
-        errors.push(orphaned_link_metadata_diagnostic(counter));
-    }
+    errors.extend(
+        metadata
+            .node
+            .keys()
+            .copied()
+            .map(orphaned_node_metadata_diagnostic),
+    );
+    errors.extend(
+        metadata
+            .transclusion
+            .keys()
+            .copied()
+            .map(orphaned_transclusion_metadata_diagnostic),
+    );
+    errors.extend(
+        metadata
+            .link
+            .keys()
+            .copied()
+            .map(orphaned_link_metadata_diagnostic),
+    );
 
     if errors.is_empty() {
-        Ok(nodes)
+        nodes.sort_by_key(|(counter, _)| *counter);
+
+        Ok(nodes.into_iter().map(|(_, output)| output).collect())
     } else {
         Err(errors)
     }
@@ -220,24 +242,47 @@ fn extract(output: FileOutput) -> Result<HashMap<String, NodeOutput>, EcoVec<Sou
 fn extract_node_content(
     element: &Selection,
     is_subnode: bool,
-    spans: &HashMap<String, Span>,
+    spans: &HashMap<u32, Span>,
     metadata: &mut MetadataMaps,
+    seen_node_counters: &mut HashSet<u32>,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> Option<(String, NodeOutput)> {
+) -> Option<(u32, NodeOutput)> {
     let (transclusions, transclusion_metadata) = collect_transclusions(element, metadata, errors);
     let (links, link_metadata) = collect_links(element, metadata, errors);
+
+    let counter = match element.attr("counter").as_deref() {
+        Some(n) => match n.parse::<u32>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                errors.push(invalid_node_counter_diagnostic(
+                    Span::detached(),
+                    is_subnode,
+                    n,
+                ));
+                None
+            }
+        },
+        None => {
+            errors.push(missing_node_counter_diagnostic(
+                Span::detached(),
+                is_subnode,
+            ));
+            None
+        }
+    }?;
+    if !seen_node_counters.insert(counter) {
+        errors.push(duplicate_node_counter_diagnostic(counter));
+        return None;
+    }
+    let span = spans.get(&counter).copied().expect(BUG_NO_SPAN_FOR_COUNTER);
+
+    let node_metadata = metadata.node.remove(&counter).unwrap_or_default();
 
     let Some(identifier) = element.attr("identifier") else {
         errors.push(missing_identifier_diagnostic(is_subnode));
         return None;
     };
     let identifier = identifier.to_string();
-    let span = spans
-        .get(&identifier)
-        .copied()
-        .expect(BUG_NO_SPAN_FOR_IDENTIFIER);
-
-    let node_metadata = metadata.node.remove(&identifier).unwrap_or_default();
 
     let title_selection = element.children().first();
     if !title_selection
@@ -255,8 +300,9 @@ fn extract_node_content(
     let body_html = element.inner_html().to_string();
 
     Some((
-        identifier,
+        counter,
         NodeOutput {
+            identifier,
             entry: NodeEntry {
                 body_html,
                 title,
@@ -363,20 +409,20 @@ fn collect_links(
 ///
 /// Metadata elements are identified by a `wb-metadata` key whose value is a
 /// two-element array `[kind, discriminant]`:
-/// - `["node", identifier]`      — node/subnode metadata, keyed by identifier string
+/// - `["node", counter]`         — node/subnode metadata, keyed by node counter integer
 /// - `["transclude", counter]`   — transclusion call-site metadata, keyed by counter integer
 /// - `["link", counter]`         — link call-site metadata, keyed by counter integer
 ///
 /// Errors are pushed for:
 /// - `wb-metadata` present but not a two-element array of the expected shape
-/// - node identifier not present in `spans` (unknown node)
+/// - node counter not present in `spans` (unknown node)
 /// - duplicate entries for the same node or counter
 #[allow(clippy::type_complexity)]
 fn collect_metadata<I: Introspector>(
     introspector: &I,
-    spans: &HashMap<String, Span>,
+    spans: &HashMap<u32, Span>,
 ) -> (
-    HashMap<String, Metadata>,
+    HashMap<u32, Metadata>,
     HashMap<u32, Metadata>,
     HashMap<u32, Metadata>,
     EcoVec<SourceDiagnostic>,
@@ -384,7 +430,7 @@ fn collect_metadata<I: Introspector>(
     let selector = MetadataElem::ELEM.select();
     let items = introspector.query(&selector);
     let mut errors = EcoVec::new();
-    let mut node_result: HashMap<String, Metadata> = HashMap::new();
+    let mut node_result: HashMap<u32, Metadata> = HashMap::new();
     let mut transclusion_result: HashMap<u32, Metadata> = HashMap::new();
     let mut link_result: HashMap<u32, Metadata> = HashMap::new();
 
@@ -412,31 +458,42 @@ fn collect_metadata<I: Introspector>(
         match (iter.next(), iter.next()) {
             (Some(Value::Str(kind)), Some(discriminant)) => match kind.as_str() {
                 "node" => {
-                    let Value::Str(identifier) = discriminant else {
+                    let Value::Int(counter_i64) = discriminant else {
                         errors.push(SourceDiagnostic::error(
                             item.span(),
-                            "\"wb-metadata\" node identifier must be a string",
+                            "\"wb-metadata\" node counter must be an integer",
                         ));
                         continue;
                     };
-                    let identifier = identifier.to_string();
+                    let counter = match u32::try_from(*counter_i64) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            errors.push(SourceDiagnostic::error(
+                                item.span(),
+                                eco_format!(
+                                    "\"wb-metadata\" node counter out of range: {counter_i64}"
+                                ),
+                            ));
+                            continue;
+                        }
+                    };
 
-                    if !spans.contains_key(&identifier) {
+                    if !spans.contains_key(&counter) {
                         errors.push(SourceDiagnostic::error(
                             item.span(),
-                            eco_format!("metadata for unknown node: {identifier:?}"),
+                            eco_format!("metadata for unknown node counter: {counter}"),
                         ));
                         continue;
                     }
 
-                    match node_result.entry(identifier) {
+                    match node_result.entry(counter) {
                         Entry::Vacant(entry) => {
                             entry.insert(normalize_metadata(dictionary));
                         }
                         Entry::Occupied(e) => {
                             errors.push(SourceDiagnostic::error(
                                 item.span(),
-                                eco_format!("duplicate metadata for node: {:?}", e.key()),
+                                eco_format!("duplicate metadata for node counter: {}", e.key()),
                             ));
                         }
                     }
@@ -559,40 +616,55 @@ fn normalize_metadata(dictionary: &Dict) -> HashMap<String, Vec<String>> {
 }
 
 /// Walks `document`'s element tree once (iterative DFS), returning a map from
-/// each node identifier to the span of its `wb-node` or `wb-subnode` element,
-/// plus errors for any duplicate identifiers found within the document.
-fn collect_node_spans(
-    document: &HtmlDocument,
-) -> (HashMap<String, Span>, EcoVec<SourceDiagnostic>) {
+/// each node counter to the span of its `wb-node` or `wb-subnode` element.
+fn collect_node_spans(document: &HtmlDocument) -> (HashMap<u32, Span>, EcoVec<SourceDiagnostic>) {
     let wb_node = HtmlTag::intern("wb-node").expect("wb-node is a valid tag");
     let wb_subnode = HtmlTag::intern("wb-subnode").expect("wb-subnode is a valid tag");
-    let identifier = HtmlAttr::intern("identifier").expect("identifier is a valid attr");
+    let counter_attr = HtmlAttr::intern("counter").expect("counter is a valid attr");
 
     let mut spans = HashMap::new();
     let mut errors = EcoVec::new();
     let mut stack = vec![document.root()];
 
     while let Some(element) = stack.pop() {
-        if (element.tag == wb_node || element.tag == wb_subnode)
-            && let Some(id) = element.attrs.get(identifier)
-        {
-            match spans.entry(id.to_string()) {
-                Entry::Occupied(_) => {
-                    errors.push(SourceDiagnostic::error(
+        if element.tag == wb_node || element.tag == wb_subnode {
+            let Some(counter_string) = element.attrs.get(counter_attr) else {
+                errors.push(missing_node_counter_diagnostic(
+                    element.span,
+                    element.tag == wb_subnode,
+                ));
+                continue;
+            };
+            let counter = match counter_string.parse::<u32>() {
+                Ok(counter) => counter,
+                Err(_) => {
+                    errors.push(invalid_node_counter_diagnostic(
                         element.span,
-                        eco_format!("duplicate node identifier: {id:?}"),
+                        element.tag == wb_subnode,
+                        counter_string.as_str(),
                     ));
+                    continue;
                 }
+            };
+
+            match spans.entry(counter) {
+                Entry::Occupied(_) => errors.push(duplicate_node_counter_diagnostic(counter)),
                 Entry::Vacant(entry) => {
                     entry.insert(element.span);
                 }
             }
         }
-        for child in element.children.iter().rev() {
-            if let HtmlNode::Element(child_elem) = child {
-                stack.push(child_elem);
-            }
-        }
+
+        stack.extend(
+            element
+                .children
+                .iter()
+                .rev()
+                .filter_map(|child| match child {
+                    HtmlNode::Element(element) => Some(element),
+                    _ => None,
+                }),
+        );
     }
 
     (spans, errors)
@@ -620,6 +692,35 @@ fn missing_title_diagnostic(is_subnode: bool) -> SourceDiagnostic {
     )
 }
 
+fn missing_node_counter_diagnostic(span: Span, is_subnode: bool) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        span,
+        if is_subnode {
+            WB_SUBNODE_MISSING_COUNTER
+        } else {
+            WB_NODE_MISSING_COUNTER
+        },
+    )
+}
+
+fn invalid_node_counter_diagnostic(span: Span, is_subnode: bool, value: &str) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        span,
+        if is_subnode {
+            eco_format!("wb-subnode has invalid counter: {value:?}")
+        } else {
+            eco_format!("wb-node has invalid counter: {value:?}")
+        },
+    )
+}
+
+fn duplicate_node_counter_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("duplicate node counter: {counter}"),
+    )
+}
+
 fn invalid_transclude_value_diagnostic(value: &str) -> SourceDiagnostic {
     SourceDiagnostic::error(
         Span::detached(),
@@ -638,6 +739,13 @@ fn invalid_link_counter_diagnostic(value: &str) -> SourceDiagnostic {
     SourceDiagnostic::error(
         Span::detached(),
         eco_format!("link has invalid data-counter: {value:?}"),
+    )
+}
+
+fn orphaned_node_metadata_diagnostic(counter: u32) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("node metadata for counter {counter} has no corresponding node element"),
     )
 }
 
@@ -748,6 +856,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct MockNode {
+        counter: u32,
         identifier: String,
         title: String,
         metadata: Option<Metadata>,
@@ -783,6 +892,8 @@ mod tests {
 
     #[derive(Debug)]
     struct ExpectedOutput {
+        counter: u32,
+        identifier: String,
         title: String,
         node_metadata: Metadata,
         transclusions: Vec<String>,
@@ -816,13 +927,13 @@ mod tests {
             }
         }
 
-        fn render(&self) -> (FileOutput, HashMap<String, ExpectedOutput>) {
+        fn render(&self) -> (FileOutput, HashMap<u32, ExpectedOutput>) {
             let mut html = String::new();
             let mut spans = HashMap::new();
             let mut file_node_metadata = HashMap::new();
             let mut file_transclusion_metadata = HashMap::new();
             let mut file_link_metadata = HashMap::new();
-            let mut synthetic_transclusions: Vec<(String, Option<Metadata>)> = Vec::new();
+            let mut synthetic_transclusions: Vec<(u32, Option<Metadata>)> = Vec::new();
             let mut transclusion_counter = 0u32;
             let mut link_counter = 0u32;
             let mut expected = HashMap::new();
@@ -840,6 +951,7 @@ mod tests {
                 /// Close the current node: write the closing tag, register
                 /// span/metadata, finalize the expected output.
                 Close {
+                    counter: u32,
                     identifier: &'a str,
                     tag: &'static str,
                     title: &'a str,
@@ -848,7 +960,7 @@ mod tests {
             }
 
             struct EdgeInfo {
-                owner_identifier: String,
+                owner_counter: u32,
                 transclusions: Vec<String>,
                 links: Vec<String>,
                 transclusion_metadata: HashMap<u32, Metadata>,
@@ -869,7 +981,12 @@ mod tests {
                         tag,
                         option_transclude,
                     } => {
-                        write!(html, r#"<{tag} identifier="{}""#, node.identifier).unwrap();
+                        write!(
+                            html,
+                            r#"<{tag} identifier="{}" counter="{}""#,
+                            node.identifier, node.counter
+                        )
+                        .unwrap();
                         if let Some(transclude) = option_transclude {
                             let value = if transclude { "true" } else { "false" };
                             write!(html, r#" transclude="{value}""#).unwrap();
@@ -878,6 +995,7 @@ mod tests {
                         write!(html, "<wb-title>{}</wb-title>", node.title).unwrap();
 
                         stack.push(Work::Close {
+                            counter: node.counter,
                             identifier: &node.identifier,
                             tag,
                             title: &node.title,
@@ -886,7 +1004,7 @@ mod tests {
                         stack.extend(node.body.iter().rev().map(Work::Element));
 
                         edge_stack.push(EdgeInfo {
-                            owner_identifier: node.identifier.clone(),
+                            owner_counter: node.counter,
                             transclusions: Vec::new(),
                             links: Vec::new(),
                             transclusion_metadata: HashMap::new(),
@@ -960,10 +1078,8 @@ mod tests {
                             MockElement::Subnode(subnode) => {
                                 if subnode.transclude {
                                     edges.transclusions.push(subnode.node.identifier.clone());
-                                    synthetic_transclusions.push((
-                                        edges.owner_identifier.clone(),
-                                        subnode.node.metadata.clone(),
-                                    ));
+                                    synthetic_transclusions
+                                        .push((edges.owner_counter, subnode.node.metadata.clone()));
                                 }
                                 // Push the subnode as a new `Open` work item. It
                                 // will be fully processed before we we continue
@@ -977,6 +1093,7 @@ mod tests {
                         }
                     }
                     Work::Close {
+                        counter,
                         identifier,
                         tag,
                         title,
@@ -985,26 +1102,26 @@ mod tests {
                         write!(html, "</{tag}>").unwrap();
 
                         assert!(
-                            spans
-                                .insert(identifier.to_owned(), Span::detached())
-                                .is_none(),
-                            "duplicate span: {identifier}",
+                            spans.insert(counter, Span::detached()).is_none(),
+                            "duplicate span: {counter}",
                         );
                         if let Some(metadata) = node_metadata
                             && !metadata.is_empty()
                         {
                             assert!(
                                 file_node_metadata
-                                    .insert(identifier.to_owned(), metadata.clone())
+                                    .insert(counter, metadata.clone())
                                     .is_none(),
-                                "duplicate node metadata: {identifier}",
+                                "duplicate node metadata: {counter}",
                             );
                         }
 
                         let edges = edge_stack.pop().unwrap();
                         expected.insert(
-                            identifier.to_owned(),
+                            counter,
                             ExpectedOutput {
+                                counter,
+                                identifier: identifier.to_owned(),
                                 title: title.to_owned(),
                                 node_metadata: node_metadata.clone().unwrap_or_default(),
                                 transclusions: edges.transclusions,
@@ -1018,7 +1135,7 @@ mod tests {
             }
 
             let mut synthetic_counter = transclusion_counter;
-            for (owner_identifier, metadata) in synthetic_transclusions.into_iter().rev() {
+            for (owner_counter, metadata) in synthetic_transclusions.into_iter().rev() {
                 let counter = synthetic_counter;
                 synthetic_counter = synthetic_counter
                     .checked_add(1)
@@ -1029,7 +1146,7 @@ mod tests {
                 {
                     assert!(
                         expected
-                            .get_mut(&owner_identifier)
+                            .get_mut(&owner_counter)
                             .expect("bug: missing expected owner for synthetic transclusion")
                             .transclusion_metadata
                             .insert(counter, metadata)
@@ -1093,6 +1210,7 @@ mod tests {
             body,
         )
             .prop_map(|(title, metadata, body)| MockNode {
+                counter: 0,
                 identifier: String::new(),
                 title,
                 metadata,
@@ -1130,6 +1248,7 @@ mod tests {
             let mut file = MockFile { primary };
             let mut next_id = 0u32;
             file.walk_mut(|node, _| {
+                node.counter = next_id;
                 node.identifier = format!("n{next_id}");
                 next_id = next_id
                     .checked_add(1)
@@ -1158,14 +1277,11 @@ mod tests {
     fn multiple_wb_nodes() {
         let output = FileOutput {
             html: concat!(
-                r#"<wb-node identifier="n0"><wb-title>A</wb-title></wb-node>"#,
-                r#"<wb-node identifier="n1"><wb-title>B</wb-title></wb-node>"#,
+                r#"<wb-node identifier="n0" counter="0"><wb-title>A</wb-title></wb-node>"#,
+                r#"<wb-node identifier="n1" counter="1"><wb-title>B</wb-title></wb-node>"#,
             )
             .to_owned(),
-            spans: HashMap::from([
-                ("n0".to_owned(), Span::detached()),
-                ("n1".to_owned(), Span::detached()),
-            ]),
+            spans: HashMap::from([(0, Span::detached()), (1, Span::detached())]),
             metadata: MetadataMaps {
                 node: HashMap::new(),
                 transclusion: HashMap::new(),
@@ -1176,6 +1292,81 @@ mod tests {
         assert!(errors.iter().any(|e| e.message == MULTIPLE_WB_NODES));
     }
 
+    #[test]
+    fn missing_node_counter() {
+        let output = FileOutput {
+            html: r#"<wb-node identifier="n0"><wb-title>A</wb-title></wb-node>"#.to_owned(),
+            spans: HashMap::new(),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert!(errors.iter().any(|e| e.message == WB_NODE_MISSING_COUNTER));
+    }
+
+    #[test]
+    fn invalid_node_counter() {
+        let output = FileOutput {
+            html: r#"<wb-node identifier="n0" counter="nan"><wb-title>A</wb-title></wb-node>"#
+                .to_owned(),
+            spans: HashMap::new(),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == &invalid_node_counter_diagnostic(Span::detached(), false, "nan"))
+        );
+    }
+
+    #[test]
+    fn duplicate_node_counter() {
+        let output = FileOutput {
+            html: concat!(
+                r#"<wb-node identifier="n0" counter="0"><wb-title>A</wb-title>"#,
+                r#"<wb-subnode identifier="n1" counter="0" transclude="false"><wb-title>B</wb-title></wb-subnode>"#,
+                r#"</wb-node>"#,
+            )
+            .to_owned(),
+            spans: HashMap::from([(0, Span::detached())]),
+            metadata: MetadataMaps {
+                node: HashMap::new(),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == &duplicate_node_counter_diagnostic(0))
+        );
+    }
+
+    #[test]
+    fn orphaned_node_metadata_counter() {
+        let output = FileOutput {
+            html: r#"<wb-node identifier="n0" counter="0"><wb-title>A</wb-title></wb-node>"#
+                .to_owned(),
+            spans: HashMap::from([(0, Span::detached())]),
+            metadata: MetadataMaps {
+                node: HashMap::from([(1, HashMap::from([("k".to_owned(), vec!["v".to_owned()])]))]),
+                transclusion: HashMap::new(),
+                link: HashMap::new(),
+            },
+        };
+        let errors = extract(output).unwrap_err();
+        assert_eq!(errors.to_vec(), vec![orphaned_node_metadata_diagnostic(1)]);
+    }
+
     proptest! {
         #[test]
         fn happy_case(mut file in mock_file_strategy()) {
@@ -1183,13 +1374,25 @@ mod tests {
             let actual_nodes = extract(file_output).unwrap();
 
             prop_assert_eq!(actual_nodes.len(), expected_nodes.len());
+            let mut expected_nodes: Vec<&ExpectedOutput> = expected_nodes.values().collect();
+            expected_nodes.sort_by_key(|node| node.counter);
+            prop_assert_eq!(
+                actual_nodes
+                    .iter()
+                    .map(|node| node.identifier.as_str())
+                    .collect::<Vec<_>>(),
+                expected_nodes
+                    .iter()
+                    .map(|node| node.identifier.as_str())
+                    .collect::<Vec<_>>(),
+            );
 
-            let mut id_to_node: HashMap<String, MockNode> = HashMap::new();
-            file.walk_mut(|node, _is_subnode| { id_to_node.insert(node.identifier.clone(), node.clone()); });
+            let mut counter_to_node: HashMap<u32, MockNode> = HashMap::new();
+            file.walk_mut(|node, _is_subnode| { counter_to_node.insert(node.counter, node.clone()); });
 
-            for (id, expected) in &expected_nodes {
-                let actual = &actual_nodes[id.as_str()];
+            for (actual, expected) in actual_nodes.iter().zip(expected_nodes) {
 
+                prop_assert_eq!(&actual.identifier, &expected.identifier);
                 prop_assert_eq!(&actual.entry.title, &expected.title);
                 prop_assert_eq!(&actual.entry.title_text, &expected.title);
                 prop_assert_eq!(&actual.entry.node_metadata, &expected.node_metadata);
@@ -1206,7 +1409,7 @@ mod tests {
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
 
-                check_body_html(&id_to_node[id.as_str()], &actual.entry.body_html)?;
+                check_body_html(&counter_to_node[&expected.counter], &actual.entry.body_html)?;
             }
         }
 
@@ -1227,8 +1430,6 @@ mod tests {
             for (id, _) in &ids {
                 let selector = format!(r#"wb-node[identifier="{id}"], wb-subnode[identifier="{id}"]"#);
                 document.select(&selector).remove_attr("identifier");
-                output.spans.remove(id);
-                output.metadata.node.remove(id);
             }
             output.html = document.html().to_string();
 
@@ -1248,7 +1449,7 @@ mod tests {
         fn missing_span(
             (file, id) in mock_file_strategy().prop_flat_map(|file| {
                 let mut ids = Vec::new();
-                file.walk(|node, _| ids.push(node.identifier.clone()));
+                file.walk(|node, _| ids.push(node.counter));
                 proptest::sample::select(ids).prop_map(move |id| (file.clone(), id))
             })
         ) {
@@ -1264,7 +1465,7 @@ mod tests {
                 .or_else(|| error.downcast_ref::<String>().map(String::as_str))
                 .unwrap();
             prop_assert!(
-                message.contains(BUG_NO_SPAN_FOR_IDENTIFIER),
+                message.contains(BUG_NO_SPAN_FOR_COUNTER),
                 "unexpected panic message: {message:?}",
             );
         }
@@ -1274,28 +1475,22 @@ mod tests {
             file in mock_file_strategy()
         ) {
             let (mut output, _) = file.render();
-            let missing_id = output
+            let extra_counter = output
                 .spans
                 .keys()
-                .find_map(|id| (!output.metadata.node.contains_key(id)).then(|| format!("{id}-bogus")))
-                .unwrap_or_else(|| "bogus".to_owned());
+                .chain(output.metadata.node.keys())
+                .copied()
+                .max()
+                .map_or(0, |counter| counter + 1);
             output.metadata.node.insert(
-                missing_id,
+                extra_counter,
                 HashMap::from([("k".to_owned(), vec!["v".to_owned()])]),
             );
 
-            let result = std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| extract(output))
-            );
-            let error = result.expect_err("expected a panic");
-            let message = error.downcast_ref::<&str>()
-                .copied()
-                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
-                .unwrap();
-            prop_assert!(
-                message.contains(BUG_UNCONSUMED_NODE_METADATA),
-                "unexpected panic message: {message:?}",
-            );
+            let actual = extract(output).unwrap_err().to_vec();
+            let expected = vec![orphaned_node_metadata_diagnostic(extra_counter)];
+
+            prop_assert_eq!(actual, expected);
         }
 
         #[test]
@@ -1353,7 +1548,7 @@ mod tests {
         }
 
         #[test]
-        fn duplicate_node_identifier(
+        fn duplicate_node_identifier_is_preserved(
             (file, picked, k) in mock_file_strategy()
                 .prop_flat_map(|file| {
                     let mut ids = Vec::new();
@@ -1377,23 +1572,26 @@ mod tests {
                     r#"wb-node[identifier="{target_id}"], wb-subnode[identifier="{target_id}"]"#
                 );
                 document.select(&selector).set_attr("identifier", source_id);
-                output.spans.remove(target_id);
-                output.metadata.node.remove(target_id);
             }
             output.html = document.html().to_string();
 
-            let result = std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| extract(output))
-            );
-            let error = result.expect_err("expected a panic");
-            let message = error.downcast_ref::<&str>()
-                .copied()
-                .or_else(|| error.downcast_ref::<String>().map(String::as_str))
-                .unwrap();
-            prop_assert!(
-                message.contains(BUG_DUPLICATE_IDENTIFIER),
-                "unexpected panic message: {message:?}",
-            );
+            let actual = extract(output).unwrap();
+            let identifiers: Vec<&str> = actual.iter().map(|node| node.identifier.as_str()).collect();
+            for target_id in &picked[..k] {
+                prop_assert_eq!(
+                    identifiers.iter().filter(|&&id| id == target_id).count(),
+                    0,
+                    "target id should have been rewritten: {}",
+                    target_id,
+                );
+            }
+            for source_id in &picked[k..2 * k] {
+                prop_assert!(
+                    identifiers.iter().filter(|&&id| id == source_id).count() >= 2,
+                    "duplicate id was not preserved: {}",
+                    source_id,
+                );
+            }
         }
 
         #[test]
