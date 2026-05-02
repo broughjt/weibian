@@ -1,3 +1,4 @@
+mod config;
 mod model;
 mod process_stateless;
 mod reference_compiler;
@@ -13,6 +14,7 @@ use typst_syntax::Span;
 use crate::compiler::{
     CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics,
     tests::{
+        config::CONFIG,
         model::{MockNode, MockNodeIdentifier},
         process_stateless::process_stateless,
         reference_compiler::{MockFile, MockNodeId, ReferenceCompiler, State, Transition, file_id},
@@ -109,7 +111,7 @@ fn normalize_process_diagnostics(d: &ProcessDiagnostics) -> ProcessDiagnostics {
 
 prop_state_machine! {
     #[test]
-    fn incremental_matches_stateless(sequential 1..20 => IncrementalMatchesStateless);
+    fn incremental_matches_stateless(sequential CONFIG.transitions.clone() => IncrementalMatchesStateless);
 }
 
 fn assert_matches_stateless(incremental: &IncrementalCompiler, state: &State) {

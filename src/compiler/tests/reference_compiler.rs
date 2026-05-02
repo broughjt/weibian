@@ -831,23 +831,19 @@ struct Queries {
     next_missing_node_identifier: MockNodeIdentifier,
 }
 
-const CREATE_FILE_NODE_MAX: usize = 5;
-const CREATE_FILE_COMPILE_ERRORS_MAX: usize = 3;
-const CREATE_FILE_COMPILE_WARNINGS_MAX: usize = 3;
-const METADATA_ENTRIES_MAX: usize = 6;
-const METADATA_VALUES_MAX: usize = 4;
-const NODE_TRANSCLUSIONS_MAX: usize = 5;
-const NODE_LINKS_MAX: usize = 5;
-
 fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + use<> {
     let next_node_id_value = queries.next_node_id.0;
+    let config = &super::proptest_config::CONFIG;
 
     (
-        vec(mock_node_strategy(queries), 0..CREATE_FILE_NODE_MAX),
-        vec(compile_error_strategy(), 0..CREATE_FILE_COMPILE_ERRORS_MAX),
+        vec(mock_node_strategy(queries), 0..config.create_file_node_max),
+        vec(
+            compile_error_strategy(),
+            0..config.create_file_compile_errors_max,
+        ),
         vec(
             compile_warning_strategy(),
-            0..CREATE_FILE_COMPILE_WARNINGS_MAX,
+            0..config.create_file_compile_warnings_max,
         ),
     )
         .prop_map(move |(nodes, errors, warnings)| MockFile {
@@ -858,6 +854,7 @@ fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + us
 }
 
 fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + use<> {
+    let config = &super::proptest_config::CONFIG;
     (
         node_identifier_strategy(queries),
         title_strategy(),
@@ -866,9 +863,9 @@ fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + us
         metadata_strategy(),
         vec(
             mock_transclusion_strategy(queries),
-            0..NODE_TRANSCLUSIONS_MAX,
+            0..config.node_transclusions_max,
         ),
-        vec(mock_link_strategy(queries), 0..NODE_LINKS_MAX),
+        vec(mock_link_strategy(queries), 0..config.node_links_max),
     )
         .prop_map(
             |(identifier, title, body, span, metadata, transclusions, links)| MockNode {
@@ -954,10 +951,11 @@ fn span_strategy() -> impl Strategy<Value = Span> {
 }
 
 fn metadata_strategy() -> impl Strategy<Value = Metadata> {
+    let config = &super::proptest_config::CONFIG;
     hash_map(
         metadata_key_strategy(),
-        vec(metadata_key_strategy(), 0..=METADATA_VALUES_MAX),
-        0..=METADATA_ENTRIES_MAX,
+        vec(metadata_key_strategy(), 0..=config.metadata_values_max),
+        0..=config.metadata_entries_max,
     )
 }
 
@@ -1005,7 +1003,10 @@ fn metadata_operation_strategy(
         Just(MetadataOperation::Clear).boxed(),
         (
             metadata_key_strategy(),
-            vec(metadata_key_strategy(), 0..=METADATA_VALUES_MAX),
+            vec(
+                metadata_key_strategy(),
+                0..=super::proptest_config::CONFIG.metadata_values_max,
+            ),
         )
             .prop_map(|(key, values)| MetadataOperation::InsertKey { key, values })
             .boxed(),
