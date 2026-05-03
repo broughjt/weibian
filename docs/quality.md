@@ -15,3 +15,5 @@ So my verdict is: above-average Rust, good architectural instincts, not yet poli
 # From Me
 
 - All the diagnostics should have attached spans
+- We should keep dom_query::Documents in flight instead of strings which we reparse
+  - Currently we reparse out counters and ids from the string, this would improve the situation there a bit I think
