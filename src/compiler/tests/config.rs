@@ -5,6 +5,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_environment);
 
 pub struct Config {
     pub transitions: RangeInclusive<usize>,
+    pub batch: RangeInclusive<usize>,
     pub create_file_node_max: usize,
     pub create_file_compile_errors_max: usize,
     pub create_file_compile_warnings_max: usize,
@@ -18,6 +19,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             transitions: 1..=20,
+            batch: 1..=20,
             create_file_node_max: 5,
             create_file_compile_errors_max: 3,
             create_file_compile_warnings_max: 3,
@@ -37,6 +39,7 @@ impl Config {
                 "WEIBIAN_PROPTEST_TRANSITIONS",
                 default.transitions,
             ),
+            batch: environment_size_range("WEIBIAN_PROPTEST_BATCH", default.batch),
             create_file_node_max: environment_usize(
                 "WEIBIAN_PROPTEST_CREATE_FILE_NODE_MAX",
                 default.create_file_node_max,

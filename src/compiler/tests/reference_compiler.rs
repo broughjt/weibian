@@ -833,7 +833,7 @@ struct Queries {
 
 fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + use<> {
     let next_node_id_value = queries.next_node_id.0;
-    let config = &super::proptest_config::CONFIG;
+    let config = &super::config::CONFIG;
 
     (
         vec(mock_node_strategy(queries), 0..config.create_file_node_max),
@@ -854,7 +854,7 @@ fn mock_file_strategy(queries: &Queries) -> impl Strategy<Value = MockFile> + us
 }
 
 fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + use<> {
-    let config = &super::proptest_config::CONFIG;
+    let config = &super::config::CONFIG;
     (
         node_identifier_strategy(queries),
         title_strategy(),
@@ -951,7 +951,7 @@ fn span_strategy() -> impl Strategy<Value = Span> {
 }
 
 fn metadata_strategy() -> impl Strategy<Value = Metadata> {
-    let config = &super::proptest_config::CONFIG;
+    let config = &super::config::CONFIG;
     hash_map(
         metadata_key_strategy(),
         vec(metadata_key_strategy(), 0..=config.metadata_values_max),
@@ -1005,7 +1005,7 @@ fn metadata_operation_strategy(
             metadata_key_strategy(),
             vec(
                 metadata_key_strategy(),
-                0..=super::proptest_config::CONFIG.metadata_values_max,
+                0..=super::config::CONFIG.metadata_values_max,
             ),
         )
             .prop_map(|(key, values)| MetadataOperation::InsertKey { key, values })

@@ -4,9 +4,20 @@ mod process_stateless;
 mod reference_compiler;
 mod render;
 
-use std::{collections::HashMap, num::NonZeroU16};
+use std::{
+    collections::HashMap,
+    num::NonZeroU16,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use ecow::EcoVec;
+use proptest::{
+    collection::vec,
+    prelude::{Just, Strategy, proptest},
+};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use typst::diag::{Severity, SourceDiagnostic};
 use typst_syntax::Span;
@@ -73,6 +84,111 @@ impl StateMachineTest for IncrementalMatchesStateless {
     }
 }
 
+struct IncrementalMatchesStatelessBatched;
+
+impl StateMachineTest for IncrementalMatchesStatelessBatched {
+    type SystemUnderTest = IncrementalCompiler;
+    type Reference = ReferenceCompiler;
+
+    fn init_test(
+        _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) -> Self::SystemUnderTest {
+        IncrementalCompiler::default()
+    }
+
+    fn apply(
+        mut state: Self::SystemUnderTest,
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        transition: <Self::Reference as ReferenceStateMachine>::Transition,
+    ) -> Self::SystemUnderTest {
+        let file_id = transition.file_id();
+
+        if matches!(transition, Transition::RemoveFile(_)) {
+            state.compiler.remove(file_id);
+        } else {
+            state
+                .compiler
+                ._update(file_id, ref_state.compile_file(file_id));
+        }
+
+        state
+    }
+}
+
+/// Custom runner mirroring `proptest_state_machine::test_sequential` but
+/// processing only at batch boundaries.
+fn run_batched(
+    initial_state: State,
+    transitions: Vec<Transition>,
+    mut seen_counter: Option<Arc<AtomicUsize>>,
+    batch_sizes: Vec<usize>,
+) {
+    let mut ref_state = initial_state;
+    let mut sut = IncrementalMatchesStatelessBatched::init_test(&ref_state);
+
+    assert_matches_stateless(&sut, &ref_state);
+
+    let mut transitions = transitions.into_iter();
+    for batch_size in batch_sizes {
+        let mut applied = 0;
+        for _ in 0..batch_size {
+            let Some(transition) = transitions.next() else {
+                break;
+            };
+            if let Some(counter) = seen_counter.as_mut() {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            ref_state = ReferenceCompiler::apply(ref_state, &transition);
+            sut = IncrementalMatchesStatelessBatched::apply(sut, &ref_state, transition);
+            applied += 1;
+        }
+        if applied == 0 {
+            break;
+        }
+        let plan = sut
+            .compiler
+            ._process(&MockRenderer)
+            .expect("bug: MockRenderer cannot fail");
+        apply_plan(plan, &mut sut.filesystem);
+        assert_matches_stateless(&sut, &ref_state);
+    }
+}
+
+/// Output of `ReferenceCompiler::sequential_strategy`: initial state, the
+/// generated transition sequence, and proptest's per-step seen-counter (used
+/// during shrinking to mark transitions that were actually applied).
+type StateMachineInput = (State, Vec<Transition>, Option<Arc<AtomicUsize>>);
+
+/// Strategy producing batched test inputs: the underlying state-machine
+/// strategy paired with a batch-size schedule of `batch_sizes_strategy(n)`,
+/// where `n` is the realized transition count.
+fn batched_strategy<S>(
+    batch_sizes_strategy: impl Fn(usize) -> S,
+) -> impl Strategy<Value = (StateMachineInput, Vec<usize>)>
+where
+    S: Strategy<Value = Vec<usize>>,
+{
+    ReferenceCompiler::sequential_strategy(CONFIG.transitions.clone()).prop_flat_map(move |u| {
+        let n = u.1.len();
+        (Just(u), batch_sizes_strategy(n))
+    })
+}
+
+fn assert_matches_stateless(incremental: &IncrementalCompiler, state: &State) {
+    let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
+        process_stateless(state).expect("stateless reference must succeed");
+
+    assert_eq!(incremental.filesystem, expected_output);
+    assert_eq!(
+        normalize_compile_diagnostics(incremental.compiler.compile_diagnostics()),
+        normalize_compile_diagnostics(&expected_compile_diagnostics),
+    );
+    assert_eq!(
+        normalize_process_diagnostics(incremental.compiler.process_diagnostics()),
+        normalize_process_diagnostics(&expected_process_diagnostics),
+    );
+}
+
 fn apply_plan(plan: OutputPlan<RenderNode>, filesystem: &mut HashMap<String, RenderNode>) {
     // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
     for (name, node) in plan.writes {
@@ -114,19 +230,44 @@ prop_state_machine! {
     fn incremental_matches_stateless(sequential CONFIG.transitions.clone() => IncrementalMatchesStateless);
 }
 
-fn assert_matches_stateless(incremental: &IncrementalCompiler, state: &State) {
-    let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
-        process_stateless(state).expect("stateless reference must succeed");
+proptest! {
+    /// Batch sizes uniform in `CONFIG.batch`. Equal mass on every batch size in
+    /// the range; balanced exploration of small and large dirty/removed
+    /// accumulations.
+    #[test]
+    fn incremental_matches_stateless_batched_uniform(
+        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
+            vec(CONFIG.batch.clone(), n)
+        })
+    ) {
+        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+    }
 
-    assert_eq!(incremental.filesystem, expected_output);
-    assert_eq!(
-        normalize_compile_diagnostics(incremental.compiler.compile_diagnostics()),
-        normalize_compile_diagnostics(&expected_compile_diagnostics),
-    );
-    assert_eq!(
-        normalize_process_diagnostics(incremental.compiler.process_diagnostics()),
-        normalize_process_diagnostics(&expected_process_diagnostics),
-    );
+    /// Every batch is the maximum of `CONFIG.batch`. Stress test for
+    /// accumulated dirty/removed state — minimum number of `_process` calls.
+    #[test]
+    fn incremental_matches_stateless_batched_max(
+        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
+            Just(vec![*CONFIG.batch.end(); n])
+        })
+    ) {
+        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+    }
+
+    /// Triangular distribution biased toward larger batch sizes (max of two
+    /// uniform draws over `CONFIG.batch`). PDF ~ 2k/N², so large batches are
+    /// twice as common as small ones at the extremes.
+    #[test]
+    fn incremental_matches_stateless_batched_triangular(
+        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
+            vec(
+                (CONFIG.batch.clone(), CONFIG.batch.clone()).prop_map(|(a, b)| a.max(b)),
+                n,
+            )
+        })
+    ) {
+        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+    }
 }
 
 #[test]
