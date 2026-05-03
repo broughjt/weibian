@@ -123,27 +123,27 @@ fn run_batched(
     mut seen_counter: Option<Arc<AtomicUsize>>,
     batch_sizes: Vec<usize>,
 ) {
+    let batches = {
+        let mut transitions = transitions.into_iter();
+        batch_sizes
+            .into_iter()
+            .map(|size| transitions.by_ref().take(size).collect::<Vec<_>>())
+            .take_while(|batch| !batch.is_empty())
+            .collect::<Vec<Vec<Transition>>>()
+    };
+
     let mut ref_state = initial_state;
     let mut sut = IncrementalMatchesStatelessBatched::init_test(&ref_state);
 
     assert_matches_stateless(&sut, &ref_state);
 
-    let mut transitions = transitions.into_iter();
-    for batch_size in batch_sizes {
-        let mut applied = 0;
-        for _ in 0..batch_size {
-            let Some(transition) = transitions.next() else {
-                break;
-            };
+    for batch in batches {
+        for transition in batch {
             if let Some(counter) = seen_counter.as_mut() {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
             ref_state = ReferenceCompiler::apply(ref_state, &transition);
             sut = IncrementalMatchesStatelessBatched::apply(sut, &ref_state, transition);
-            applied += 1;
-        }
-        if applied == 0 {
-            break;
         }
         let plan = sut
             .compiler
@@ -231,9 +231,6 @@ prop_state_machine! {
 }
 
 proptest! {
-    /// Batch sizes uniform in `CONFIG.batch`. Equal mass on every batch size in
-    /// the range; balanced exploration of small and large dirty/removed
-    /// accumulations.
     #[test]
     fn incremental_matches_stateless_batched_uniform(
         ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
@@ -243,8 +240,6 @@ proptest! {
         run_batched(initial_state, transitions, seen_counter, batch_sizes);
     }
 
-    /// Every batch is the maximum of `CONFIG.batch`. Stress test for
-    /// accumulated dirty/removed state — minimum number of `_process` calls.
     #[test]
     fn incremental_matches_stateless_batched_max(
         ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
@@ -254,11 +249,8 @@ proptest! {
         run_batched(initial_state, transitions, seen_counter, batch_sizes);
     }
 
-    /// Triangular distribution biased toward larger batch sizes (max of two
-    /// uniform draws over `CONFIG.batch`). PDF ~ 2k/N², so large batches are
-    /// twice as common as small ones at the extremes.
     #[test]
-    fn incremental_matches_stateless_batched_triangular(
+    fn incremental_matches_stateless_batched_skewed_large(
         ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
             vec(
                 (CONFIG.batch.clone(), CONFIG.batch.clone()).prop_map(|(a, b)| a.max(b)),
