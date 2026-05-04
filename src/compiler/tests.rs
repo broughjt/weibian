@@ -20,7 +20,7 @@ use proptest::{
 };
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use typst::diag::{Severity, SourceDiagnostic};
-use typst_syntax::Span;
+use typst_syntax::{FileId, Span};
 
 use crate::compiler::{
     CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics,
@@ -277,6 +277,7 @@ fn duplicate_identifier_after_compile_error_recovery_matches_stateless() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file1,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -306,6 +307,7 @@ fn duplicate_identifier_after_compile_error_recovery_matches_stateless() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file2,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -349,6 +351,7 @@ fn duplicate_identifier_resolves_when_other_file_is_deleted() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file1,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -378,6 +381,7 @@ fn duplicate_identifier_resolves_when_other_file_is_deleted() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file2,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -419,6 +423,7 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file1,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -448,6 +453,7 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
                     identifier: MockNodeIdentifier(0),
                     title: Default::default(),
                     body: Default::default(),
+                    file_id: file2,
                     span: Span::detached(),
                     metadata: Default::default(),
                     transclusions: Default::default(),
@@ -488,13 +494,14 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
 
     // Each file contributes a single node with the same identifier
     // (MockNodeIdentifier(0)).
-    let mock_file = |node_id: MockNodeId| MockFile {
+    let mock_file = |file_id: FileId, node_id: MockNodeId| MockFile {
         nodes: [(
             node_id,
             MockNode {
                 identifier: MockNodeIdentifier(0),
                 title: Default::default(),
                 body: Default::default(),
+                file_id,
                 span: Span::detached(),
                 metadata: Default::default(),
                 transclusions: Default::default(),
@@ -508,7 +515,7 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
     };
 
     let file1 = file_id(NonZeroU16::new(1).unwrap());
-    reference.insert_file(file1, mock_file(MockNodeId(0)));
+    reference.insert_file(file1, mock_file(file1, MockNodeId(0)));
     incremental
         .compiler
         ._update(file1, reference.compile_file(file1));
@@ -517,7 +524,7 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
     assert_matches_stateless(&incremental, &reference);
 
     let file2 = file_id(NonZeroU16::new(2).unwrap());
-    reference.insert_file(file2, mock_file(MockNodeId(1)));
+    reference.insert_file(file2, mock_file(file2, MockNodeId(1)));
     incremental
         .compiler
         ._update(file2, reference.compile_file(file2));
@@ -532,7 +539,7 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
     // call will only mention file_1 and file_2; file_3's duplicate
     // diagnostic will be missing.
     let file3 = file_id(NonZeroU16::new(3).unwrap());
-    reference.insert_file(file3, mock_file(MockNodeId(2)));
+    reference.insert_file(file3, mock_file(file3, MockNodeId(2)));
     incremental
         .compiler
         ._update(file3, reference.compile_file(file3));

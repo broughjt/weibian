@@ -1,14 +1,16 @@
 use std::{collections::HashMap, fmt::Write};
 
-use typst_syntax::Span;
+use ecow::EcoVec;
+use typst_syntax::{FileId, Span};
 
-use crate::compiler::{Metadata, NodeEntry, extract::NodeOutput};
+use crate::compiler::{Metadata, Node, extract::NodeOutput};
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
     pub identifier: MockNodeIdentifier,
     pub title: String,
     pub body: String,
+    pub file_id: FileId,
     pub span: Span,
     pub metadata: Metadata,
     pub transclusions: Vec<MockTransclusion>,
@@ -36,8 +38,8 @@ impl From<MockNode> for NodeOutput {
         let mut body_html = String::new();
         let mut transclusion_metadata: HashMap<u32, Metadata> = HashMap::new();
         let mut link_metadata: HashMap<u32, Metadata> = HashMap::new();
-        let mut transclusions = Vec::with_capacity(node.transclusions.len());
-        let mut links = Vec::with_capacity(node.links.len());
+        let mut transclusions = EcoVec::with_capacity(node.transclusions.len());
+        let mut links = EcoVec::with_capacity(node.links.len());
 
         if !node.body.is_empty() {
             write!(body_html, "<p>{}</p>", node.body).unwrap();
@@ -72,21 +74,19 @@ impl From<MockNode> for NodeOutput {
             links.push(link.target.0.to_string());
         }
 
-        let entry = NodeEntry {
+        let entry = Node {
             body_html,
             title: node.title.clone(),
             title_text: node.title,
+            file_id: node.file_id,
             span: node.span,
             node_metadata: node.metadata,
+            transclusions,
             transclusion_metadata,
+            links,
             link_metadata,
         };
 
-        NodeOutput {
-            identifier: node.identifier.0.to_string(),
-            entry,
-            transclusions,
-            links,
-        }
+        (node.identifier.0.to_string(), entry)
     }
 }

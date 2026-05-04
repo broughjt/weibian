@@ -10,7 +10,7 @@ use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
-use super::{Metadata, NodeEntry};
+use super::{Metadata, Node};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
 const NO_WB_NODE: &str = "source file produced no wb-node";
@@ -27,13 +27,9 @@ const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter 
 const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
 const BUG_NO_SPAN_FOR_COUNTER: &str = "bug: no span found for node counter";
 
-#[derive(Clone, Debug)]
-pub struct NodeOutput {
-    pub identifier: String,
-    pub entry: NodeEntry,
-    pub transclusions: Vec<String>,
-    pub links: Vec<String>,
-}
+// Rename entry to node everywhere
+
+pub type NodeOutput = (String, Node<String>);
 
 /// Compiles a source file and extracts its nodes.
 pub fn compile<W: World>(world: &W) -> Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>> {
@@ -118,7 +114,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((node_counter, output)) = extract_node_content(
+        let Some((node_counter, (identifier, entry))) = extract_node_content(
             &subnode,
             true,
             &spans,
@@ -128,7 +124,6 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
         ) else {
             continue;
         };
-        let identifier = output.identifier.clone();
         let transclude = match subnode.attr("transclude").as_deref() {
             Some("true") => true,
             Some("false") => false,
@@ -138,7 +133,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
             }
             None => {
                 errors.push(SourceDiagnostic::error(
-                    output.entry.span,
+                    entry.span,
                     WB_SUBNODE_MISSING_TRANSCLUDE,
                 ));
                 continue;
@@ -151,10 +146,10 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            if !output.entry.node_metadata.is_empty() {
+            if !entry.node_metadata.is_empty() {
                 metadata
                     .transclusion
-                    .insert(counter, output.entry.node_metadata.clone());
+                    .insert(counter, entry.node_metadata.clone());
             }
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
@@ -163,7 +158,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
             subnode.remove();
         }
 
-        nodes.push((node_counter, output));
+        nodes.push((node_counter, (identifier, entry)));
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -275,6 +270,8 @@ fn extract_node_content(
         return None;
     }
     let span = spans.get(&counter).copied().expect(BUG_NO_SPAN_FOR_COUNTER);
+    // TODO: Fix if this doesn't work.
+    let file_id = span.id().expect("Span should have FileId");
 
     let node_metadata = metadata.node.remove(&counter).unwrap_or_default();
 
@@ -301,20 +298,21 @@ fn extract_node_content(
 
     Some((
         counter,
-        NodeOutput {
+        (
             identifier,
-            entry: NodeEntry {
+            Node {
                 body_html,
                 title,
                 title_text,
+                file_id,
                 span,
                 node_metadata,
+                transclusions,
                 transclusion_metadata,
+                links,
                 link_metadata,
             },
-            transclusions,
-            links,
-        },
+        ),
     ))
 }
 
@@ -324,8 +322,8 @@ fn collect_transclusions(
     element: &Selection,
     metadata: &mut MetadataMaps,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> (Vec<String>, HashMap<u32, Metadata>) {
-    let mut targets = Vec::new();
+) -> (EcoVec<String>, HashMap<u32, Metadata>) {
+    let mut targets = EcoVec::new();
     let mut node_metadata = HashMap::new();
     for wb_transclude in element.select("wb-transclude").iter() {
         let id = match wb_transclude.attr("identifier").as_deref() {
@@ -369,8 +367,8 @@ fn collect_links(
     element: &Selection,
     metadata: &mut MetadataMaps,
     errors: &mut EcoVec<SourceDiagnostic>,
-) -> (Vec<String>, HashMap<u32, Metadata>) {
-    let mut targets = Vec::new();
+) -> (EcoVec<String>, HashMap<u32, Metadata>) {
+    let mut targets = EcoVec::new();
     let mut node_metadata = HashMap::new();
     let links_iter = element.select("a").iter().filter_map(|element| {
         element
@@ -1379,7 +1377,7 @@ mod tests {
             prop_assert_eq!(
                 actual_nodes
                     .iter()
-                    .map(|node| node.identifier.as_str())
+                    .map(|(identifier, _)| identifier.as_str())
                     .collect::<Vec<_>>(),
                 expected_nodes
                     .iter()
@@ -1392,24 +1390,24 @@ mod tests {
 
             for (actual, expected) in actual_nodes.iter().zip(expected_nodes) {
 
-                prop_assert_eq!(&actual.identifier, &expected.identifier);
-                prop_assert_eq!(&actual.entry.title, &expected.title);
-                prop_assert_eq!(&actual.entry.title_text, &expected.title);
-                prop_assert_eq!(&actual.entry.node_metadata, &expected.node_metadata);
-                prop_assert_eq!(&actual.transclusions, &expected.transclusions);
-                prop_assert_eq!(&actual.links, &expected.links);
-                prop_assert_eq!(&actual.entry.transclusion_metadata, &expected.transclusion_metadata);
-                prop_assert_eq!(&actual.entry.link_metadata, &expected.link_metadata);
+                prop_assert_eq!(&actual.0, &expected.identifier);
+                prop_assert_eq!(&actual.1.title, &expected.title);
+                prop_assert_eq!(&actual.1.title_text, &expected.title);
+                prop_assert_eq!(&actual.1.node_metadata, &expected.node_metadata);
+                prop_assert_eq!(&actual.1.transclusions, &expected.transclusions);
+                prop_assert_eq!(&actual.1.links, &expected.links);
+                prop_assert_eq!(&actual.1.transclusion_metadata, &expected.transclusion_metadata);
+                prop_assert_eq!(&actual.1.link_metadata, &expected.link_metadata);
 
-                prop_assert!(actual.entry.transclusion_metadata.values().all(|m| !m.is_empty()));
-                prop_assert!(actual.entry.link_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.1.transclusion_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.1.link_metadata.values().all(|m| !m.is_empty()));
 
-                let document = Document::from(actual.entry.body_html.as_str());
+                let document = Document::from(actual.1.body_html.as_str());
 
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
 
-                check_body_html(&counter_to_node[&expected.counter], &actual.entry.body_html)?;
+                check_body_html(&counter_to_node[&expected.counter], &actual.1.body_html)?;
             }
         }
 
@@ -1576,7 +1574,7 @@ mod tests {
             output.html = document.html().to_string();
 
             let actual = extract(output).unwrap();
-            let identifiers: Vec<&str> = actual.iter().map(|node| node.identifier.as_str()).collect();
+            let identifiers: Vec<&str> = actual.iter().map(|node| node.0.as_str()).collect();
             for target_id in &picked[..k] {
                 prop_assert_eq!(
                     identifiers.iter().filter(|&&id| id == target_id).count(),

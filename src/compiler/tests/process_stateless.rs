@@ -10,11 +10,11 @@ use typst::diag::Warned;
 use typst_syntax::FileId;
 
 use crate::compiler::{
-    Backmatter, CompileDiagnostics, NodeEntry, NodeId, NodeInterner, ProcessDiagnostics,
-    build_backmatter_input, build_body_input, build_node_input, cycle_diagnostics,
-    dangling_link_diagnostic, dangling_transclusion_diagnostic,
-    duplicate_node_identifier_diagnostic,
+    Backmatter, CompileDiagnostics, Node, NodeId, NodeInterner, ProcessDiagnostics,
+    backmatter_input, body_input, cycle_diagnostics, dangling_link_diagnostic,
+    dangling_transclusion_diagnostic, duplicate_node_identifier_diagnostic,
     extract::NodeOutput,
+    node_input,
     render::Render,
     tests::{
         reference_compiler::State,
@@ -34,7 +34,7 @@ pub fn process_stateless(
     let mut interner = NodeInterner::default();
     let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
-    let mut nodes: HashMap<NodeId, NodeEntry> = HashMap::new();
+    let mut nodes: HashMap<NodeId, Node<NodeId>> = HashMap::new();
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
     let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
     let mut process_diagnostics: ProcessDiagnostics = HashMap::new();

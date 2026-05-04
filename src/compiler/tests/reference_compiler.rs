@@ -859,7 +859,7 @@ fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + us
         node_identifier_strategy(queries),
         title_strategy(),
         body_strategy(),
-        span_strategy(),
+        file_id_and_span_strategy(),
         metadata_strategy(),
         vec(
             mock_transclusion_strategy(queries),
@@ -868,10 +868,11 @@ fn mock_node_strategy(queries: &Queries) -> impl Strategy<Value = MockNode> + us
         vec(mock_link_strategy(queries), 0..config.node_links_max),
     )
         .prop_map(
-            |(identifier, title, body, span, metadata, transclusions, links)| MockNode {
+            |(identifier, title, body, (file_id, span), metadata, transclusions, links)| MockNode {
                 identifier,
                 title,
                 body,
+                file_id,
                 span,
                 metadata,
                 transclusions,
@@ -945,9 +946,9 @@ fn file_id_strategy() -> impl Strategy<Value = FileId> {
         .prop_map(file_id)
 }
 
-fn span_strategy() -> impl Strategy<Value = Span> {
+fn file_id_and_span_strategy() -> impl Strategy<Value = (FileId, Span)> {
     (file_id_strategy(), range_strategy())
-        .prop_map(|(file_id, range)| Span::from_range(file_id, range))
+        .prop_map(|(file_id, range)| (file_id, Span::from_range(file_id, range)))
 }
 
 fn metadata_strategy() -> impl Strategy<Value = Metadata> {
