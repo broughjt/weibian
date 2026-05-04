@@ -65,25 +65,25 @@ impl<T, U> Compiler<T, U> {
             Ok(outputs) => {
                 let mut node_ids = HashSet::new();
 
-                for (identifier, node) in outputs {
+                for (identifier, entry) in outputs {
                     let node_id = self.interner.intern(identifier);
                     let entry = NodeEntry {
                         node: Node {
-                            body_html: node.body_html,
-                            title: node.title,
-                            title_text: node.title_text,
+                            body_html: entry.node.body_html,
+                            title: entry.node.title,
+                            title_text: entry.node.title_text,
                             file_id,
-                            span: node.span,
-                            node_metadata: node.node_metadata,
-                            transclusion_metadata: node.transclusion_metadata,
-                            link_metadata: node.link_metadata,
+                            span: entry.node.span,
+                            node_metadata: entry.node.node_metadata,
+                            transclusion_metadata: entry.node.transclusion_metadata,
+                            link_metadata: entry.node.link_metadata,
                         },
-                        transclusions: node
+                        transclusions: entry
                             .transclusions
                             .into_iter()
                             .map(|s| self.interner.intern(s))
                             .collect(),
-                        links: node
+                        links: entry
                             .links
                             .into_iter()
                             .map(|s| self.interner.intern(s))
@@ -194,17 +194,6 @@ impl<T, U> Compiler<T, U> {
 
         let mut writes = HashMap::with_capacity(render_plan.len());
 
-        let nodes_helper = |nodes: &HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>, node_id: NodeId| {
-            nodes.get(&node_id).map(|entries| {
-                assert!(
-                    entries.len() == 1,
-                    "Existent node id in render plan has exactly one entry"
-                );
-
-                &entries[0].node
-            })
-        };
-
         for &RenderItem {
             node_id,
             needs_backmatter,
@@ -232,16 +221,7 @@ impl<T, U> Compiler<T, U> {
                     .get(&node_id)
                     .expect("bug: renderable node has no backmatter after stage 1");
                 let rendered_backmatter = renderer.render_backmatter(backmatter_input(
-                    |node_id: NodeId| {
-                        nodes.get(&node_id).map(|entries| {
-                            assert!(
-                                entries.len() == 1,
-                                "Existent node id in render plan has exactly one entry"
-                            );
-
-                            &entries[0].node
-                        })
-                    },
+                    |node_id| nodes_helper(nodes, node_id),
                     backmatter,
                     interner,
                 ))?;
@@ -250,16 +230,7 @@ impl<T, U> Compiler<T, U> {
             }
 
             let html = renderer.render_node(node_input(
-                |node_id: NodeId| {
-                    nodes.get(&node_id).map(|entries| {
-                        assert!(
-                            entries.len() == 1,
-                            "Existent node id in render plan has exactly one entry"
-                        );
-
-                        &entries[0].node
-                    })
-                },
+                |node_id| nodes_helper(nodes, node_id),
                 rendered_bodies,
                 rendered_backmatters,
                 interner,
@@ -272,7 +243,21 @@ impl<T, U> Compiler<T, U> {
             );
         }
 
-        Ok(writes)
+        return Ok(writes);
+
+        fn nodes_helper(
+            nodes: &HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>,
+            node_id: NodeId,
+        ) -> Option<&Node> {
+            nodes.get(&node_id).map(|entries| {
+                assert!(
+                    entries.len() == 1,
+                    "Existent node id in render plan has exactly one entry"
+                );
+
+                &entries[0].node
+            })
+        }
     }
 }
 

@@ -10,6 +10,8 @@ use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
+use crate::compiler::NodeEntry;
+
 use super::{Metadata, Node};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
@@ -29,7 +31,7 @@ const BUG_NO_SPAN_FOR_COUNTER: &str = "bug: no span found for node counter";
 
 // Rename entry to node everywhere
 
-pub type NodeOutput = (String, Node<String>);
+pub type NodeOutput = (String, NodeEntry<String>);
 
 /// Compiles a source file and extracts its nodes.
 pub fn compile<W: World>(world: &W) -> Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>> {
@@ -133,7 +135,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
             }
             None => {
                 errors.push(SourceDiagnostic::error(
-                    entry.span,
+                    entry.node.span,
                     WB_SUBNODE_MISSING_TRANSCLUDE,
                 ));
                 continue;
@@ -146,10 +148,10 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            if !entry.node_metadata.is_empty() {
+            if !entry.node.node_metadata.is_empty() {
                 metadata
                     .transclusion
-                    .insert(counter, entry.node_metadata.clone());
+                    .insert(counter, entry.node.node_metadata.clone());
             }
             subnode.replace_with_html(format!(
                 r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
@@ -300,17 +302,19 @@ fn extract_node_content(
         counter,
         (
             identifier,
-            Node {
-                body_html,
-                title,
-                title_text,
-                file_id,
-                span,
-                node_metadata,
+            NodeEntry {
+                node: Node {
+                    body_html,
+                    title,
+                    title_text,
+                    file_id,
+                    span,
+                    node_metadata,
+                    transclusion_metadata,
+                    link_metadata,
+                },
                 transclusions,
-                transclusion_metadata,
                 links,
-                link_metadata,
             },
         ),
     ))
@@ -1391,23 +1395,23 @@ mod tests {
             for (actual, expected) in actual_nodes.iter().zip(expected_nodes) {
 
                 prop_assert_eq!(&actual.0, &expected.identifier);
-                prop_assert_eq!(&actual.1.title, &expected.title);
-                prop_assert_eq!(&actual.1.title_text, &expected.title);
-                prop_assert_eq!(&actual.1.node_metadata, &expected.node_metadata);
+                prop_assert_eq!(&actual.1.node.title, &expected.title);
+                prop_assert_eq!(&actual.1.node.title_text, &expected.title);
+                prop_assert_eq!(&actual.1.node.node_metadata, &expected.node_metadata);
                 prop_assert_eq!(&actual.1.transclusions, &expected.transclusions);
                 prop_assert_eq!(&actual.1.links, &expected.links);
-                prop_assert_eq!(&actual.1.transclusion_metadata, &expected.transclusion_metadata);
-                prop_assert_eq!(&actual.1.link_metadata, &expected.link_metadata);
+                prop_assert_eq!(&actual.1.node.transclusion_metadata, &expected.transclusion_metadata);
+                prop_assert_eq!(&actual.1.node.link_metadata, &expected.link_metadata);
 
-                prop_assert!(actual.1.transclusion_metadata.values().all(|m| !m.is_empty()));
-                prop_assert!(actual.1.link_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.1.node.transclusion_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.1.node.link_metadata.values().all(|m| !m.is_empty()));
 
-                let document = Document::from(actual.1.body_html.as_str());
+                let document = Document::from(actual.1.node.body_html.as_str());
 
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
 
-                check_body_html(&counter_to_node[&expected.counter], &actual.1.body_html)?;
+                check_body_html(&counter_to_node[&expected.counter], &actual.1.node.body_html)?;
             }
         }
 
