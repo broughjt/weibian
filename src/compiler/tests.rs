@@ -27,7 +27,7 @@ use crate::compiler::{
     CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics,
     tests::{
         config::CONFIG,
-        driver::{StateMachineTestDeluxe, run_sequential},
+        driver::run_sequential,
         model::{MockNode, MockNodeIdentifier},
         process_stateless::process_stateless,
         reference_compiler::{MockFile, MockNodeId, ReferenceCompiler, State, Transition, file_id},
@@ -83,48 +83,6 @@ impl StateMachineTest for IncrementalMatchesStateless {
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
         assert_matches_stateless(state, ref_state);
-    }
-}
-
-impl StateMachineTestDeluxe for IncrementalMatchesStateless {
-    type Implementation = IncrementalCompiler;
-    type Specification = ReferenceCompiler;
-
-    fn initial_state(
-        _: &<Self::Specification as ReferenceStateMachine>::State,
-    ) -> Self::Implementation {
-        IncrementalCompiler::default()
-    }
-
-    fn apply(
-        mut q: Self::Implementation,
-        _r_before: &<Self::Specification as ReferenceStateMachine>::State,
-        r_after: &<Self::Specification as ReferenceStateMachine>::State,
-        transition: <Self::Specification as ReferenceStateMachine>::Transition,
-    ) -> Self::Implementation {
-        let file_id = transition.file_id();
-
-        if matches!(transition, Transition::RemoveFile(_)) {
-            q.compiler.remove(file_id);
-        } else {
-            // TODO: Write a test for this
-            q.compiler._update(file_id, r_after.compile_file(file_id));
-        }
-
-        let plan = q
-            .compiler
-            ._process(&MockRenderer)
-            .expect("bug: MockRenderer cannot fail");
-        apply_plan(plan, &mut q.filesystem);
-
-        q
-    }
-
-    fn check_invariants(
-        q: &Self::Implementation,
-        r: &<Self::Specification as ReferenceStateMachine>::State,
-    ) {
-        assert_matches_stateless(q, r);
     }
 }
 
