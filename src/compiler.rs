@@ -30,7 +30,7 @@ pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 pub struct Compiler<T = String, U = String> {
     file_to_nodes: HashMap<FileId, HashSet<NodeId>>,
     // node_to_file: HashMap<NodeId, FileId>,
-    nodes: HashMap<NodeId, EcoVec<Node<NodeId>>>,
+    nodes: HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>,
     backmatters: HashMap<NodeId, Backmatter>,
     rendered_bodies: HashMap<NodeId, T>,
     rendered_backmatters: HashMap<NodeId, U>,
@@ -67,29 +67,31 @@ impl<T, U> Compiler<T, U> {
 
                 for (identifier, node) in outputs {
                     let node_id = self.interner.intern(identifier);
-                    let node = Node {
-                        body_html: node.body_html,
-                        title: node.title,
-                        title_text: node.title_text,
-                        file_id,
-                        span: node.span,
-                        node_metadata: node.node_metadata,
+                    let entry = NodeEntry {
+                        node: Node {
+                            body_html: node.body_html,
+                            title: node.title,
+                            title_text: node.title_text,
+                            file_id,
+                            span: node.span,
+                            node_metadata: node.node_metadata,
+                            transclusion_metadata: node.transclusion_metadata,
+                            link_metadata: node.link_metadata,
+                        },
                         transclusions: node
                             .transclusions
                             .into_iter()
                             .map(|s| self.interner.intern(s))
                             .collect(),
-                        transclusion_metadata: node.transclusion_metadata,
                         links: node
                             .links
                             .into_iter()
                             .map(|s| self.interner.intern(s))
                             .collect(),
-                        link_metadata: node.link_metadata,
                     };
 
                     node_ids.insert(node_id);
-                    self.nodes.entry(node_id).or_default().push(node);
+                    self.nodes.entry(node_id).or_default().push(entry);
 
                     self.dirty.insert(node_id);
                     self.removed.remove(&node_id);
@@ -122,7 +124,7 @@ impl<T, U> Compiler<T, U> {
                     };
                     let nodes = entry.get_mut();
 
-                    nodes.retain(|n| n.file_id != file_id);
+                    nodes.retain(|e| e.node.file_id != file_id);
 
                     if nodes.is_empty() {
                         entry.remove();
@@ -192,6 +194,17 @@ impl<T, U> Compiler<T, U> {
 
         let mut writes = HashMap::with_capacity(render_plan.len());
 
+        let nodes_helper = |nodes: &HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>, node_id: NodeId| {
+            nodes.get(&node_id).map(|entries| {
+                assert!(
+                    entries.len() == 1,
+                    "Existent node id in render plan has exactly one entry"
+                );
+
+                &entries[0].node
+            })
+        };
+
         for &RenderItem {
             node_id,
             needs_backmatter,
@@ -204,8 +217,12 @@ impl<T, U> Compiler<T, U> {
             );
 
             if needs_body {
-                let rendered_body =
-                    renderer.render_body(body_input(nodes, rendered_bodies, interner, node_id))?;
+                let rendered_body = renderer.render_body(body_input(
+                    |node_id| nodes_helper(nodes, node_id),
+                    rendered_bodies,
+                    interner,
+                    node_id,
+                ))?;
 
                 rendered_bodies.insert(node_id, rendered_body);
             }
@@ -214,14 +231,35 @@ impl<T, U> Compiler<T, U> {
                 let backmatter = backmatters
                     .get(&node_id)
                     .expect("bug: renderable node has no backmatter after stage 1");
-                let rendered_backmatter =
-                    renderer.render_backmatter(backmatter_input(nodes, backmatter, interner))?;
+                let rendered_backmatter = renderer.render_backmatter(backmatter_input(
+                    |node_id: NodeId| {
+                        nodes.get(&node_id).map(|entries| {
+                            assert!(
+                                entries.len() == 1,
+                                "Existent node id in render plan has exactly one entry"
+                            );
+
+                            &entries[0].node
+                        })
+                    },
+                    backmatter,
+                    interner,
+                ))?;
 
                 rendered_backmatters.insert(node_id, rendered_backmatter);
             }
 
             let html = renderer.render_node(node_input(
-                nodes,
+                |node_id: NodeId| {
+                    nodes.get(&node_id).map(|entries| {
+                        assert!(
+                            entries.len() == 1,
+                            "Existent node id in render plan has exactly one entry"
+                        );
+
+                        &entries[0].node
+                    })
+                },
                 rendered_bodies,
                 rendered_backmatters,
                 interner,
@@ -345,7 +383,14 @@ struct Backmatter {
 pub(crate) type Metadata = HashMap<String, Vec<String>>;
 
 #[derive(Clone, Debug)]
-struct Node<T> {
+struct NodeEntry<T> {
+    pub node: Node,
+    pub links: EcoVec<T>,
+    pub transclusions: EcoVec<T>,
+}
+
+#[derive(Clone, Debug)]
+struct Node {
     pub body_html: String,
     pub title: String,
     pub title_text: String,
@@ -354,9 +399,7 @@ struct Node<T> {
     // TODO: Should we intern metadata strings and output? Is that nuts? Would
     // it cause incorrectness?
     pub node_metadata: Metadata,
-    pub transclusions: EcoVec<T>,
     pub transclusion_metadata: HashMap<u32, Metadata>,
-    pub links: EcoVec<T>,
     pub link_metadata: HashMap<u32, Metadata>,
 }
 
@@ -463,20 +506,12 @@ fn should_backmatter_render(
 }
 
 fn body_input<'a, B>(
-    nodes: &'a HashMap<NodeId, EcoVec<Node<NodeId>>>,
+    nodes: impl Fn(NodeId) -> Option<&'a Node>,
     rendered_bodies: &'a HashMap<NodeId, B>,
     interner: &'a NodeInterner,
     node_id: NodeId,
 ) -> BodyInput<'a, B> {
-    let node = {
-        let entry = &nodes[&node_id];
-        assert!(
-            entry.len() == 1,
-            "Node in render plan exists and is not duplicated"
-        );
-
-        &entry[0]
-    };
+    let node = nodes(node_id).expect("bug: node in render plan does not exist");
 
     let document = Document::from(node.body_html.as_str());
 
@@ -498,18 +533,10 @@ fn body_input<'a, B>(
             let identifier = interner.name(target_id);
 
             let metadata = node.link_metadata.get(&counter);
-            let resolution = nodes.get(&target_id).map(|nodes| {
-                assert!(
-                    nodes.len() == 1,
-                    "Node entry in render plan which exists is non-empty and is not duplicated"
-                );
-                let target = &nodes[0];
-
-                ResolvedLink {
-                    title: target.title.as_str(),
-                    title_text: target.title_text.as_str(),
-                    metadata: &target.node_metadata,
-                }
+            let resolution = nodes(target_id).map(|target| ResolvedLink {
+                title: target.title.as_str(),
+                title_text: target.title_text.as_str(),
+                metadata: &target.node_metadata,
             });
 
             Some((
@@ -542,13 +569,7 @@ fn body_input<'a, B>(
             let identifier = interner.name(target_id);
 
             let metadata = node.transclusion_metadata.get(&counter);
-            let resolution = nodes.get(&target_id).map(|nodes| {
-                assert!(
-                    nodes.len() == 1,
-                    "Node entry in render plan which exists is non-empty and is not duplicated"
-                );
-                let target = &nodes[0];
-
+            let resolution = nodes(target_id).map(|target| {
                 let body = rendered_bodies
                     .get(&target_id)
                     .expect("bug: transclusion target has no rendered_body");
@@ -579,27 +600,19 @@ fn body_input<'a, B>(
 }
 
 fn backmatter_input<'a>(
-    nodes: &'a HashMap<NodeId, EcoVec<Node<NodeId>>>,
+    nodes: impl Fn(NodeId) -> Option<&'a Node>,
     backmatter: &'a Backmatter,
     interner: &'a NodeInterner,
 ) -> BackmatterInput<'a> {
     let backmatter_set = |ids: &HashSet<NodeId>| -> Vec<(String, Option<BackmatterNode<'a>>)> {
         let mut items: Vec<(String, Option<BackmatterNode<'a>>)> = ids
             .iter()
-            .map(|&nid| {
-                let name = interner.name(nid).to_owned();
-                let node = nodes.get(&nid).map(|nodes| {
-                    assert!(
-                        nodes.len() == 1,
-                        "Node entry in render plan which exists is non-empty and is not duplicated"
-                    );
-                    let target = &nodes[0];
-
-                    BackmatterNode {
-                        title: target.title.as_str(),
-                        title_text: target.title_text.as_str(),
-                        metadata: &target.node_metadata,
-                    }
+            .map(|&node_id| {
+                let name = interner.name(node_id).to_owned();
+                let node = nodes(node_id).map(|target| BackmatterNode {
+                    title: target.title.as_str(),
+                    title_text: target.title_text.as_str(),
+                    metadata: &target.node_metadata,
                 });
                 (name, node)
             })
@@ -617,21 +630,13 @@ fn backmatter_input<'a>(
 }
 
 fn node_input<'a, B, M>(
-    nodes: &'a HashMap<NodeId, EcoVec<Node<NodeId>>>,
+    nodes: impl Fn(NodeId) -> Option<&'a Node>,
     rendered_bodies: &'a HashMap<NodeId, B>,
     rendered_backmatters: &'a HashMap<NodeId, M>,
     interner: &'a NodeInterner,
     node_id: NodeId,
 ) -> NodeInput<'a, B, M> {
-    let node = {
-        let entry = &nodes[&node_id];
-        assert!(
-            entry.len() == 1,
-            "Node in render plan exists and is not duplicated"
-        );
-
-        &entry[0]
-    };
+    let node = nodes(node_id).expect("bug: node in render plan does not exist");
     let body = rendered_bodies
         .get(&node_id)
         .expect("bug: renderable node has no rendered_body after pass 2");
