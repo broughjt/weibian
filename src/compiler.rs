@@ -10,6 +10,7 @@ use std::io;
 use dom_query::Document;
 use ecow::{EcoVec, eco_format};
 use petgraph::Direction;
+use petgraph::algo::tarjan_scc;
 use petgraph::graphmap::DiGraphMap;
 use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
@@ -29,16 +30,12 @@ pub type ProcessDiagnostics = HashMap<FileId, EcoVec<SourceDiagnostic>>;
 /// store and per-file diagnostics across incremental rebuilds.
 pub struct Compiler<T = String, U = String> {
     file_to_nodes: HashMap<FileId, HashSet<NodeId>>,
-    // node_to_file: HashMap<NodeId, FileId>,
     nodes: HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>,
     backmatters: HashMap<NodeId, Backmatter>,
     rendered_bodies: HashMap<NodeId, T>,
     rendered_backmatters: HashMap<NodeId, U>,
     compile_diagnostics: CompileDiagnostics,
     process_diagnostics: ProcessDiagnostics,
-    // TODO: remove
-    // links: DiGraphMap<NodeId, ()>,
-    // transclusions: DiGraphMap<NodeId, ()>,
     interner: NodeInterner,
     dirty: HashSet<NodeId>,
     removed: HashSet<NodeId>,
@@ -65,25 +62,17 @@ impl<T, U> Compiler<T, U> {
             Ok(outputs) => {
                 let mut node_ids = HashSet::new();
 
-                for (identifier, entry) in outputs {
-                    let node_id = self.interner.intern(identifier);
+                for output in outputs {
+                    let node_id = self.interner.intern(output.identifier);
                     let entry = NodeEntry {
-                        node: Node {
-                            body_html: entry.node.body_html,
-                            title: entry.node.title,
-                            title_text: entry.node.title_text,
-                            file_id,
-                            span: entry.node.span,
-                            node_metadata: entry.node.node_metadata,
-                            transclusion_metadata: entry.node.transclusion_metadata,
-                            link_metadata: entry.node.link_metadata,
-                        },
-                        transclusions: entry
+                        node: output.node,
+                        file_id,
+                        transclusions: output
                             .transclusions
                             .into_iter()
                             .map(|s| self.interner.intern(s))
                             .collect(),
-                        links: entry
+                        links: output
                             .links
                             .into_iter()
                             .map(|s| self.interner.intern(s))
@@ -115,28 +104,31 @@ impl<T, U> Compiler<T, U> {
     pub fn remove(&mut self, file_id: FileId) {
         if let Some(node_ids) = self.file_to_nodes.remove(&file_id) {
             for node_id in node_ids {
-                {
+                let still_present = {
                     let mut entry = match self.nodes.entry(node_id) {
                         Entry::Occupied(entry) => entry,
                         Entry::Vacant(_) => {
                             panic!("bug: `files_to_nodes` contains a node id not in `nodes`")
                         }
                     };
-                    let nodes = entry.get_mut();
+                    let entries = entry.get_mut();
 
-                    nodes.retain(|e| e.node.file_id != file_id);
+                    entries.retain(|e| e.file_id != file_id);
 
-                    if nodes.is_empty() {
+                    if entries.is_empty() {
                         entry.remove();
+                        false
+                    } else {
+                        true
                     }
+                };
+
+                if still_present {
+                    self.dirty.insert(node_id);
+                } else {
+                    self.dirty.remove(&node_id);
+                    self.removed.insert(node_id);
                 }
-
-                self.backmatters.remove(&node_id);
-                self.rendered_bodies.remove(&node_id);
-                self.rendered_backmatters.remove(&node_id);
-
-                self.dirty.remove(&node_id);
-                self.removed.insert(node_id);
             }
         }
 
@@ -173,7 +165,219 @@ impl<T, U> Compiler<T, U> {
     fn process_stage1(&mut self) -> (RenderPlan, HashSet<String>) {
         self.process_diagnostics.clear();
 
-        todo!()
+        let dirty = std::mem::take(&mut self.dirty);
+        let removed = std::mem::take(&mut self.removed);
+
+        let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
+        let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
+        let mut deletes: HashSet<String> = HashSet::new();
+
+        // Partition into singletons (renderable) and duplicates (unrenderable +
+        // diagnostic). Edges only flow from singletons; duplicates appear as
+        // dangling targets to anything that referenced them.
+        for (&node_id, entries) in &self.nodes {
+            if entries.len() == 1 {
+                let entry = &entries[0];
+                for &target in &entry.transclusions {
+                    transclusions.add_edge(node_id, target, ());
+                }
+                for &target in &entry.links {
+                    links.add_edge(node_id, target, ());
+                }
+            } else {
+                let name = self.interner.name(node_id).to_owned();
+                for entry in entries {
+                    self.process_diagnostics
+                        .entry(entry.file_id)
+                        .or_default()
+                        .push(duplicate_node_identifier_diagnostic(&name));
+                }
+            }
+        }
+
+        // Newly-duplicated ids that had been rendered as singletons need their
+        // output deleted and their caches evicted.
+        let duplicate_ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, entries)| entries.len() > 1)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in duplicate_ids {
+            if self.rendered_bodies.remove(&id).is_some() {
+                deletes.insert(self.interner.name(id).to_owned());
+            }
+            self.rendered_backmatters.remove(&id);
+            self.backmatters.remove(&id);
+        }
+
+        let is_singleton = |id: NodeId| self.nodes.get(&id).map(|v| v.len() == 1).unwrap_or(false);
+
+        // Dangling diagnostics: transclusion/link targets that aren't singletons.
+        for (source, destination, _) in transclusions
+            .all_edges()
+            .filter(|&(_, destination, _)| !is_singleton(destination))
+        {
+            let file_id = self.nodes[&source][0].file_id;
+            let name = self.interner.name(destination);
+            self.process_diagnostics
+                .entry(file_id)
+                .or_default()
+                .push(dangling_transclusion_diagnostic(name));
+        }
+        for (source, destination, _) in links
+            .all_edges()
+            .filter(|&(_, destination, _)| !is_singleton(destination))
+        {
+            let file_id = self.nodes[&source][0].file_id;
+            let name = self.interner.name(destination);
+            self.process_diagnostics
+                .entry(file_id)
+                .or_default()
+                .push(dangling_link_diagnostic(name));
+        }
+
+        let mut body_affected: HashSet<NodeId> = HashSet::new();
+        let mut backmatter_affected: HashSet<NodeId> = HashSet::new();
+        let mut unrenderable: HashSet<NodeId> = HashSet::new();
+        let mut outlinks_accumulator: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+        let mut render_order: Vec<NodeId> = Vec::new();
+
+        let sccs = tarjan_scc(&transclusions);
+
+        for scc in &sccs {
+            let id = scc[0];
+            let is_cyclic = scc.len() > 1 || transclusions.contains_edge(id, id);
+
+            if is_cyclic {
+                // Treat the whole SCC atomically: if any member is dirty, or
+                // any cross-SCC transclusion target is body_affected or
+                // removed, every member is body_affected.
+                let scc_set: HashSet<NodeId> = scc.iter().copied().collect();
+                let any_affected = scc.iter().any(|&m| dirty.contains(&m))
+                    || scc
+                        .iter()
+                        .flat_map(|&m| transclusions.neighbors(m))
+                        .filter(|t| !scc_set.contains(t))
+                        .any(|t| body_affected.contains(&t) || removed.contains(&t));
+                let any_link_affected = scc.iter().any(|&m| {
+                    links
+                        .neighbors(m)
+                        .any(|t| dirty.contains(&t) || removed.contains(&t))
+                });
+                if any_affected || any_link_affected {
+                    body_affected.extend(scc.iter().copied());
+                }
+
+                unrenderable.extend(scc.iter().copied());
+
+                for (file_id, diag) in cycle_diagnostics(scc.iter().map(|&id| {
+                    let file_id = self.nodes[&id][0].file_id;
+                    (file_id, self.interner.name(id))
+                })) {
+                    self.process_diagnostics
+                        .entry(file_id)
+                        .or_default()
+                        .push(diag);
+                }
+            } else {
+                let is_body_affected = dirty.contains(&id)
+                    || transclusions
+                        .neighbors(id)
+                        .any(|t| body_affected.contains(&t) || removed.contains(&t))
+                    || links
+                        .neighbors(id)
+                        .any(|t| dirty.contains(&t) || removed.contains(&t));
+                if is_body_affected {
+                    body_affected.insert(id);
+                }
+
+                if transclusions
+                    .neighbors(id)
+                    .any(|t| unrenderable.contains(&t))
+                {
+                    unrenderable.insert(id);
+                } else if is_singleton(id) {
+                    let new_backmatter =
+                        collect_backmatter(id, &links, &transclusions, &outlinks_accumulator);
+                    outlinks_accumulator.insert(id, new_backmatter.outlinks.clone());
+
+                    if should_backmatter_render(
+                        self.backmatters.get(&id),
+                        &new_backmatter,
+                        &dirty,
+                        &removed,
+                    ) {
+                        self.backmatters.insert(id, new_backmatter);
+                        backmatter_affected.insert(id);
+                    }
+
+                    if body_affected.contains(&id) || backmatter_affected.contains(&id) {
+                        render_order.push(id);
+                    }
+                }
+            }
+        }
+
+        // Singletons not present in the transclusion graph (no edges in or
+        // out): handled separately because tarjan_scc only returns nodes that
+        // appear in the graph.
+        let isolated: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(id, entries)| entries.len() == 1 && !transclusions.contains_node(**id))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in isolated {
+            if dirty.contains(&id)
+                || links
+                    .neighbors(id)
+                    .any(|t| dirty.contains(&t) || removed.contains(&t))
+            {
+                body_affected.insert(id);
+            }
+
+            let new_backmatter =
+                collect_backmatter(id, &links, &transclusions, &outlinks_accumulator);
+
+            if should_backmatter_render(
+                self.backmatters.get(&id),
+                &new_backmatter,
+                &dirty,
+                &removed,
+            ) {
+                self.backmatters.insert(id, new_backmatter);
+                backmatter_affected.insert(id);
+            }
+
+            if body_affected.contains(&id) || backmatter_affected.contains(&id) {
+                render_order.push(id);
+            }
+        }
+
+        let render_plan: RenderPlan = render_order
+            .iter()
+            .map(|&node_id| RenderItem {
+                node_id,
+                needs_body: body_affected.contains(&node_id),
+                needs_backmatter: backmatter_affected.contains(&node_id),
+            })
+            .collect();
+
+        for &id in &removed {
+            deletes.insert(self.interner.name(id).to_owned());
+            self.rendered_bodies.remove(&id);
+            self.rendered_backmatters.remove(&id);
+            self.backmatters.remove(&id);
+        }
+        for &id in unrenderable.intersection(&body_affected) {
+            deletes.insert(self.interner.name(id).to_owned());
+            self.rendered_bodies.remove(&id);
+            self.rendered_backmatters.remove(&id);
+            self.backmatters.remove(&id);
+        }
+
+        (render_plan, deletes)
     }
 
     fn process_stage2<R>(
@@ -184,7 +388,6 @@ impl<T, U> Compiler<T, U> {
     where
         R: Render<Body = T, Backmatter = U>,
     {
-        // TODO: Pattern match on self
         let nodes: &HashMap<_, _> = &self.nodes;
         let backmatters: &HashMap<NodeId, Backmatter> = &self.backmatters;
         let rendered_bodies: &mut HashMap<NodeId, R::Body> = &mut self.rendered_bodies;
@@ -249,14 +452,10 @@ impl<T, U> Compiler<T, U> {
             nodes: &HashMap<NodeId, EcoVec<NodeEntry<NodeId>>>,
             node_id: NodeId,
         ) -> Option<&Node> {
-            nodes.get(&node_id).map(|entries| {
-                assert!(
-                    entries.len() == 1,
-                    "Existent node id in render plan has exactly one entry"
-                );
-
-                &entries[0].node
-            })
+            nodes
+                .get(&node_id)
+                .filter(|entries| entries.len() == 1)
+                .map(|entries| &entries[0].node)
         }
     }
 }
@@ -370,6 +569,7 @@ pub(crate) type Metadata = HashMap<String, Vec<String>>;
 #[derive(Clone, Debug)]
 struct NodeEntry<T> {
     pub node: Node,
+    pub file_id: FileId,
     pub links: EcoVec<T>,
     pub transclusions: EcoVec<T>,
 }
@@ -379,7 +579,6 @@ struct Node {
     pub body_html: String,
     pub title: String,
     pub title_text: String,
-    pub file_id: FileId,
     pub span: Span,
     // TODO: Should we intern metadata strings and output? Is that nuts? Would
     // it cause incorrectness?
@@ -395,17 +594,6 @@ struct RenderItem {
 }
 
 type RenderPlan = Vec<RenderItem>;
-
-/// The set of writes and deletes to apply to the output directory after a
-/// process call.
-/// Removes all outgoing edges from `id` in `graph`, leaving incoming edges
-/// (and thus transitive dependents) intact.
-fn clear_outgoing(graph: &mut DiGraphMap<NodeId, ()>, id: NodeId) {
-    let neighbors: Vec<NodeId> = graph.neighbors(id).collect();
-    for neighbor in neighbors {
-        graph.remove_edge(id, neighbor);
-    }
-}
 
 // TODO: Future improvement: We have spans, we should not use detached for these diagnostics
 
@@ -476,7 +664,6 @@ fn should_backmatter_render(
     option_old: Option<&Backmatter>,
     new: &Backmatter,
     dirty: &HashSet<NodeId>,
-    metadata_dirty: &HashSet<NodeId>,
     removed: &HashSet<NodeId>,
 ) -> bool {
     option_old.is_none_or(|old| {
@@ -486,7 +673,7 @@ fn should_backmatter_render(
                 .iter()
                 .chain(new.backlinks.iter())
                 .chain(new.outlinks.iter())
-                .any(|id| dirty.contains(id) || metadata_dirty.contains(id) || removed.contains(id))
+                .any(|id| dirty.contains(id) || removed.contains(id))
     })
 }
 

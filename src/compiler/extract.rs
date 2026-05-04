@@ -10,8 +10,6 @@ use typst::introspection::{Introspector, MetadataElem};
 use typst::syntax::Span;
 use typst_html::{HtmlAttr, HtmlDocument, HtmlNode, HtmlTag};
 
-use crate::compiler::NodeEntry;
-
 use super::{Metadata, Node};
 
 const HTML_MESSAGE: &str = "html export is under active development and incomplete";
@@ -29,9 +27,13 @@ const WB_TRANSCLUDE_MISSING_COUNTER: &str = "wb-transclude is missing a counter 
 const LINK_MISSING_COUNTER: &str = "link is missing a data-counter attribute";
 const BUG_NO_SPAN_FOR_COUNTER: &str = "bug: no span found for node counter";
 
-// Rename entry to node everywhere
-
-pub type NodeOutput = (String, NodeEntry<String>);
+#[derive(Clone, Debug)]
+pub struct NodeOutput {
+    pub identifier: String,
+    pub node: Node,
+    pub transclusions: EcoVec<String>,
+    pub links: EcoVec<String>,
+}
 
 /// Compiles a source file and extracts its nodes.
 pub fn compile<W: World>(world: &W) -> Warned<Result<Vec<NodeOutput>, EcoVec<SourceDiagnostic>>> {
@@ -116,7 +118,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
     // Process subnodes deepest-first: reversed pre-order ensures a
     // nested subnode is always processed before its parent subnode.
     for subnode in document.select("wb-subnode").iter().rev() {
-        let Some((node_counter, (identifier, entry))) = extract_node_content(
+        let Some((node_counter, output)) = extract_node_content(
             &subnode,
             true,
             &spans,
@@ -135,7 +137,7 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
             }
             None => {
                 errors.push(SourceDiagnostic::error(
-                    entry.node.span,
+                    output.node.span,
                     WB_SUBNODE_MISSING_TRANSCLUDE,
                 ));
                 continue;
@@ -148,19 +150,20 @@ fn extract(output: FileOutput) -> Result<Vec<NodeOutput>, EcoVec<SourceDiagnosti
                 .checked_add(1)
                 .expect("transclusion counter overflow");
 
-            if !entry.node.node_metadata.is_empty() {
+            if !output.node.node_metadata.is_empty() {
                 metadata
                     .transclusion
-                    .insert(counter, entry.node.node_metadata.clone());
+                    .insert(counter, output.node.node_metadata.clone());
             }
             subnode.replace_with_html(format!(
-                r#"<wb-transclude identifier="{identifier}" counter="{counter}"></wb-transclude>"#
+                r#"<wb-transclude identifier="{}" counter="{counter}"></wb-transclude>"#,
+                output.identifier,
             ));
         } else {
             subnode.remove();
         }
 
-        nodes.push((node_counter, (identifier, entry)));
+        nodes.push((node_counter, output));
     }
 
     // Extract the wb-node after subnodes have been replaced/removed.
@@ -272,8 +275,6 @@ fn extract_node_content(
         return None;
     }
     let span = spans.get(&counter).copied().expect(BUG_NO_SPAN_FOR_COUNTER);
-    // TODO: Fix if this doesn't work.
-    let file_id = span.id().expect("Span should have FileId");
 
     let node_metadata = metadata.node.remove(&counter).unwrap_or_default();
 
@@ -300,23 +301,20 @@ fn extract_node_content(
 
     Some((
         counter,
-        (
+        NodeOutput {
             identifier,
-            NodeEntry {
-                node: Node {
-                    body_html,
-                    title,
-                    title_text,
-                    file_id,
-                    span,
-                    node_metadata,
-                    transclusion_metadata,
-                    link_metadata,
-                },
-                transclusions,
-                links,
+            node: Node {
+                body_html,
+                title,
+                title_text,
+                span,
+                node_metadata,
+                transclusion_metadata,
+                link_metadata,
             },
-        ),
+            transclusions,
+            links,
+        },
     ))
 }
 
@@ -1381,7 +1379,7 @@ mod tests {
             prop_assert_eq!(
                 actual_nodes
                     .iter()
-                    .map(|(identifier, _)| identifier.as_str())
+                    .map(|output| output.identifier.as_str())
                     .collect::<Vec<_>>(),
                 expected_nodes
                     .iter()
@@ -1394,24 +1392,24 @@ mod tests {
 
             for (actual, expected) in actual_nodes.iter().zip(expected_nodes) {
 
-                prop_assert_eq!(&actual.0, &expected.identifier);
-                prop_assert_eq!(&actual.1.node.title, &expected.title);
-                prop_assert_eq!(&actual.1.node.title_text, &expected.title);
-                prop_assert_eq!(&actual.1.node.node_metadata, &expected.node_metadata);
-                prop_assert_eq!(&actual.1.transclusions, &expected.transclusions);
-                prop_assert_eq!(&actual.1.links, &expected.links);
-                prop_assert_eq!(&actual.1.node.transclusion_metadata, &expected.transclusion_metadata);
-                prop_assert_eq!(&actual.1.node.link_metadata, &expected.link_metadata);
+                prop_assert_eq!(&actual.identifier, &expected.identifier);
+                prop_assert_eq!(&actual.node.title, &expected.title);
+                prop_assert_eq!(&actual.node.title_text, &expected.title);
+                prop_assert_eq!(&actual.node.node_metadata, &expected.node_metadata);
+                prop_assert_eq!(&actual.transclusions, &expected.transclusions);
+                prop_assert_eq!(&actual.links, &expected.links);
+                prop_assert_eq!(&actual.node.transclusion_metadata, &expected.transclusion_metadata);
+                prop_assert_eq!(&actual.node.link_metadata, &expected.link_metadata);
 
-                prop_assert!(actual.1.node.transclusion_metadata.values().all(|m| !m.is_empty()));
-                prop_assert!(actual.1.node.link_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.node.transclusion_metadata.values().all(|m| !m.is_empty()));
+                prop_assert!(actual.node.link_metadata.values().all(|m| !m.is_empty()));
 
-                let document = Document::from(actual.1.node.body_html.as_str());
+                let document = Document::from(actual.node.body_html.as_str());
 
                 prop_assert!(document.select("wb-subnode").iter().next().is_none());
                 prop_assert!(document.select("wb-title").iter().next().is_none());
 
-                check_body_html(&counter_to_node[&expected.counter], &actual.1.node.body_html)?;
+                check_body_html(&counter_to_node[&expected.counter], &actual.node.body_html)?;
             }
         }
 
@@ -1578,7 +1576,7 @@ mod tests {
             output.html = document.html().to_string();
 
             let actual = extract(output).unwrap();
-            let identifiers: Vec<&str> = actual.iter().map(|node| node.0.as_str()).collect();
+            let identifiers: Vec<&str> = actual.iter().map(|output| output.identifier.as_str()).collect();
             for target_id in &picked[..k] {
                 prop_assert_eq!(
                     identifiers.iter().filter(|&&id| id == target_id).count(),

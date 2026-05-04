@@ -1,16 +1,15 @@
 use std::{collections::HashMap, fmt::Write};
 
 use ecow::EcoVec;
-use typst_syntax::{FileId, Span};
+use typst_syntax::Span;
 
-use crate::compiler::{Metadata, Node, NodeEntry, extract::NodeOutput};
+use crate::compiler::{Metadata, Node, extract::NodeOutput};
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
     pub identifier: MockNodeIdentifier,
     pub title: String,
     pub body: String,
-    pub file_id: FileId,
     pub span: Span,
     pub metadata: Metadata,
     pub transclusions: Vec<MockTransclusion>,
@@ -74,12 +73,12 @@ impl From<MockNode> for NodeOutput {
             links.push(link.target.0.to_string());
         }
 
-        let entry = NodeEntry {
+        NodeOutput {
+            identifier: node.identifier.0.to_string(),
             node: Node {
                 body_html,
                 title: node.title.clone(),
                 title_text: node.title,
-                file_id: node.file_id,
                 span: node.span,
                 node_metadata: node.metadata,
                 transclusion_metadata,
@@ -87,8 +86,6 @@ impl From<MockNode> for NodeOutput {
             },
             transclusions,
             links,
-        };
-
-        (node.identifier.0.to_string(), entry)
+        }
     }
 }

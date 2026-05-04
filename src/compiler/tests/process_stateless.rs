@@ -49,7 +49,7 @@ pub fn process_stateless(
                     compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
                 }
                 for node_output in file_nodes {
-                    let node_id = interner.intern(node_output.0.as_str());
+                    let node_id = interner.intern(node_output.identifier.as_str());
                     occurrences
                         .entry(node_id)
                         .or_default()
@@ -66,19 +66,19 @@ pub fn process_stateless(
         assert!(!sources.is_empty());
 
         if sources.len() == 1 {
-            let (file_id, (_, entry)) = sources.pop().expect("len checked");
-            for transclusion_id in entry
+            let (file_id, output) = sources.pop().expect("len checked");
+            for transclusion_id in output
                 .transclusions
                 .iter()
                 .map(|t| interner.intern(t.as_str()))
             {
                 transclusions.add_edge(node_id, transclusion_id, ());
             }
-            for link_id in entry.links.iter().map(|l| interner.intern(l.as_str())) {
+            for link_id in output.links.iter().map(|l| interner.intern(l.as_str())) {
                 links.add_edge(node_id, link_id, ());
             }
             node_to_file.insert(node_id, file_id);
-            nodes.insert(node_id, entry.node);
+            nodes.insert(node_id, output.node);
         } else {
             let name = interner.name(node_id);
             for (file_id, _) in sources {
