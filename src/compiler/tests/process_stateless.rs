@@ -34,7 +34,7 @@ pub fn process_stateless(
     let mut interner = NodeInterner::default();
     let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
     let mut transclusions: DiGraphMap<NodeId, ()> = DiGraphMap::new();
-    let mut nodes: HashMap<NodeId, Node<NodeId>> = HashMap::new();
+    let mut nodes: HashMap<NodeId, Node> = HashMap::new();
     let mut node_to_file: HashMap<NodeId, FileId> = HashMap::new();
     let mut compile_diagnostics: CompileDiagnostics = HashMap::new();
     let mut process_diagnostics: ProcessDiagnostics = HashMap::new();
@@ -49,7 +49,7 @@ pub fn process_stateless(
                     compile_diagnostics.insert(file_id, (warnings, EcoVec::new()));
                 }
                 for node_output in file_nodes {
-                    let node_id = interner.intern(node_output.identifier.as_str());
+                    let node_id = interner.intern(node_output.0.as_str());
                     occurrences
                         .entry(node_id)
                         .or_default()
@@ -66,23 +66,19 @@ pub fn process_stateless(
         assert!(!sources.is_empty());
 
         if sources.len() == 1 {
-            let (file_id, node_output) = sources.pop().expect("len checked");
-            for transclusion_id in node_output
+            let (file_id, (_, entry)) = sources.pop().expect("len checked");
+            for transclusion_id in entry
                 .transclusions
                 .iter()
                 .map(|t| interner.intern(t.as_str()))
             {
                 transclusions.add_edge(node_id, transclusion_id, ());
             }
-            for link_id in node_output
-                .links
-                .iter()
-                .map(|l| interner.intern(l.as_str()))
-            {
+            for link_id in entry.links.iter().map(|l| interner.intern(l.as_str())) {
                 links.add_edge(node_id, link_id, ());
             }
             node_to_file.insert(node_id, file_id);
-            nodes.insert(node_id, node_output.entry);
+            nodes.insert(node_id, entry.node);
         } else {
             let name = interner.name(node_id);
             for (file_id, _) in sources {
@@ -179,7 +175,7 @@ pub fn process_stateless(
     let mut rendered_bodies: HashMap<NodeId, RenderBody> = HashMap::new();
     let mut rendered_backmatters: HashMap<NodeId, RenderBackmatter> = HashMap::new();
 
-    // TODO: We're reusing the `build_*` utility functions in the test code,
+    // TODO: We're reusing the `*_input` utility functions in the test code,
     // which we're not catching any bugs in those helpers. We should probably
     // explicitly refactor this last code into a separate component which we
     // test on its own, similar to how we did for the extraction code.
@@ -189,27 +185,38 @@ pub fn process_stateless(
     for &id in &render_order {
         let name = interner.name(id);
 
-        let rendered_body =
-            renderer.render_body(build_body_input(id, &nodes, &rendered_bodies, &interner))?;
+        let rendered_body = renderer.render_body(body_input(
+            |id| nodes_helper(&nodes, id),
+            &rendered_bodies,
+            &interner,
+            id,
+        ))?;
         rendered_bodies.insert(id, rendered_body);
 
         let backmatter = collect_backmatter(id, &links, &transclusions);
-        let rendered_backmatter =
-            renderer.render_backmatter(build_backmatter_input(&nodes, &backmatter, &interner))?;
+        let rendered_backmatter = renderer.render_backmatter(backmatter_input(
+            |id| nodes_helper(&nodes, id),
+            &backmatter,
+            &interner,
+        ))?;
         rendered_backmatters.insert(id, rendered_backmatter);
 
-        let rendered_node = renderer.render_node(build_node_input(
-            id,
-            &nodes,
+        let rendered_node = renderer.render_node(node_input(
+            |id| nodes_helper(&nodes, id),
             &rendered_bodies,
             &rendered_backmatters,
             &interner,
+            id,
         ))?;
 
         output.insert(name.to_owned(), rendered_node);
     }
 
-    Ok((output, compile_diagnostics, process_diagnostics))
+    return Ok((output, compile_diagnostics, process_diagnostics));
+
+    fn nodes_helper(nodes: &HashMap<NodeId, Node>, node_id: NodeId) -> Option<&Node> {
+        nodes.get(&node_id)
+    }
 }
 
 fn collect_backmatter(

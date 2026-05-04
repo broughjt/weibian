@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Write};
 use ecow::EcoVec;
 use typst_syntax::{FileId, Span};
 
-use crate::compiler::{Metadata, Node, extract::NodeOutput};
+use crate::compiler::{Metadata, Node, NodeEntry, extract::NodeOutput};
 
 #[derive(Debug, Clone)]
 pub struct MockNode {
@@ -74,17 +74,19 @@ impl From<MockNode> for NodeOutput {
             links.push(link.target.0.to_string());
         }
 
-        let entry = Node {
-            body_html,
-            title: node.title.clone(),
-            title_text: node.title,
-            file_id: node.file_id,
-            span: node.span,
-            node_metadata: node.metadata,
+        let entry = NodeEntry {
+            node: Node {
+                body_html,
+                title: node.title.clone(),
+                title_text: node.title,
+                file_id: node.file_id,
+                span: node.span,
+                node_metadata: node.metadata,
+                transclusion_metadata,
+                link_metadata,
+            },
             transclusions,
-            transclusion_metadata,
             links,
-            link_metadata,
         };
 
         (node.identifier.0.to_string(), entry)
