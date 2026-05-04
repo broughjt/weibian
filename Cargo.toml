@@ -8,26 +8,25 @@ name = "wb"
 path = "src/main.rs"
 
 [dependencies]
-datafrog = "2"
-petgraph = { version = "0.6", default-features = false, features = ["graphmap"] }
+petgraph = { version = "0.8", default-features = false, features = ["graphmap", "std"] }
 anyhow = "1.0.102"
 comemo = "0.5.1"
-notify-debouncer-full = "0.6.0"
-clap = { version = "4.5.40", features = ["derive", "env"] }
-ecow = "0.2.5"
-figment = { version = "0.10.8", features = ["toml"] }
-globset = "0.4.16"
-jiff = "0.2.23"
-serde = { version = "1.0.210", features = ["derive"] }
-typst = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19" }
-typst-html = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19" }
-typst-kit = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19", features = ["system-files", "scan-fonts", "embedded-fonts", "emit-diagnostics", "system-downloader", "vendor-openssl"] }
-typst-syntax = { git = "https://github.com/typst/typst", rev = "8626c05abceea8514cbbb4eabcf1a77cf70bad19" }
+notify-debouncer-full = "0.7.0"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+ecow = "0.2.6"
+figment = { version = "0.10.19", features = ["toml"] }
+globset = "0.4.18"
+jiff = "0.2.24"
+serde = { version = "1.0.228", features = ["derive"] }
+typst = { git = "https://github.com/typst/typst", rev = "e71382cfa6e934e81ec15ab4f4c282025d4acb62" }
+typst-html = { git = "https://github.com/typst/typst", rev = "e71382cfa6e934e81ec15ab4f4c282025d4acb62" }
+typst-kit = { git = "https://github.com/typst/typst", rev = "e71382cfa6e934e81ec15ab4f4c282025d4acb62", features = ["system-files", "scan-fonts", "embedded-fonts", "emit-diagnostics", "system-downloader", "vendor-openssl"] }
+typst-syntax = { git = "https://github.com/typst/typst", rev = "e71382cfa6e934e81ec15ab4f4c282025d4acb62" }
 termcolor = "1.4.1"
 walkdir = "2.5.0"
-dom_query = "0.26.0"
+dom_query = "0.27.0"
 minijinja = "2"
 
 [dev-dependencies]
 proptest = "1"
-proptest-state-machine = "0.3"
+proptest-state-machine = "0.8"

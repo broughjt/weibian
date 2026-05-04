@@ -35,7 +35,11 @@
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
-          packages = with pkgs; [ rust-analyzer ];
+          packages = with pkgs; [
+            rust-analyzer
+            cargo-edit
+            cargo-machete
+          ];
         };
 
         checks = {
