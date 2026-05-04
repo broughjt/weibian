@@ -43,12 +43,25 @@ pub fn run_batched<T: StateMachineTestBatched>(
     batch_sizes: Vec<usize>,
 ) {
     let batches = {
-        let mut transitions = transitions.into_iter();
-        batch_sizes
+        let mut transitions = transitions.into_iter().peekable();
+        let batches = batch_sizes
             .into_iter()
-            .map(|size| transitions.by_ref().take(size).collect::<Vec<_>>())
-            .take_while(|batch| !batch.is_empty())
-            .collect::<Vec<Vec<<T::Reference as ReferenceStateMachine>::Transition>>>()
+            .map_while(|size| {
+                assert!(size > 0, "batch sizes must be positive");
+
+                transitions
+                    .peek()
+                    .is_some()
+                    .then(|| transitions.by_ref().take(size).collect::<Vec<_>>())
+            })
+            .collect::<Vec<Vec<<T::Reference as ReferenceStateMachine>::Transition>>>();
+
+        assert!(
+            transitions.peek().is_none(),
+            "batch sizes did not cover all transitions"
+        );
+
+        batches
     };
 
     let mut implementation_state = T::init_test(&specification_state);
