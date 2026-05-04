@@ -103,7 +103,9 @@ pub trait StateMachineTestCompared {
     fn check(
         implementation_state: &Self::Implementation,
         specification_state: &<Self::Specification as ReferenceStateMachine>::State,
-    );
+    ) {
+        let _ = (implementation_state, specification_state);
+    }
 }
 
 pub fn run_compared<T: StateMachineTestCompared>(
