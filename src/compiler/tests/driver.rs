@@ -14,7 +14,7 @@ pub fn run_sequential<T: StateMachineTest>(
 
     T::check_invariants(&implementation_state, &specification_state);
 
-    for transition in transitions.into_iter() {
+    for transition in transitions {
         if let Some(seen_counter) = seen_counter.as_mut() {
             seen_counter.fetch_add(1, atomic::Ordering::SeqCst);
         }
@@ -83,4 +83,55 @@ pub fn run_batched<T: StateMachineTestBatched>(
     }
 
     T::teardown(implementation_state, specification_state);
+}
+
+pub trait StateMachineTestCompared {
+    type Implementation;
+    type Specification: ReferenceStateMachine;
+
+    fn new(
+        specification_state: &<Self::Specification as ReferenceStateMachine>::State,
+    ) -> Self::Implementation;
+
+    fn apply(
+        implementation_state: Self::Implementation,
+        specification_state_before: &<Self::Specification as ReferenceStateMachine>::State,
+        specification_state_after: &<Self::Specification as ReferenceStateMachine>::State,
+        transition: <Self::Specification as ReferenceStateMachine>::Transition,
+    ) -> Self::Implementation;
+
+    fn check(
+        implementation_state: &Self::Implementation,
+        specification_state: &<Self::Specification as ReferenceStateMachine>::State,
+    );
+}
+
+pub fn run_compared<T: StateMachineTestCompared>(
+    mut specification_state: <T::Specification as ReferenceStateMachine>::State,
+    transitions: Vec<<T::Specification as ReferenceStateMachine>::Transition>,
+    mut seen_counter: Option<Arc<AtomicUsize>>,
+) {
+    let mut implementation_state = T::new(&specification_state);
+
+    T::check(&implementation_state, &specification_state);
+
+    for transition in transitions {
+        if let Some(seen_counter) = seen_counter.as_mut() {
+            seen_counter.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+
+        let specification_state_next = <T::Specification as ReferenceStateMachine>::apply(
+            specification_state.clone(),
+            &transition,
+        );
+        implementation_state = T::apply(
+            implementation_state,
+            &specification_state,
+            &specification_state_next,
+            transition,
+        );
+        specification_state = specification_state_next;
+
+        T::check(&implementation_state, &specification_state);
+    }
 }
