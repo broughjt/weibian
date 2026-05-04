@@ -172,10 +172,14 @@ impl<T, U> Compiler<T, U> {
         let mut links: DiGraphMap<NodeId, ()> = DiGraphMap::new();
         let mut deletes: HashSet<String> = HashSet::new();
 
-        // Partition into singletons (renderable) and duplicates (unrenderable +
-        // diagnostic). Edges only flow from singletons; duplicates appear as
-        // dangling targets to anything that referenced them.
+        // Partition into singletons and duplicates. Add singletons to the
+        // transclusion and edges graphs, add duplicates to delete list.
         for (&node_id, entries) in &self.nodes {
+            assert!(
+                !entries.is_empty(),
+                "All entries in `self.nodes` are non-empty"
+            );
+
             if entries.len() == 1 {
                 let entry = &entries[0];
                 for &target in &entry.transclusions {
@@ -192,28 +196,15 @@ impl<T, U> Compiler<T, U> {
                         .or_default()
                         .push(duplicate_node_identifier_diagnostic(&name));
                 }
-            }
-        }
 
-        // Newly-duplicated ids that had been rendered as singletons need their
-        // output deleted and their caches evicted.
-        let duplicate_ids: Vec<NodeId> = self
-            .nodes
-            .iter()
-            .filter(|(_, entries)| entries.len() > 1)
-            .map(|(&id, _)| id)
-            .collect();
-        for id in duplicate_ids {
-            if self.rendered_bodies.remove(&id).is_some() {
-                deletes.insert(self.interner.name(id).to_owned());
+                // Newly-duplicated ids that had been rendered as singletons need their
+                // output deleted and their caches evicted.
+                deletes.insert(name);
             }
-            self.rendered_backmatters.remove(&id);
-            self.backmatters.remove(&id);
         }
 
         let is_singleton = |id: NodeId| self.nodes.get(&id).map(|v| v.len() == 1).unwrap_or(false);
 
-        // Dangling diagnostics: transclusion/link targets that aren't singletons.
         for (source, destination, _) in transclusions
             .all_edges()
             .filter(|&(_, destination, _)| !is_singleton(destination))
@@ -241,7 +232,7 @@ impl<T, U> Compiler<T, U> {
         let mut backmatter_affected: HashSet<NodeId> = HashSet::new();
         let mut unrenderable: HashSet<NodeId> = HashSet::new();
         let mut outlinks_accumulator: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-        let mut render_order: Vec<NodeId> = Vec::new();
+        let mut render_plan: Vec<RenderItem> = Vec::new();
 
         let sccs = tarjan_scc(&transclusions);
 
@@ -250,9 +241,7 @@ impl<T, U> Compiler<T, U> {
             let is_cyclic = scc.len() > 1 || transclusions.contains_edge(id, id);
 
             if is_cyclic {
-                // Treat the whole SCC atomically: if any member is dirty, or
-                // any cross-SCC transclusion target is body_affected or
-                // removed, every member is body_affected.
+                // Why this mess?
                 let scc_set: HashSet<NodeId> = scc.iter().copied().collect();
                 let any_affected = scc.iter().any(|&m| dirty.contains(&m))
                     || scc
@@ -271,16 +260,17 @@ impl<T, U> Compiler<T, U> {
 
                 unrenderable.extend(scc.iter().copied());
 
-                for (file_id, diag) in cycle_diagnostics(scc.iter().map(|&id| {
-                    let file_id = self.nodes[&id][0].file_id;
-                    (file_id, self.interner.name(id))
-                })) {
+                for (file_id, diagnostic) in cycle_diagnostics(
+                    scc.iter()
+                        .map(|&id| (self.nodes[&id][0].file_id, self.interner.name(id))),
+                ) {
                     self.process_diagnostics
                         .entry(file_id)
                         .or_default()
-                        .push(diag);
+                        .push(diagnostic);
                 }
             } else {
+                // Why do we need links?
                 let is_body_affected = dirty.contains(&id)
                     || transclusions
                         .neighbors(id)
@@ -300,6 +290,7 @@ impl<T, U> Compiler<T, U> {
                 } else if is_singleton(id) {
                     let new_backmatter =
                         collect_backmatter(id, &links, &transclusions, &outlinks_accumulator);
+                    // TODO: Why clone?
                     outlinks_accumulator.insert(id, new_backmatter.outlinks.clone());
 
                     if should_backmatter_render(
@@ -313,7 +304,11 @@ impl<T, U> Compiler<T, U> {
                     }
 
                     if body_affected.contains(&id) || backmatter_affected.contains(&id) {
-                        render_order.push(id);
+                        render_plan.push(RenderItem {
+                            node_id: id,
+                            needs_backmatter: backmatter_affected.contains(&id),
+                            needs_body: body_affected.contains(&id),
+                        });
                     }
                 }
             }
@@ -322,12 +317,12 @@ impl<T, U> Compiler<T, U> {
         // Singletons not present in the transclusion graph (no edges in or
         // out): handled separately because tarjan_scc only returns nodes that
         // appear in the graph.
-        let isolated: Vec<NodeId> = self
+        let isolated = self
             .nodes
             .iter()
             .filter(|(id, entries)| entries.len() == 1 && !transclusions.contains_node(**id))
-            .map(|(&id, _)| id)
-            .collect();
+            .map(|(id, _)| id)
+            .copied();
         for id in isolated {
             if dirty.contains(&id)
                 || links
@@ -351,27 +346,23 @@ impl<T, U> Compiler<T, U> {
             }
 
             if body_affected.contains(&id) || backmatter_affected.contains(&id) {
-                render_order.push(id);
+                render_plan.push(RenderItem {
+                    node_id: id,
+                    needs_backmatter: backmatter_affected.contains(&id),
+                    needs_body: body_affected.contains(&id),
+                });
             }
         }
 
-        let render_plan: RenderPlan = render_order
-            .iter()
-            .map(|&node_id| RenderItem {
-                node_id,
-                needs_body: body_affected.contains(&node_id),
-                needs_backmatter: backmatter_affected.contains(&node_id),
-            })
-            .collect();
-
-        for &id in &removed {
-            deletes.insert(self.interner.name(id).to_owned());
-            self.rendered_bodies.remove(&id);
-            self.rendered_backmatters.remove(&id);
-            self.backmatters.remove(&id);
-        }
-        for &id in unrenderable.intersection(&body_affected) {
-            deletes.insert(self.interner.name(id).to_owned());
+        deletes.extend(
+            removed
+                .iter()
+                .chain(unrenderable.intersection(&body_affected))
+                .map(|&id| self.interner.name(id).to_string()),
+        );
+        // TODO: This sucks
+        for identifier in &deletes {
+            let id = self.interner.intern(identifier);
             self.rendered_bodies.remove(&id);
             self.rendered_backmatters.remove(&id);
             self.backmatters.remove(&id);
