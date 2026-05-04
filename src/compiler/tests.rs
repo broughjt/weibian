@@ -43,46 +43,50 @@ struct IncrementalCompiler {
     filesystem: HashMap<String, RenderNode>,
 }
 
+impl IncrementalCompiler {
+    fn apply_transition(&mut self, specification_state: &State, transition: &Transition) {
+        let file_id = transition.file_id();
+
+        if matches!(transition, Transition::RemoveFile(_)) {
+            self.compiler.remove(file_id);
+        } else {
+            self.compiler
+                ._update(file_id, specification_state.compile_file(file_id));
+        }
+    }
+}
+
 impl StateMachineTest for IncrementalMatchesStateless {
     type SystemUnderTest = IncrementalCompiler;
     type Reference = ReferenceCompiler;
 
     fn init_test(
-        _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        _specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest {
         IncrementalCompiler::default()
     }
 
     fn apply(
-        mut state: Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        mut implementation_state: Self::SystemUnderTest,
+        specification_state: &<Self::Reference as ReferenceStateMachine>::State,
         transition: <Self::Reference as ReferenceStateMachine>::Transition,
     ) -> Self::SystemUnderTest {
-        let file_id = transition.file_id();
+        implementation_state.apply_transition(specification_state, &transition);
 
-        if matches!(transition, Transition::RemoveFile(_)) {
-            state.compiler.remove(file_id);
-        } else {
-            // TODO: Write a test for this
-            state
-                .compiler
-                ._update(file_id, ref_state.compile_file(file_id));
-        }
-
-        let plan = state
+        let plan = implementation_state
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        apply_plan(plan, &mut state.filesystem);
+        apply_plan(plan, &mut implementation_state.filesystem);
 
-        state
+        implementation_state
     }
 
     fn check_invariants(
-        state: &Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        implementation_state: &Self::SystemUnderTest,
+        specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        assert_matches_stateless(state, ref_state);
+        assert_matches_stateless(implementation_state, specification_state);
     }
 }
 
@@ -93,34 +97,26 @@ impl StateMachineTest for IncrementalMatchesStatelessBatched {
     type Reference = ReferenceCompiler;
 
     fn init_test(
-        _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        _specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest {
         IncrementalCompiler::default()
     }
 
     fn apply(
-        mut state: Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        mut implementation_state: Self::SystemUnderTest,
+        specification_state: &<Self::Reference as ReferenceStateMachine>::State,
         transition: <Self::Reference as ReferenceStateMachine>::Transition,
     ) -> Self::SystemUnderTest {
-        let file_id = transition.file_id();
+        implementation_state.apply_transition(specification_state, &transition);
 
-        if matches!(transition, Transition::RemoveFile(_)) {
-            state.compiler.remove(file_id);
-        } else {
-            state
-                .compiler
-                ._update(file_id, ref_state.compile_file(file_id));
-        }
-
-        state
+        implementation_state
     }
 
     fn check_invariants(
-        state: &Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        implementation_state: &Self::SystemUnderTest,
+        specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        assert_matches_stateless(state, ref_state);
+        assert_matches_stateless(implementation_state, specification_state);
     }
 }
 
@@ -157,25 +153,19 @@ impl StateMachineTestCompared for OutputPlanDeletesMatchStatelessDifference {
         specification_state_after: &<Self::Specification as ReferenceStateMachine>::State,
         transition: <Self::Specification as ReferenceStateMachine>::Transition,
     ) -> Self::Implementation {
-        apply_transition_to_incremental(
-            &mut implementation_state,
-            specification_state_after,
-            &transition,
-        );
+        implementation_state.apply_transition(specification_state_after, &transition);
 
         let plan = implementation_state
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        let (previous_output, _, _) = process_stateless(specification_state_before)
+        let (output_before, _, _) = process_stateless(specification_state_before)
             .expect("stateless reference must succeed");
-        let (expected_output, _, _) =
+        let (output_after, _, _) =
             process_stateless(specification_state_after).expect("stateless reference must succeed");
-        let expected_deletes: HashSet<String> = previous_output
-            .keys()
-            .filter(|name| !expected_output.contains_key(*name))
-            .cloned()
-            .collect();
+        let keys_before: HashSet<String> = output_before.keys().cloned().collect();
+        let keys_after: HashSet<String> = output_after.keys().cloned().collect();
+        let expected_deletes = &keys_before - &keys_after;
 
         assert_eq!(
             plan.deletes, expected_deletes,
@@ -206,23 +196,20 @@ impl StateMachineTestCompared for OutputPlanWritesChangedOutputs {
         specification_state_after: &<Self::Specification as ReferenceStateMachine>::State,
         transition: <Self::Specification as ReferenceStateMachine>::Transition,
     ) -> Self::Implementation {
-        apply_transition_to_incremental(
-            &mut implementation_state,
-            specification_state_after,
-            &transition,
-        );
+        implementation_state.apply_transition(specification_state_after, &transition);
 
         let plan = implementation_state
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        let (previous_output, _, _) = process_stateless(specification_state_before)
+        let (output_before, _, _) = process_stateless(specification_state_before)
             .expect("stateless reference must succeed");
-        let (expected_output, _, _) =
+        let (output_after, _, _) =
             process_stateless(specification_state_after).expect("stateless reference must succeed");
-        let expected_writes: HashSet<String> = expected_output
+        // TODO: What's going on with the `name` thing?
+        let expected_writes: HashSet<String> = output_after
             .iter()
-            .filter(|(name, node)| previous_output.get(*name) != Some(*node))
+            .filter(|(name, node)| output_before.get(*name) != Some(*node))
             .map(|(name, _)| name.clone())
             .collect();
         let actual_writes: HashSet<String> = plan.writes.keys().cloned().collect();
@@ -245,64 +232,37 @@ impl StateMachineTestCompared for OutputPlanWritesChangedOutputs {
 
 struct OutputPlanWritesAndDeletesAreDisjoint;
 
-impl StateMachineTestCompared for OutputPlanWritesAndDeletesAreDisjoint {
-    type Implementation = IncrementalCompiler;
-    type Specification = ReferenceCompiler;
+impl StateMachineTest for OutputPlanWritesAndDeletesAreDisjoint {
+    type SystemUnderTest = IncrementalCompiler;
+    type Reference = ReferenceCompiler;
 
-    fn new(
-        _specification_state: &<Self::Specification as ReferenceStateMachine>::State,
-    ) -> Self::Implementation {
+    fn init_test(
+        _specification_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) -> Self::SystemUnderTest {
         IncrementalCompiler::default()
     }
 
     fn apply(
-        mut implementation_state: Self::Implementation,
-        _specification_state_before: &<Self::Specification as ReferenceStateMachine>::State,
-        specification_state_after: &<Self::Specification as ReferenceStateMachine>::State,
-        transition: <Self::Specification as ReferenceStateMachine>::Transition,
-    ) -> Self::Implementation {
-        apply_transition_to_incremental(
-            &mut implementation_state,
-            specification_state_after,
-            &transition,
-        );
+        mut implementation_state: Self::SystemUnderTest,
+        specification_state: &<Self::Reference as ReferenceStateMachine>::State,
+        transition: <Self::Reference as ReferenceStateMachine>::Transition,
+    ) -> Self::SystemUnderTest {
+        implementation_state.apply_transition(specification_state, &transition);
 
         let plan = implementation_state
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        let mut overlap: Vec<_> = plan
-            .writes
-            .keys()
-            .filter(|name| plan.deletes.contains(*name))
-            .cloned()
-            .collect();
-        overlap.sort();
+        let write_keys: HashSet<String> = plan.writes.keys().cloned().collect();
 
         assert!(
-            overlap.is_empty(),
-            "output plan writes and deletes should be disjoint, but both contained: {overlap:?}; transition: {transition:?}"
+            write_keys.is_disjoint(&plan.deletes),
+            "output plan writes and deletes should be disjoint; transition: {transition:?}"
         );
 
         apply_plan(plan, &mut implementation_state.filesystem);
 
         implementation_state
-    }
-}
-
-fn apply_transition_to_incremental(
-    incremental: &mut IncrementalCompiler,
-    ref_state: &State,
-    transition: &Transition,
-) {
-    let file_id = transition.file_id();
-
-    if matches!(transition, Transition::RemoveFile(_)) {
-        incremental.compiler.remove(file_id);
-    } else {
-        incremental
-            .compiler
-            ._update(file_id, ref_state.compile_file(file_id));
     }
 }
 
@@ -413,7 +373,7 @@ proptest! {
         (initial_state, transitions, seen_counter) in
             ReferenceCompiler::sequential_strategy(CONFIG.transitions.clone())
     ) {
-        run_compared::<OutputPlanWritesAndDeletesAreDisjoint>(
+        run_sequential::<OutputPlanWritesAndDeletesAreDisjoint>(
             initial_state,
             transitions,
             seen_counter,
