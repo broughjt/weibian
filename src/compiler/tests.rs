@@ -8,10 +8,7 @@ mod render;
 use std::{
     collections::HashMap,
     num::NonZeroU16,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 use ecow::EcoVec;
@@ -27,7 +24,7 @@ use crate::compiler::{
     CompileDiagnostics, Compiler, OutputPlan, ProcessDiagnostics,
     tests::{
         config::CONFIG,
-        driver::run_sequential,
+        driver::{StateMachineTestBatched, run_batched, run_sequential},
         model::{MockNode, MockNodeIdentifier},
         process_stateless::process_stateless,
         reference_compiler::{MockFile, MockNodeId, ReferenceCompiler, State, Transition, file_id},
@@ -115,44 +112,27 @@ impl StateMachineTest for IncrementalMatchesStatelessBatched {
 
         state
     }
+
+    fn check_invariants(
+        state: &Self::SystemUnderTest,
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) {
+        assert_matches_stateless(state, ref_state);
+    }
 }
 
-/// Custom runner mirroring `proptest_state_machine::test_sequential` but
-/// processing only at batch boundaries.
-fn run_batched(
-    initial_state: State,
-    transitions: Vec<Transition>,
-    mut seen_counter: Option<Arc<AtomicUsize>>,
-    batch_sizes: Vec<usize>,
-) {
-    let batches = {
-        let mut transitions = transitions.into_iter();
-        batch_sizes
-            .into_iter()
-            .map(|size| transitions.by_ref().take(size).collect::<Vec<_>>())
-            .take_while(|batch| !batch.is_empty())
-            .collect::<Vec<Vec<Transition>>>()
-    };
-
-    let mut ref_state = initial_state;
-    let mut sut = IncrementalMatchesStatelessBatched::init_test(&ref_state);
-
-    assert_matches_stateless(&sut, &ref_state);
-
-    for batch in batches {
-        for transition in batch {
-            if let Some(counter) = seen_counter.as_mut() {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-            ref_state = ReferenceCompiler::apply(ref_state, &transition);
-            sut = IncrementalMatchesStatelessBatched::apply(sut, &ref_state, transition);
-        }
-        let plan = sut
+impl StateMachineTestBatched for IncrementalMatchesStatelessBatched {
+    fn apply_batch(
+        mut implementation_state: Self::SystemUnderTest,
+        _specification_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) -> Self::SystemUnderTest {
+        let plan = implementation_state
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        apply_plan(plan, &mut sut.filesystem);
-        assert_matches_stateless(&sut, &ref_state);
+        apply_plan(plan, &mut implementation_state.filesystem);
+
+        implementation_state
     }
 }
 
@@ -251,7 +231,7 @@ proptest! {
             vec(CONFIG.batch.clone(), n)
         })
     ) {
-        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+        run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }
 
     #[test]
@@ -260,7 +240,7 @@ proptest! {
             Just(vec![*CONFIG.batch.end(); n])
         })
     ) {
-        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+        run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }
 
     #[test]
@@ -272,7 +252,7 @@ proptest! {
             )
         })
     ) {
-        run_batched(initial_state, transitions, seen_counter, batch_sizes);
+        run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }
 }
 
