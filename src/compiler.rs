@@ -15,6 +15,7 @@ use petgraph::graphmap::DiGraphMap;
 use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
+use typst_kit::diagnostics;
 
 use self::extract::NodeOutput;
 use self::render::{
@@ -236,13 +237,14 @@ impl<T, U> Compiler<T, U> {
                 .push(dangling_link_diagnostic(name));
         }
 
+        // TODO: Comment explaining this. Exists in previous versions in the git
+        // history, but some things have changed. Since they are going to change
+        // again soon, I'm not going to rewrite it right now.
+
         let mut body_affected = HashSet::new();
         let mut backmatter_affected = HashSet::new();
         let mut unrenderable = HashSet::new();
         let mut render_plan = Vec::new();
-
-        // Invariant:
-        // By the time a renderable node id is processed, every renderable transclusion target has an up-to-date entry in self.backmatters.
 
         let sccs = tarjan_scc(&transclusions);
 
@@ -251,6 +253,33 @@ impl<T, U> Compiler<T, U> {
             let is_cyclic = scc.len() > 1 || transclusions.contains_edge(node_id, node_id);
 
             if is_cyclic {
+                let members: HashSet<NodeId> = scc.iter().copied().collect();
+                let affected = members.iter().any(|&m| {
+                    dirty.contains(&m)
+                        || links
+                            .neighbors(m)
+                            .any(|l| dirty.contains(&l) || removed.contains(&l))
+                }) || members
+                    .iter()
+                    .flat_map(|&m| transclusions.neighbors(m))
+                    .filter(|t| !members.contains(t))
+                    .any(|t| body_affected.contains(&t) || removed.contains(&t));
+                if affected {
+                    body_affected.extend(members.iter());
+                }
+
+                unrenderable.extend(members.iter());
+
+                for (file_id, diagnostic) in cycle_diagnostics(
+                    members
+                        .iter()
+                        .map(|node_id| (nodes[node_id][0].file_id, interner.name(*node_id))),
+                ) {
+                    process_diagnostics
+                        .entry(file_id)
+                        .or_default()
+                        .push(diagnostic);
+                }
             } else {
                 // The rendered output of `render_body` can change if this node
                 // is dirty, if any nodes it transcludes are dirty or removed,
@@ -277,15 +306,26 @@ impl<T, U> Compiler<T, U> {
                     unrenderable.insert(node_id);
                 } else if is_singleton(node_id) {
                     let new_backmatter =
-                        collect_backmatter(node_id, &links, &transclusions, &backmatters);
-                    let old_backmatter = backmatters.insert(node_id, new_backmatter);
-
-                    if should_backmatter_render(
-                        old_backmatter.as_ref(),
-                        &new_backmatter,
-                        &dirty,
-                        &removed,
-                    ) {
+                        collect_backmatter(node_id, &links, &transclusions, backmatters);
+                    let should_backmatter_render = match backmatters.entry(node_id) {
+                        Entry::Occupied(mut entry) => {
+                            let old_backmatter = entry.get();
+                            let should_backmatter_render = old_backmatter != &new_backmatter
+                                || new_backmatter
+                                    .contexts
+                                    .iter()
+                                    .chain(new_backmatter.backlinks.iter())
+                                    .chain(new_backmatter.outlinks.iter())
+                                    .any(|id| dirty.contains(id) || removed.contains(id));
+                            entry.insert(new_backmatter);
+                            should_backmatter_render
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(new_backmatter);
+                            true
+                        }
+                    };
+                    if should_backmatter_render {
                         backmatter_affected.insert(node_id);
                     }
 
@@ -301,6 +341,24 @@ impl<T, U> Compiler<T, U> {
                     }
                 }
             }
+        }
+
+        // Singletons not present in the transclusion graph (no edges in or
+        // out): handled separately because tarjan_scc only returns nodes that
+        // appear in the graph.
+        let isolated = self
+            .nodes
+            .iter()
+            .filter(|(id, entries)| entries.len() == 1 && !transclusions.contains_node(**id))
+            .map(|(id, _)| id)
+            .copied();
+        for node_id in isolated {
+            let body_affected = dirty.contains(&node_id)
+                || links
+                    .neighbors(node_id)
+                    .any(|l| dirty.contains(&l) || removed.contains(&l));
+
+            let new_backmatter = collect_backmatter(node_id, &links, &transclusions, backmatters);
         }
 
         todo!()
@@ -590,23 +648,6 @@ fn collect_backmatter(
         backlinks,
         outlinks,
     }
-}
-
-fn should_backmatter_render(
-    option_old: Option<&Backmatter>,
-    new: &Backmatter,
-    dirty: &HashSet<NodeId>,
-    removed: &HashSet<NodeId>,
-) -> bool {
-    option_old.is_none_or(|old| {
-        old != new
-            || new
-                .contexts
-                .iter()
-                .chain(new.backlinks.iter())
-                .chain(new.outlinks.iter())
-                .any(|id| dirty.contains(id) || removed.contains(id))
-    })
 }
 
 fn body_input<'a, B>(
