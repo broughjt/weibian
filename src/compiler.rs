@@ -15,7 +15,6 @@ use petgraph::graphmap::DiGraphMap;
 use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::{FileId, Span};
-use typst_kit::diagnostics;
 
 use self::extract::NodeOutput;
 use self::render::{
@@ -244,6 +243,7 @@ impl<T, U> Compiler<T, U> {
         let mut body_affected = HashSet::new();
         let mut backmatter_affected = HashSet::new();
         let mut unrenderable = HashSet::new();
+        let mut outputs = HashSet::new();
         let mut render_plan = Vec::new();
 
         let sccs = tarjan_scc(&transclusions);
@@ -301,7 +301,7 @@ impl<T, U> Compiler<T, U> {
 
                 if transclusions
                     .neighbors(node_id)
-                    .any(|t| unrenderable.contains(&node_id))
+                    .any(|t| unrenderable.contains(&t))
                 {
                     unrenderable.insert(node_id);
                 } else if is_singleton(node_id) {
@@ -331,6 +331,7 @@ impl<T, U> Compiler<T, U> {
                     let is_backmatter_affected = backmatter_affected.contains(&node_id);
 
                     if is_body_affected || is_backmatter_affected {
+                        outputs.insert(node_id);
                         render_plan.push(RenderItem {
                             node_id,
                             needs_body: is_body_affected,
@@ -344,8 +345,7 @@ impl<T, U> Compiler<T, U> {
         // Singletons not present in the transclusion graph (no edges in or
         // out): handled separately because tarjan_scc only returns nodes that
         // appear in the graph.
-        let isolated = self
-            .nodes
+        let isolated = nodes
             .iter()
             .filter(|(id, entries)| entries.len() == 1 && !transclusions.contains_node(**id))
             .map(|(id, _)| id)
@@ -371,6 +371,7 @@ impl<T, U> Compiler<T, U> {
             };
 
             if is_body_affected || is_backmatter_affected {
+                outputs.insert(node_id);
                 render_plan.push(RenderItem {
                     node_id,
                     needs_body: is_body_affected,
@@ -379,7 +380,14 @@ impl<T, U> Compiler<T, U> {
             }
         }
 
-        todo!()
+        let deletes: HashSet<String> = previous_outputs
+            .difference(&outputs)
+            .map(|node_id| interner.name(*node_id).to_owned())
+            .collect();
+
+        self.outputs = outputs;
+
+        (render_plan, deletes)
     }
 
     fn process_stage2<R>(
