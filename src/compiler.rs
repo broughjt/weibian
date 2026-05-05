@@ -243,6 +243,7 @@ impl<T, U> Compiler<T, U> {
         let mut body_affected = HashSet::new();
         let mut backmatter_affected = HashSet::new();
         let mut unrenderable = HashSet::new();
+        let mut outlinks_accumulator: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
         let mut render_plan = Vec::new();
 
         let sccs = tarjan_scc(&transclusions);
@@ -305,7 +306,8 @@ impl<T, U> Compiler<T, U> {
                     unrenderable.insert(node_id);
                 } else if is_singleton(node_id) {
                     let new_backmatter =
-                        collect_backmatter(node_id, &links, &transclusions, backmatters);
+                        collect_backmatter(node_id, &links, &transclusions, &outlinks_accumulator);
+                    outlinks_accumulator.insert(node_id, new_backmatter.outlinks.clone());
                     let is_backmatter_affected = match backmatters.entry(node_id) {
                         Entry::Occupied(mut entry) => {
                             let is_backmatter_affected = should_backmatter_render(
@@ -354,7 +356,9 @@ impl<T, U> Compiler<T, U> {
                     .neighbors(node_id)
                     .any(|l| dirty.contains(&l) || removed.contains(&l));
 
-            let new_backmatter = collect_backmatter(node_id, &links, &transclusions, backmatters);
+            let new_backmatter =
+                collect_backmatter(node_id, &links, &transclusions, &outlinks_accumulator);
+            outlinks_accumulator.insert(node_id, new_backmatter.outlinks.clone());
             let is_backmatter_affected = match backmatters.entry(node_id) {
                 Entry::Occupied(mut entry) => {
                     let is_backmatter_affected =
@@ -659,14 +663,11 @@ fn collect_backmatter(
     node_id: NodeId,
     links: &DiGraphMap<NodeId, ()>,
     transclusions: &DiGraphMap<NodeId, ()>,
-    backmatters: &HashMap<NodeId, Backmatter>,
+    outlinks_accumulator: &HashMap<NodeId, HashSet<NodeId>>,
 ) -> Backmatter {
     let mut outlinks: HashSet<NodeId> = links.neighbors(node_id).collect();
     for target in transclusions.neighbors(node_id) {
-        if let Some(target_outlinks) = backmatters
-            .get(&target)
-            .map(|backmatter| &backmatter.outlinks)
-        {
+        if let Some(target_outlinks) = outlinks_accumulator.get(&target) {
             outlinks.extend(target_outlinks.iter().copied());
         }
     }
