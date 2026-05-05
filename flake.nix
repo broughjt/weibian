@@ -23,6 +23,9 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
+          nativeBuildInputs = with pkgs; [
+            perl
+          ];
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         weibian = craneLib.buildPackage (commonArgs // {
