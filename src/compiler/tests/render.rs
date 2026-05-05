@@ -76,7 +76,7 @@ impl Render for MockRenderer {
                                     title: title.to_owned(),
                                     title_text: title_text.to_owned(),
                                     metadata: metadata.clone(),
-                                    body: Box::new(body.clone()),
+                                    body: body.clone(),
                                 }
                             }),
                         },
@@ -177,7 +177,7 @@ pub struct RenderResolvedTransclusion {
     pub title: String,
     pub title_text: String,
     pub metadata: Metadata,
-    pub body: Box<RenderBody>,
+    pub body: RenderBody,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

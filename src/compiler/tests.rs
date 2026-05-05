@@ -647,22 +647,17 @@ impl StateMachineTestCompared for OutputPlanWritesChangedOutputs {
             .expect("stateless reference must succeed");
         let (output_after, _, _) =
             process_stateless(specification_state_after).expect("stateless reference must succeed");
-        // TODO: What's going on with the `name` thing?
         let expected_writes: HashSet<String> = output_after
             .iter()
             .filter(|(name, node)| output_before.get(*name) != Some(*node))
-            .map(|(name, _)| name.clone())
-            .collect();
-        let actual_writes: HashSet<String> = plan.writes.keys().cloned().collect();
-        let mut missing: Vec<_> = expected_writes
-            .difference(&actual_writes)
+            .map(|(name, _)| name)
             .cloned()
             .collect();
-        missing.sort();
+        let actual_writes: HashSet<String> = plan.writes.keys().cloned().collect();
 
         assert!(
-            missing.is_empty(),
-            "output plan omitted writes for changed outputs: {missing:?}; transition: {transition:?}"
+            actual_writes.is_superset(&expected_writes),
+            "output plan omitted writes for changed outputs; transition: {transition:?}"
         );
 
         implementation_state.apply_plan(plan);
