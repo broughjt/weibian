@@ -215,7 +215,7 @@ impl<T, U> Compiler<T, U> {
 
         for (source, destination, _) in transclusions
             .all_edges()
-            .filter(|&(_, destination, _)| is_singleton(destination))
+            .filter(|&(_, destination, _)| !is_singleton(destination))
         {
             let file_id = nodes[&source][0].file_id;
             let name = interner.name(destination);
@@ -226,7 +226,7 @@ impl<T, U> Compiler<T, U> {
         }
         for (source, destination, _) in links
             .all_edges()
-            .filter(|&(_, destination, _)| is_singleton(destination))
+            .filter(|&(_, destination, _)| !is_singleton(destination))
         {
             let file_id = nodes[&source][0].file_id;
             let name = interner.name(destination);
