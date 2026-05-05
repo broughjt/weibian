@@ -60,6 +60,18 @@ proptest! {
     }
 
     #[test]
+    fn output_plan_deletes_superset_stateless_difference(
+        (initial_state, transitions, seen_counter) in
+            ReferenceCompiler::sequential_strategy(CONFIG.transitions.clone())
+    ) {
+        run_compared::<OutputPlanDeletesSupersetStatelessDifference>(
+            initial_state,
+            transitions,
+            seen_counter,
+        );
+    }
+
+    #[test]
     fn output_plan_writes_changed_outputs(
         (initial_state, transitions, seen_counter) in
             ReferenceCompiler::sequential_strategy(CONFIG.transitions.clone())
@@ -556,6 +568,49 @@ impl StateMachineTestCompared for OutputPlanDeletesMatchStatelessDifference {
         assert_eq!(
             plan.deletes, expected_deletes,
             "output plan deletes should be exactly the outputs present before the transition and absent after it; transition: {transition:?}"
+        );
+
+        implementation_state.apply_plan(plan);
+
+        implementation_state
+    }
+}
+
+struct OutputPlanDeletesSupersetStatelessDifference;
+
+impl StateMachineTestCompared for OutputPlanDeletesSupersetStatelessDifference {
+    type Implementation = IncrementalCompiler;
+    type Specification = ReferenceCompiler;
+
+    fn new(
+        _specification_state: &<Self::Specification as ReferenceStateMachine>::State,
+    ) -> Self::Implementation {
+        IncrementalCompiler::default()
+    }
+
+    fn apply(
+        mut implementation_state: Self::Implementation,
+        specification_state_before: &<Self::Specification as ReferenceStateMachine>::State,
+        specification_state_after: &<Self::Specification as ReferenceStateMachine>::State,
+        transition: <Self::Specification as ReferenceStateMachine>::Transition,
+    ) -> Self::Implementation {
+        implementation_state.apply_transition(specification_state_after, &transition);
+
+        let plan = implementation_state
+            .compiler
+            ._process(&MockRenderer)
+            .expect("bug: MockRenderer cannot fail");
+        let (output_before, _, _) = process_stateless(specification_state_before)
+            .expect("stateless reference must succeed");
+        let (output_after, _, _) =
+            process_stateless(specification_state_after).expect("stateless reference must succeed");
+        let keys_before: HashSet<String> = output_before.keys().cloned().collect();
+        let keys_after: HashSet<String> = output_after.keys().cloned().collect();
+        let expected_deletes = &keys_before - &keys_after;
+
+        assert!(
+            plan.deletes.is_superset(&expected_deletes),
+            "output plan omitted deletes for outputs present before the transition and absent after it; transition: {transition:?}"
         );
 
         implementation_state.apply_plan(plan);
