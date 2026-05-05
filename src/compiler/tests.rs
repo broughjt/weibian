@@ -8,7 +8,6 @@ mod render;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU16,
-    sync::{Arc, atomic::AtomicUsize},
 };
 
 use ecow::EcoVec;
@@ -25,8 +24,8 @@ use crate::compiler::{
     tests::{
         config::CONFIG,
         driver::{
-            StateMachineTestBatched, StateMachineTestCompared, run_batched, run_compared,
-            run_sequential,
+            StateMachineTestBatched, StateMachineTestCompared, batched_strategy, run_batched,
+            run_compared, run_sequential,
         },
         model::{MockNode, MockNodeIdentifier},
         process_stateless::process_stateless,
@@ -291,26 +290,6 @@ impl StateMachineTest for OutputPlanWritesAndDeletesAreDisjoint {
     }
 }
 
-/// Output of `ReferenceCompiler::sequential_strategy`: initial state, the
-/// generated transition sequence, and proptest's per-step seen-counter (used
-/// during shrinking to mark transitions that were actually applied).
-type StateMachineInput = (State, Vec<Transition>, Option<Arc<AtomicUsize>>);
-
-/// Strategy producing batched test inputs: the underlying state-machine
-/// strategy paired with a batch-size schedule of `batch_sizes_strategy(n)`,
-/// where `n` is the realized transition count.
-fn batched_strategy<S>(
-    batch_sizes_strategy: impl Fn(usize) -> S,
-) -> impl Strategy<Value = (StateMachineInput, Vec<usize>)>
-where
-    S: Strategy<Value = Vec<usize>>,
-{
-    ReferenceCompiler::sequential_strategy(CONFIG.transitions.clone()).prop_flat_map(move |u| {
-        let n = u.1.len();
-        (Just(u), batch_sizes_strategy(n))
-    })
-}
-
 fn diagnostic_sort_key(d: &SourceDiagnostic) -> (u8, &ecow::EcoString, std::num::NonZeroU64) {
     let severity = match d.severity {
         Severity::Error => 0,
@@ -394,30 +373,33 @@ proptest! {
 
     #[test]
     fn incremental_matches_stateless_batched_uniform(
-        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
-            vec(CONFIG.batch.clone(), n)
-        })
+        ((initial_state, transitions, seen_counter), batch_sizes) in
+            batched_strategy::<IncrementalMatchesStatelessBatched, _>(CONFIG.transitions.clone(), |n| {
+                vec(CONFIG.batch.clone(), n)
+            })
     ) {
         run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }
 
     #[test]
     fn incremental_matches_stateless_batched_max(
-        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
-            Just(vec![*CONFIG.batch.end(); n])
-        })
+        ((initial_state, transitions, seen_counter), batch_sizes) in
+            batched_strategy::<IncrementalMatchesStatelessBatched, _>(CONFIG.transitions.clone(), |n| {
+                Just(vec![*CONFIG.batch.end(); n])
+            })
     ) {
         run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }
 
     #[test]
     fn incremental_matches_stateless_batched_skewed_large(
-        ((initial_state, transitions, seen_counter), batch_sizes) in batched_strategy(|n| {
-            vec(
-                (CONFIG.batch.clone(), CONFIG.batch.clone()).prop_map(|(a, b)| a.max(b)),
-                n,
-            )
-        })
+        ((initial_state, transitions, seen_counter), batch_sizes) in
+            batched_strategy::<IncrementalMatchesStatelessBatched, _>(CONFIG.transitions.clone(), |n| {
+                vec(
+                    (CONFIG.batch.clone(), CONFIG.batch.clone()).prop_map(|(a, b)| a.max(b)),
+                    n,
+                )
+            })
     ) {
         run_batched::<IncrementalMatchesStatelessBatched>(initial_state, transitions, seen_counter, batch_sizes);
     }

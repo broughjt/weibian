@@ -3,6 +3,10 @@ use std::sync::{
     atomic::{self, AtomicUsize},
 };
 
+use proptest::{
+    collection::SizeRange,
+    prelude::{Just, Strategy},
+};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
 pub fn run_sequential<T: StateMachineTest>(
@@ -34,6 +38,34 @@ pub trait StateMachineTestBatched: StateMachineTest {
         implementation_state: Self::SystemUnderTest,
         specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest;
+}
+
+/// Output of `ReferenceStateMachine::sequential_strategy`: initial state, the
+/// generated transition sequence, and proptest's per-step seen-counter (used
+/// during shrinking to mark transitions that were actually applied).
+pub type StateMachineInput<T> = (
+    <<T as StateMachineTest>::Reference as ReferenceStateMachine>::State,
+    Vec<<<T as StateMachineTest>::Reference as ReferenceStateMachine>::Transition>,
+    Option<Arc<AtomicUsize>>,
+);
+
+/// Strategy producing batched test inputs: the underlying state-machine
+/// strategy paired with a batch-size schedule of `batch_sizes_strategy(n)`,
+/// where `n` is the realized transition count.
+pub fn batched_strategy<T, S>(
+    transitions: impl Into<SizeRange>,
+    batch_sizes_strategy: impl Fn(usize) -> S,
+) -> impl Strategy<Value = (StateMachineInput<T>, Vec<usize>)>
+where
+    T: StateMachineTestBatched,
+    S: Strategy<Value = Vec<usize>>,
+{
+    <T::Reference as ReferenceStateMachine>::sequential_strategy(transitions).prop_flat_map(
+        move |u| {
+            let n = u.1.len();
+            (Just(u), batch_sizes_strategy(n))
+        },
+    )
 }
 
 pub fn run_batched<T: StateMachineTestBatched>(
