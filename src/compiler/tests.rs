@@ -54,6 +54,31 @@ impl IncrementalCompiler {
                 ._update(file_id, specification_state.compile_file(file_id));
         }
     }
+
+    fn apply_plan(&mut self, plan: OutputPlan<RenderNode>) {
+        // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
+        for (name, node) in plan.writes {
+            self.filesystem.insert(name, node);
+        }
+        for name in plan.deletes {
+            self.filesystem.remove(&name);
+        }
+    }
+
+    fn assert_matches_stateless(&self, state: &State) {
+        let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
+            process_stateless(state).expect("stateless reference must succeed");
+
+        assert_eq!(self.filesystem, expected_output);
+        assert_eq!(
+            normalize_compile_diagnostics(self.compiler.compile_diagnostics()),
+            normalize_compile_diagnostics(&expected_compile_diagnostics),
+        );
+        assert_eq!(
+            normalize_process_diagnostics(self.compiler.process_diagnostics()),
+            normalize_process_diagnostics(&expected_process_diagnostics),
+        );
+    }
 }
 
 impl StateMachineTest for IncrementalMatchesStateless {
@@ -77,7 +102,7 @@ impl StateMachineTest for IncrementalMatchesStateless {
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        apply_plan(plan, &mut implementation_state.filesystem);
+        implementation_state.apply_plan(plan);
 
         implementation_state
     }
@@ -86,7 +111,7 @@ impl StateMachineTest for IncrementalMatchesStateless {
         implementation_state: &Self::SystemUnderTest,
         specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        assert_matches_stateless(implementation_state, specification_state);
+        implementation_state.assert_matches_stateless(specification_state);
     }
 }
 
@@ -116,7 +141,7 @@ impl StateMachineTest for IncrementalMatchesStatelessBatched {
         implementation_state: &Self::SystemUnderTest,
         specification_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
-        assert_matches_stateless(implementation_state, specification_state);
+        implementation_state.assert_matches_stateless(specification_state);
     }
 }
 
@@ -129,7 +154,7 @@ impl StateMachineTestBatched for IncrementalMatchesStatelessBatched {
             .compiler
             ._process(&MockRenderer)
             .expect("bug: MockRenderer cannot fail");
-        apply_plan(plan, &mut implementation_state.filesystem);
+        implementation_state.apply_plan(plan);
 
         implementation_state
     }
@@ -172,7 +197,7 @@ impl StateMachineTestCompared for OutputPlanDeletesMatchStatelessDifference {
             "output plan deletes should be exactly the outputs present before the transition and absent after it; transition: {transition:?}"
         );
 
-        apply_plan(plan, &mut implementation_state.filesystem);
+        implementation_state.apply_plan(plan);
 
         implementation_state
     }
@@ -224,7 +249,7 @@ impl StateMachineTestCompared for OutputPlanWritesChangedOutputs {
             "output plan omitted writes for changed outputs: {missing:?}; transition: {transition:?}"
         );
 
-        apply_plan(plan, &mut implementation_state.filesystem);
+        implementation_state.apply_plan(plan);
 
         implementation_state
     }
@@ -260,7 +285,7 @@ impl StateMachineTest for OutputPlanWritesAndDeletesAreDisjoint {
             "output plan writes and deletes should be disjoint; transition: {transition:?}"
         );
 
-        apply_plan(plan, &mut implementation_state.filesystem);
+        implementation_state.apply_plan(plan);
 
         implementation_state
     }
@@ -284,31 +309,6 @@ where
         let n = u.1.len();
         (Just(u), batch_sizes_strategy(n))
     })
-}
-
-fn assert_matches_stateless(incremental: &IncrementalCompiler, state: &State) {
-    let (expected_output, expected_compile_diagnostics, expected_process_diagnostics) =
-        process_stateless(state).expect("stateless reference must succeed");
-
-    assert_eq!(incremental.filesystem, expected_output);
-    assert_eq!(
-        normalize_compile_diagnostics(incremental.compiler.compile_diagnostics()),
-        normalize_compile_diagnostics(&expected_compile_diagnostics),
-    );
-    assert_eq!(
-        normalize_process_diagnostics(incremental.compiler.process_diagnostics()),
-        normalize_process_diagnostics(&expected_process_diagnostics),
-    );
-}
-
-fn apply_plan(plan: OutputPlan<RenderNode>, filesystem: &mut HashMap<String, RenderNode>) {
-    // TODO: Could test that inserts and removes are always disjoint in both the reference compiler and the incremental compiler
-    for (name, node) in plan.writes {
-        filesystem.insert(name, node);
-    }
-    for name in plan.deletes {
-        filesystem.remove(&name);
-    }
 }
 
 fn diagnostic_sort_key(d: &SourceDiagnostic) -> (u8, &ecow::EcoString, std::num::NonZeroU64) {
@@ -454,8 +454,8 @@ fn duplicate_identifier_after_compile_error_recovery_matches_stateless() {
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     let file2 = file_id(NonZeroU16::new(2).unwrap());
     reference.insert_file(
@@ -483,16 +483,16 @@ fn duplicate_identifier_after_compile_error_recovery_matches_stateless() {
         .compiler
         ._update(file2, reference.compile_file(file2));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     reference.files.get_mut(&file1).unwrap().errors.clear();
     incremental
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 }
 
 #[test]
@@ -526,8 +526,8 @@ fn duplicate_identifier_resolves_when_other_file_is_deleted() {
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     let file2 = file_id(NonZeroU16::new(2).unwrap());
     reference.insert_file(
@@ -555,14 +555,14 @@ fn duplicate_identifier_resolves_when_other_file_is_deleted() {
         .compiler
         ._update(file2, reference.compile_file(file2));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     reference.remove_file(file1);
     incremental.compiler.remove(file1);
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 }
 
 #[test]
@@ -596,8 +596,8 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     let file2 = file_id(NonZeroU16::new(2).unwrap());
     reference.insert_file(
@@ -625,8 +625,8 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
         .compiler
         ._update(file2, reference.compile_file(file2));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     reference
         .files
@@ -638,8 +638,8 @@ fn duplicate_identifier_resolves_when_other_file_regains_compile_error() {
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 }
 
 #[test]
@@ -674,8 +674,8 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
         .compiler
         ._update(file1, reference.compile_file(file1));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     let file2 = file_id(NonZeroU16::new(2).unwrap());
     reference.insert_file(file2, mock_file(MockNodeId(1)));
@@ -683,8 +683,8 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
         .compiler
         ._update(file2, reference.compile_file(file2));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 
     // file_3 also claims the identifier. The identifier was already
     // duplicated and stays duplicated — its canonical state did not
@@ -698,6 +698,6 @@ fn duplicate_identifier_third_file_gets_diagnostic() {
         .compiler
         ._update(file3, reference.compile_file(file3));
     let plan = incremental.compiler._process(&MockRenderer).unwrap();
-    apply_plan(plan, &mut incremental.filesystem);
-    assert_matches_stateless(&incremental, &reference);
+    incremental.apply_plan(plan);
+    incremental.assert_matches_stateless(&reference);
 }
