@@ -307,25 +307,23 @@ impl<T, U> Compiler<T, U> {
                 } else if is_singleton(node_id) {
                     let new_backmatter =
                         collect_backmatter(node_id, &links, &transclusions, backmatters);
-                    let should_backmatter_render = match backmatters.entry(node_id) {
+                    let is_backmatter_affected = match backmatters.entry(node_id) {
                         Entry::Occupied(mut entry) => {
-                            let old_backmatter = entry.get();
-                            let should_backmatter_render = old_backmatter != &new_backmatter
-                                || new_backmatter
-                                    .contexts
-                                    .iter()
-                                    .chain(new_backmatter.backlinks.iter())
-                                    .chain(new_backmatter.outlinks.iter())
-                                    .any(|id| dirty.contains(id) || removed.contains(id));
+                            let is_backmatter_affected = should_backmatter_render(
+                                entry.get(),
+                                &new_backmatter,
+                                &dirty,
+                                &removed,
+                            );
                             entry.insert(new_backmatter);
-                            should_backmatter_render
+                            is_backmatter_affected
                         }
                         Entry::Vacant(entry) => {
                             entry.insert(new_backmatter);
                             true
                         }
                     };
-                    if should_backmatter_render {
+                    if is_backmatter_affected {
                         backmatter_affected.insert(node_id);
                     }
 
@@ -353,12 +351,32 @@ impl<T, U> Compiler<T, U> {
             .map(|(id, _)| id)
             .copied();
         for node_id in isolated {
-            let body_affected = dirty.contains(&node_id)
+            let is_body_affected = dirty.contains(&node_id)
                 || links
                     .neighbors(node_id)
                     .any(|l| dirty.contains(&l) || removed.contains(&l));
 
             let new_backmatter = collect_backmatter(node_id, &links, &transclusions, backmatters);
+            let is_backmatter_affected = match backmatters.entry(node_id) {
+                Entry::Occupied(mut entry) => {
+                    let is_backmatter_affected =
+                        should_backmatter_render(entry.get(), &new_backmatter, &dirty, &removed);
+                    entry.insert(new_backmatter);
+                    is_backmatter_affected
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(new_backmatter);
+                    true
+                }
+            };
+
+            if is_body_affected || is_backmatter_affected {
+                render_plan.push(RenderItem {
+                    node_id,
+                    needs_body: is_body_affected,
+                    needs_backmatter: is_backmatter_affected,
+                });
+            }
         }
 
         todo!()
@@ -648,6 +666,21 @@ fn collect_backmatter(
         backlinks,
         outlinks,
     }
+}
+
+fn should_backmatter_render(
+    old: &Backmatter,
+    new: &Backmatter,
+    dirty: &HashSet<NodeId>,
+    removed: &HashSet<NodeId>,
+) -> bool {
+    old != new
+        || new
+            .contexts
+            .iter()
+            .chain(new.backlinks.iter())
+            .chain(new.outlinks.iter())
+            .any(|id| dirty.contains(id) || removed.contains(id))
 }
 
 fn body_input<'a, B>(
