@@ -243,7 +243,6 @@ impl<T, U> Compiler<T, U> {
         let mut body_affected = HashSet::new();
         let mut backmatter_affected = HashSet::new();
         let mut unrenderable = HashSet::new();
-        let mut outputs = HashSet::new();
         let mut render_plan = Vec::new();
 
         let sccs = tarjan_scc(&transclusions);
@@ -331,7 +330,6 @@ impl<T, U> Compiler<T, U> {
                     let is_backmatter_affected = backmatter_affected.contains(&node_id);
 
                     if is_body_affected || is_backmatter_affected {
-                        outputs.insert(node_id);
                         render_plan.push(RenderItem {
                             node_id,
                             needs_body: is_body_affected,
@@ -371,7 +369,6 @@ impl<T, U> Compiler<T, U> {
             };
 
             if is_body_affected || is_backmatter_affected {
-                outputs.insert(node_id);
                 render_plan.push(RenderItem {
                     node_id,
                     needs_body: is_body_affected,
@@ -380,10 +377,21 @@ impl<T, U> Compiler<T, U> {
             }
         }
 
-        let deletes: HashSet<String> = previous_outputs
-            .difference(&outputs)
-            .map(|node_id| interner.name(*node_id).to_owned())
+        let outputs: HashSet<NodeId> = nodes
+            .iter()
+            .filter(|(id, entries)| entries.len() == 1 && !unrenderable.contains(id))
+            .map(|(id, _)| id)
+            .copied()
             .collect();
+        let mut deletes: HashSet<String> = HashSet::new();
+
+        for node_id in previous_outputs.difference(&outputs) {
+            deletes.insert(interner.name(*node_id).to_owned());
+
+            self.rendered_bodies.remove(node_id);
+            self.rendered_backmatters.remove(node_id);
+            self.backmatters.remove(node_id);
+        }
 
         self.outputs = outputs;
 
