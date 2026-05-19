@@ -1,15 +1,29 @@
 # Weibian: A Note System Powered by Typst
 
-Weibian[^1] is a software for taking scientific notes in the spirit of [Forester](https://www.forester-notes.org/index/index.xml), using [Typst](https://typst.app/) as the markup language. It compiles Typst notes to HTML, then post-processes the HTML to resolve transclusion, internal links, and backmatter (backlinks/contexts/references/related notes).
+Weibian[^1] is software for taking scientific notes in the spirit of [Forester](https://www.forester-notes.org/index/index.xml), using [Typst](https://typst.app/) as the markup language. It compiles Typst notes to HTML, then post-processes the HTML to resolve transclusion, internal links, and backmatter (backlinks/contexts/references/related notes).
 
 There is a [demo site](https://hanwenguo.github.io/weibian/) showcasing Weibian's features, built with Weibian itself as a live example.
 
 ## Requirements
 
-- Typst CLI available on your PATH (`typst`)
-- Rust toolchain only if building from source
+- Rust toolchain if building from source
 
 ## Installation
+
+### Nix
+
+Run without installing:
+
+```bash
+nix run github:broughjt/weibian
+```
+
+Or add to a NixOS/home-manager configuration:
+
+```nix
+inputs.weibian.url = "github:broughjt/weibian";
+# then reference inputs.weibian.packages.${system}.default
+```
 
 ### Install from source (local checkout)
 
@@ -20,7 +34,7 @@ cargo install --path .
 ### Install from Git
 
 ```bash
-cargo install --locked --git https://github.com/hanwenguo/weibian.git
+cargo install --locked --git https://github.com/broughjt/weibian.git
 ```
 
 Note that the binary will be named `wb`.
@@ -30,7 +44,7 @@ Note that the binary will be named `wb`.
 If a release is available for your platform, download it from:
 
 ```text
-https://github.com/hanwenguo/weibian/releases
+https://github.com/broughjt/weibian/releases
 ```
 
 Place the binary on your PATH.
@@ -40,13 +54,13 @@ Place the binary on your PATH.
 Using the installed binary:
 
 ```bash
-wb compile
+wb build
 ```
 
 By default, Weibian reads Typst sources from `typ/`, compiles HTML in-memory, copies assets from `public/`, and outputs the final site to `dist/`. Override paths if needed:
 
 ```bash
-wb compile \
+wb build \
   --input typ \
   --public-dir public \
   --output dist
@@ -61,20 +75,15 @@ wb compile \
 - TOC generation
 - PDF export of individual notes
 - Include/exclude notes based on glob patterns
+- Watch mode for incremental rebuilds (`wb watch`)
 
 ## Planned
 
 - Customizable post-processing hooks
 - Datalog-based querying of notes
 - Generalized backmatter
-
-After the above features are implemented, Weibian will be feature-comparable to Forester. There are also some other nice-to-have features:
-
-- Watch mode
 - More templating support
 - Parallel processing of notes
-
-These will be on the roadmap for version 2.0.
 
 ## Differences from Similar Projects
 
